@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.hypothesis/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+*.bak
+
+# IDE/editor
+.idea/
+.history/
+.DS_Store
+Thumbs.db
+.vs/
+
+# Archives / releases
+*.zip
+*.tar
+*.tar.gz
+
+# Blender related
+*.blend1
+*.blend2
+*.blend@
+*.blend
+*.blend~
+
+# Local tool state
+.cache/

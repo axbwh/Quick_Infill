@@ -1,0 +1,7 @@
+# Core dependency for this project
+# Note: meshlib provides mrmeshpy / mrviewerpy / mrcudapy modules used in heal_cavity.py
+meshlib>=2.2.2
+
+# Optional developer tooling
+ruff>=0.5.0
+mypy>=1.10.0

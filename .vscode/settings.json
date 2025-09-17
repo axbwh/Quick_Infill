@@ -1,0 +1,13 @@
+{
+    "python.defaultInterpreterPath": ".venv/Scripts/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.inlayHints.functionReturnTypes": true,
+    "python.analysis.autoImportCompletions": true,
+    "editor.formatOnSave": true,
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/.mypy_cache": true,
+        "**/.ruff_cache": true
+    }
+}

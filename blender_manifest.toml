@@ -1,9 +1,9 @@
-﻿schema_version = "1.0.0"
+schema_version = "1.0.0"
 
 id = "quick_infill"
 version = "1.0.0"
-name = "Quick_infill"
-tagline = "This fixes resin trapping cavities"
+name = "Quick Infill"
+tagline = "Fixes resin trapping cavities"
 maintainer = "Alex Bannwarth"
 type = "add-on"
 
@@ -12,11 +12,12 @@ blender_version_min = "4.5.0"
 license = ["SPDX:GPL-2.0-or-later"]
 
 wheels = [
-  "./wheels/meshlib-3.0.7.226-py38.py39.py310.py311.py312.py313-none-win_amd64.whl",
-  "./wheels/numpy-2.3.3-cp311-cp311-win_amd64.whl"
+    "./wheels/meshlib-3.0.7.226-py38.py39.py310.py311.py312.py313-none-win_amd64.whl",
+    "./wheels/numpy-2.3.3-cp311-cp311-win_amd64.whl"
 ]
 
 copyright = [
-  "2025 Alex Bannwarth",
-  "2025 Printable Scenery",
+    "2025 Alex Bannwarth",
+    "2025 Printable Scenery"
 ]
+

@@ -25,7 +25,7 @@ class QuickInfillSettings(PropertyGroup):
         description="+grow / -shrink distance",
         default=2.0,
         min=0.1,
-        max=3.0,
+        max=2.0,
         precision=3,
         update=reset_preset,
     )
@@ -34,17 +34,17 @@ class QuickInfillSettings(PropertyGroup):
         description="Multiplier for shrink distance",
         default=1.0,
         min=0.1,
-        max=2.0,
+        max=3.0,
         step=0.1,
         subtype='FACTOR',
         update=reset_preset,
     )
-    target_voxels: FloatProperty(  # type: ignore
-        name="Voxels (M)",
-        description="Target voxel count in millions",
-        default=2.0,
+    target_res: FloatProperty(  # type: ignore
+        name="Working Resolution (M)",
+        description="Working resolution in millions - drives voxel count and decimation limit (~1M vertices)",
+        default=1.0,
         min=0.2,
-        max=2.0,
+        max=3.0,
         update=reset_preset,
     )
     voxel_mode: EnumProperty( 
@@ -120,12 +120,12 @@ class QUICKINFILL_OT_preset_building_fast(Operator):
     def execute(self, context):
         settings = context.scene.quick_infill_settings
         settings.voxel_mode = "TARGET_VOXELS"
-        settings.target_voxels = 1.0
+        settings.target_res = 0.5
         settings.resolution = 0.1
         settings.grow = 0.75
         settings.shrink_mult = 2.0
         settings.method = "NAIVE"
-        settings.trim_thin = False
+        settings.trim_thin = True
         settings.active_preset = "BUILDING_FAST"
         return {'FINISHED'}
 
@@ -138,7 +138,7 @@ class QUICKINFILL_OT_preset_building_accurate(Operator):
     def execute(self, context):
         settings = context.scene.quick_infill_settings
         settings.voxel_mode = "TARGET_VOXELS"
-        settings.target_voxels = 2.0
+        settings.target_res = 1.0
         settings.resolution = 0.1
         settings.grow = 2.0
         settings.shrink_mult = 1.0
@@ -156,6 +156,7 @@ class QUICKINFILL_OT_preset_mini_large_holes(Operator):
     def execute(self, context):
         settings = context.scene.quick_infill_settings
         settings.voxel_mode = "RESOLUTION"
+        settings.target_res = 1.0
         settings.resolution = 0.1
         settings.grow = 1.0
         settings.shrink_mult = 1.5
@@ -173,8 +174,9 @@ class QUICKINFILL_OT_preset_mini_accurate(Operator):
     def execute(self, context):
         settings = context.scene.quick_infill_settings
         settings.voxel_mode = "RESOLUTION"
+        settings.target_res = 2.0
         settings.resolution = 0.075
-        settings.grow = 0.3
+        settings.grow = 0.35
         settings.shrink_mult = 1.2
         settings.method = "ACCURATE"
         settings.trim_thin = True
@@ -269,13 +271,14 @@ class QUICKINFILL_PT_sidebar(Panel):
             method_split.label(text="Method")
             method_split.prop(settings, "method", text="")
             
+            # Target Resolution (shown in both modes)
+            prop_with_suffix(settings_col, settings, "target_res", "Working Res", "M")
+            
             # Show mode-specific settings
             mode = getattr(settings, 'voxel_mode', 'TARGET_VOXELS')
             
             if mode == 'RESOLUTION':
                 prop_with_suffix(settings_col, settings, "resolution", "Resolution", "mm")
-            elif mode == 'TARGET_VOXELS':
-                prop_with_suffix(settings_col, settings, "target_voxels", "Voxels", "M")
 
             prop_with_suffix(settings_col, settings, "grow", "Grow", "mm")
             settings_col.prop(settings, "shrink_mult")

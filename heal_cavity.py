@@ -28,8 +28,10 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                     return float(d)
 
             # New UI uses millions input (0.5 - 2.0). Convert to absolute count.
-            tvm = getattr(s, 'target_voxels', 2.0)
-            target_voxels_val = int(float(tvm) * 1_000_000)
+            # target_res drives both voxel count and decimation limit (~1M vertices)
+            target_res_millions = getattr(s, 'target_res', 2.0)
+            target_voxels_val = int(float(target_res_millions) * 1_000_000)
+            max_vertices_limit = int(float(target_res_millions) * 1_000_000)  # Use same limit for decimation
 
             resolution_val = _cf(getattr(s, 'resolution', 0.1), 0.1)
             voxel_mode = getattr(s, 'voxel_mode', 'TARGET_VOXELS')
@@ -50,6 +52,15 @@ class QUICKINFILL_OT_heal_cavity(Operator):
             src_mesh = blender_to_meshlib_via_stl(src_mesh_blender)
             INITIAL_VERTEX_COUNT = src_mesh.topology.numValidVerts()
             print(f"Initial vertex count: {INITIAL_VERTEX_COUNT}")
+            
+            # Decimate if mesh exceeds target resolution limit
+            if INITIAL_VERTEX_COUNT > max_vertices_limit:
+                from .offset_utils import decimate_mesh
+                reduction_ratio = max_vertices_limit / INITIAL_VERTEX_COUNT
+                src_mesh = decimate_mesh(src_mesh, reduction_ratio=reduction_ratio)
+                new_vertex_count = src_mesh.topology.numValidVerts()
+                print(f"Decimated mesh from {INITIAL_VERTEX_COUNT} to {new_vertex_count} vertices (target: {max_vertices_limit})")
+                self.report({'INFO'}, f"Decimated mesh: {INITIAL_VERTEX_COUNT} → {new_vertex_count} vertices")
 
             obj_name = src_mesh_blender.name
 
@@ -70,18 +81,28 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                 # Process mesh
                 grow_mesh = cuda_offset(src_mesh, vox, grow_val)
                 shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val)
-                shell_mesh = weighted_dist_shell(shrink_mesh, src_mesh, vox, shrink_mult_val)
+                shell_mesh = weighted_dist_shell(shrink_mesh, src_mesh, vox, shrink_mult_val, max_vertices=max_vertices_limit, target_resolution=int(target_res_millions * 1_000_000))
                 trim_mesh = mm.boolean(shrink_mesh, shell_mesh, mm.BooleanOperation.DifferenceAB).mesh
                 out_mesh = trim_mesh
 
-                # Apply trimThin if enabled
-                if trim_thin_val:
-                    ss_mesh_shrink = cuda_offset(out_mesh, vox, -vox)
-                    out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
+            # Apply trimThin if enabled
+            if trim_thin_val:
+                ss_mesh_shrink = cuda_offset(out_mesh, vox, -vox)
+                out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
             
-                infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
-
-                self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
+            # Decimate output mesh if it's higher resolution than initial mesh
+            final_vertex_count = out_mesh.topology.numValidVerts()
+            if final_vertex_count > INITIAL_VERTEX_COUNT:
+                from .offset_utils import decimate_mesh
+                target_vertices = INITIAL_VERTEX_COUNT
+                out_mesh = decimate_mesh(out_mesh, target_face_count=None, reduction_ratio=None, target_vertex_count=target_vertices)
+                new_final_count = out_mesh.topology.numValidVerts()
+                print(f"Decimated output mesh from {final_vertex_count} to {new_final_count} vertices (target: {target_vertices})")
+                self.report({'INFO'}, f"Decimated result: {final_vertex_count} → {new_final_count} vertices")
+        
+            infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
+            
+            self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
             return {'FINISHED'}
 
         except Exception as e:

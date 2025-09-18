@@ -26,11 +26,6 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                     return float(v)
                 except Exception:
                     return float(d)
-            def _ci(v, d):
-                try:
-                    return int(v)
-                except Exception:
-                    return int(d)
 
             # New UI uses millions input (0.5 - 2.0). Convert to absolute count.
             tvm = getattr(s, 'target_voxels', 2.0)
@@ -40,6 +35,8 @@ class QUICKINFILL_OT_heal_cavity(Operator):
             voxel_mode = getattr(s, 'voxel_mode', 'TARGET_VOXELS')
             grow_val = _cf(getattr(s, 'grow', 2.0), 2.0)
             shrink_mult_val = _cf(getattr(s, 'shrink_mult', 1.5), 1.5)
+            method = getattr(s, 'method', 'NAIVE')
+            trim_thin_val = getattr(s, 'trim_thin', False)
 
 
             # Get selected mesh
@@ -50,11 +47,7 @@ class QUICKINFILL_OT_heal_cavity(Operator):
 
             src_mesh_blender = selected_objs[0]
             # Convert to meshlib; fallback to STL route for very dense meshes
-            try:
-                src_mesh = blender_to_meshlib(src_mesh_blender)
-            except Exception as conv_err:
-                print(f"[Quick Infill] Direct conversion failed ({conv_err}); falling back to STL export/import.")
-                src_mesh = blender_to_meshlib_via_stl(src_mesh_blender)
+            src_mesh = blender_to_meshlib_via_stl(src_mesh_blender)
             INITIAL_VERTEX_COUNT = src_mesh.topology.numValidVerts()
             print(f"Initial vertex count: {INITIAL_VERTEX_COUNT}")
 
@@ -67,26 +60,28 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                 vox = compute_voxel_size(src_mesh, int(target_voxels_val), float(resolution_val))
             print(f"Voxel Size: {vox}")
 
-            # Use helpers from offset_utils
-            # Process mesh
-            grow_mesh = cuda_offset(src_mesh, vox, grow_val)
-            shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val)
-            shell_mesh = weighted_dist_shell(shrink_mesh, src_mesh, vox, shrink_mult_val)
-            trim_mesh = mm.boolean(shrink_mesh, shell_mesh, mm.BooleanOperation.DifferenceAB).mesh
+            if method == "NAIVE":
+                grow_mesh = cuda_offset(src_mesh, vox, grow_val)
+                shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val*shrink_mult_val)
+                # Smooth step: shrink then grow by one voxel to clean artifacts
+                out_mesh = shrink_mesh
+            else:
+                # Use helpers from offset_utils
+                # Process mesh
+                grow_mesh = cuda_offset(src_mesh, vox, grow_val)
+                shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val)
+                shell_mesh = weighted_dist_shell(shrink_mesh, src_mesh, vox, shrink_mult_val)
+                trim_mesh = mm.boolean(shrink_mesh, shell_mesh, mm.BooleanOperation.DifferenceAB).mesh
+                out_mesh = trim_mesh
 
-            # Smooth step: shrink then grow by one voxel to clean artifacts
-            ss_mesh_shrink = cuda_offset(trim_mesh, vox, -vox)
-            ss_mesh_grow = cuda_offset(ss_mesh_shrink, vox, vox)
-
-            out_mesh = ss_mesh_grow
-            # Prefer direct creation; if needed, switch to STL-based import at 0.1 scale
-            try:
-                infill_obj = meshlib_to_blender(out_mesh, obj_name + "Infill")
-            except Exception as conv_back_err:
-                print(f"[Quick Infill] Direct back-conversion failed ({conv_back_err}); importing via STL.")
+                # Apply trimThin if enabled
+                if trim_thin_val:
+                    ss_mesh_shrink = cuda_offset(out_mesh, vox, -vox)
+                    out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
+            
                 infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
 
-            self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
+                self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
             return {'FINISHED'}
 
         except Exception as e:

@@ -11,12 +11,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-from . import ui
+from . import ui, heal_cavity
 
 
 def register():
+	# Register operator first so UI can reference it
+	heal_cavity.register()
 	ui.register()
 
 
 def unregister():
 	ui.unregister()
+	heal_cavity.unregister()

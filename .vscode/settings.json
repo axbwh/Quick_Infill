@@ -3,6 +3,13 @@
     "python.terminal.activateEnvironment": true,
     "python.analysis.inlayHints.functionReturnTypes": true,
     "python.analysis.autoImportCompletions": true,
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingImports": "none",
+        "reportMissingModuleSource": "none",
+        "reportInvalidTypeForm": "none",
+        "reportGeneralTypeIssues": "none"
+    },
+    "python.analysis.typeCheckingMode": "off",
     "editor.formatOnSave": true,
     "files.exclude": {
         "**/__pycache__": true,

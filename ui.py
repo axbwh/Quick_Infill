@@ -1,3 +1,4 @@
+from sqlite3 import Row
 import bpy
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import FloatProperty, IntProperty, PointerProperty, EnumProperty
@@ -8,38 +9,40 @@ class QuickInfillSettings(PropertyGroup):
         name="Resolution",
         description="Voxel size",
         default=0.1,
-        min=0.01,
-        max=1.0
+        min=0.05,
+        max=1.0,
+        precision=3,
     )
     grow: FloatProperty(  
         name="Grow",
         description="+grow / -shrink distance",
         default=2.0,
         min=0.1,
-        max=10.0
+        max=3.0,
+        precision=3,
     )
     shrink_mult: FloatProperty( 
         name="Shrink Multiplier",
         description="Multiplier for shrink distance",
-        default=1.5,
+        default=1.0,
         min=0.1,
-        max=5.0
+        max=2.0,
+        step=0.1,
+        subtype='FACTOR'
     )
     target_voxels: FloatProperty(  # type: ignore
-        name="Target Voxels (M)",
+        name="Voxels (M)",
         description="Target voxel count in millions",
         default=2.0,
         min=0.2,
         max=2.0,
-        step=1,
-        precision=2
     )
     voxel_mode: EnumProperty( 
         name="Voxel Mode",
         description="Choose how voxel size is set",
         items=[
-            ("RESOLUTION", "Use Resolution", "Use the Resolution value directly"),
-            ("TARGET_VOXELS", "Use Target Voxels", "Derive voxel size from target voxel count and clamp by Resolution"),
+            ("RESOLUTION", "Resolution", "Use the Resolution value directly"),
+            ("TARGET_VOXELS", "Target Voxels", "Derive voxel size from target voxel count and clamp by Resolution"),
         ],
         default="TARGET_VOXELS",
     )
@@ -74,35 +77,45 @@ class QUICKINFILL_PT_sidebar(Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
+        col.separator(factor=1.0)
+        # Heal Cavity Operator
+        ifRow = col.row(align=True)
+        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
+
+        col.separator(factor=1.0)
+        def prop_with_suffix(layout, data, attr, label="", suffix="mm"):
+            split = layout.split(factor=0.9, align=True)
+            col = split.column(align=True)
+            col.use_property_split = False
+            col.use_property_decorate = False
+            col.prop(data, attr, text=label)
+            split.label(text=suffix)
         
         # Scene Settings
         settings = getattr(context.scene, 'quick_infill_settings', None)
-        if not settings:
-            col.label(text="Quick Infill settings not available.")
-            col.label(text="Reload the add-on to initialize settings.")
-        else:
-            def _prop(name: str, text: str | None = None):
-                try:
-                    if text is None:
-                        col.prop(settings, name)
-                    else:
-                        col.prop(settings, name, text=text)
-                except Exception:
-                    col.label(text=f"{name} (unavailable)")
+        def _prop(name: str, text: str | None = None):
+            try:
+                if text is None:
+                    col.prop(settings, name)
+                else:
+                    col.prop(settings, name, text=text)
+            except Exception:
+                col.label(text=f"{name} (unavailable)")
 
-            _prop("resolution")
-            _prop("voxel_mode", text="Voxel Size Mode")
-            mode = getattr(settings, 'voxel_mode', 'TARGET_VOXELS')
-            if mode == 'TARGET_VOXELS':
-                _prop("target_voxels", text="Target Voxels (M)")
-            _prop("grow")
-            _prop("shrink_mult")
-
-        # Heal Cavity Operator
-        col.operator("quick_infill.heal_cavity", text="Heal Cavity")
+        _prop("voxel_mode", text="Voxel Size Mode")
         
-        # Separator
-        col.separator()
+        # Nested controls under voxel mode dropdown
+        mode = getattr(settings, 'voxel_mode', 'TARGET_VOXELS')
+        
+        # Create a nested box for the mode-specific controls
+        box = col.box()
+        if mode == 'RESOLUTION':
+            prop_with_suffix(box, settings, "resolution", "Resolution", "mm")
+        elif mode == 'TARGET_VOXELS':
+            box.prop(settings, "target_voxels", text="Voxels (M)")
+
+        prop_with_suffix(box, settings, "grow", "Grow", "mm")
+        _prop("shrink_mult")
         
         # Test CUDA button
         col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")

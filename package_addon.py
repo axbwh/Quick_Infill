@@ -7,7 +7,7 @@ import toml
 ADDON_NAME = "Quick_Infill"
 SCRIPT_NAME = "package_addon.py"
 OUTPUT_FOLDER = os.path.join(os.path.dirname(__file__), "releases")
-EXCLUDE = {"__pycache__", ".git", ".vscode", SCRIPT_NAME, "releases", ".gitignore", "README.md", "scripts"}
+EXCLUDE = {"__pycache__", ".git", ".vscode", SCRIPT_NAME, "releases", ".gitignore", ".gitattributes", ".gitkeep", "README.md", "scripts"}
 
 # Extract version from blender_manifest.toml
 def get_version():
@@ -55,12 +55,21 @@ def increment_version():
 
 def should_include(path):
     """Check if a file/directory should be included in the package."""
+    filename = os.path.basename(path)
+    
+    # Exclude specific files and directories
     for part in path.split(os.sep):
         if part in EXCLUDE:
             return False
+    
+    # Exclude any files starting with .git
+    if filename.startswith('.git'):
+        return False
+        
     # Exclude any .pyc files
     if path.endswith('.pyc'):
         return False
+        
     return True
 
 def create_package(increment_ver=False):

@@ -1,8 +1,6 @@
 import bpy
 from bpy.types import Operator
 from .offset_utils import cuda_offset, weighted_dist_shell, compute_voxel_size
-from meshlib import mrmeshpy as mm
-from meshlib import mrcudapy as mc
 from .blender_meshlib_utils import (
     blender_to_meshlib,
     blender_to_meshlib_via_stl,
@@ -18,6 +16,10 @@ class QUICKINFILL_OT_heal_cavity(Operator):
 
     def execute(self, context):
         try:
+            # Safe meshlib import
+            from .meshlib_utils import get_meshlib
+            mm, mc = get_meshlib()
+            
             # Read settings from Scene to avoid _PropertyDeferred
             s = getattr(context.scene, 'quick_infill_settings', None)
             # Coerce robustly with fallbacks

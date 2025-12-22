@@ -12,7 +12,7 @@ class QuickInfillToolsSettings(PropertyGroup):
         description="Offset distance for grow/shrink operations",
         default=0.3,
         min=0.0,
-        max=0.3,
+        max=4.0,
         precision=3,
     )
     
@@ -41,6 +41,16 @@ class QuickInfillToolsSettings(PropertyGroup):
         name="Show Tools",
         description="Expand/collapse offset tools panel",
         default=False,
+    )
+    
+    shrink_mult: FloatProperty(
+        name="Shrink Multiplier",
+        description="Multiplier for shrinkwrap shell thickness based on distance",
+        default=1.0,
+        min=0.1,
+        max=3.0,
+        step=0.1,
+        precision=2,
     )
 
 
@@ -101,6 +111,25 @@ def draw_offset_tools(layout, context):
         row = tools_col.row(align=True)
         row.operator("quick_infill.remesh", text="Remesh", icon='ALIASED')
         row.operator("quick_infill.trim_thin", text="Trim Thin", icon='MOD_WARP')
+        
+        tools_col.separator()
+        
+        # Shrink Multiplier slider for shrinkwrap
+        tools_col.prop(settings, "shrink_mult")
+        
+        # Shrinkwrap button (requires 2 meshes: one selected, one active)
+        row = tools_col.row(align=True)
+        # Check if we have valid selection: active mesh + another selected mesh
+        active_obj = context.active_object
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        has_valid_selection = (
+            active_obj is not None 
+            and active_obj.type == 'MESH' 
+            and len(selected_meshes) >= 2
+            and any(obj != active_obj for obj in selected_meshes)
+        )
+        row.enabled = has_valid_selection
+        row.operator("quick_infill.shrinkwrap", text="Shrinkwrap", icon='MOD_SHRINKWRAP')
 
 
 classes = (

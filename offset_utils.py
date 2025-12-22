@@ -34,6 +34,7 @@ def weighted_dist_shell(
 	Thicker where farther from reference, used to reduce occlusion when booleaned.
 	
 	Args:
+		shrink_mult: Multiplier for shell thickness based on distance
 		max_vertices: Maximum vertex count before decimation (default: 100M for safety)
 	
 	Automatically decimates mesh if too dense to prevent "vector too long" errors.

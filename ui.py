@@ -226,11 +226,6 @@ class QUICKINFILL_PT_sidebar(Panel):
         mini_acc_op = mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_preset == 'MINI_ACCURATE'))
         
         col.separator(factor=1.0)
-        # Heal Cavity Operator
-        ifRow = col.row(align=True)
-        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
-
-        col.separator(factor=1.0)
         def prop_with_suffix(layout, data, attr, label="", suffix="mm"):
             split = layout.split(factor=0.9, align=True)
             col = split.column(align=True)
@@ -285,8 +280,13 @@ class QUICKINFILL_PT_sidebar(Panel):
             settings_col.prop(settings, "shrink_mult")
             settings_col.prop(settings, "trim_thin")
         
-        # Test CUDA button
-        col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")
+        # Heal Cavity Operator - below settings
+        col.separator(factor=1.0)
+        ifRow = col.row(align=True)
+        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
+        
+        # Test CUDA button (commented out)
+        # col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")
 
 
 classes = (

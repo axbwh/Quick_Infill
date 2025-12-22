@@ -2,6 +2,7 @@ from sqlite3 import Row
 import bpy
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import FloatProperty, IntProperty, PointerProperty, EnumProperty, BoolProperty
+from . import tools_panel
 
 
 def reset_preset(self, context):
@@ -138,10 +139,10 @@ class QUICKINFILL_OT_preset_building_accurate(Operator):
     def execute(self, context):
         settings = context.scene.quick_infill_settings
         settings.voxel_mode = "TARGET_VOXELS"
-        settings.target_res = 1.0
+        settings.target_res = 3.0
         settings.resolution = 0.1
-        settings.grow = 2.0
-        settings.shrink_mult = 1.0
+        settings.grow = 1.0
+        settings.shrink_mult = 1.2
         settings.method = "ACCURATE"
         settings.trim_thin = True
         settings.active_preset = "BUILDING_ACCURATE"
@@ -303,9 +304,11 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.quick_infill_settings = PointerProperty(type=QuickInfillSettings)
+    tools_panel.register()
 
 
 def unregister():
+    tools_panel.unregister()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.quick_infill_settings

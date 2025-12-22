@@ -207,3 +207,40 @@ def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     bpy.context.scene.collection.objects.link(new_obj)
     
     return new_obj
+
+
+def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1):
+    """
+    Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
+    
+    Args:
+        blender_obj: Source Blender mesh object
+        operation_fn: Function that takes meshlib mesh and returns processed meshlib mesh
+        output_suffix: Suffix for the output object name (e.g., "_Grown")
+        auto_decimate: If True, decimate output to match initial vertex count
+        import_scale: Scale factor for STL import (default 0.1)
+    
+    Returns:
+        tuple: (output_blender_obj, initial_vertex_count, final_vertex_count)
+    """
+    from .offset_utils import decimate_mesh
+    
+    obj_name = blender_obj.name
+    
+    # Convert to meshlib
+    src_mesh = blender_to_meshlib_via_stl(blender_obj)
+    initial_vertex_count = src_mesh.topology.numValidVerts()
+    
+    # Apply the operation
+    out_mesh = operation_fn(src_mesh)
+    
+    # Auto decimate if enabled - match initial vertex count
+    final_vertex_count = out_mesh.topology.numValidVerts()
+    if auto_decimate and final_vertex_count > initial_vertex_count:
+        out_mesh = decimate_mesh(out_mesh, target_vertex_count=initial_vertex_count)
+        final_vertex_count = out_mesh.topology.numValidVerts()
+    
+    # Convert back to Blender
+    result_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + output_suffix, import_scale=import_scale)
+    
+    return result_obj, initial_vertex_count, final_vertex_count

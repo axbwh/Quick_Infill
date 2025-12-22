@@ -297,6 +297,9 @@ class QUICKINFILL_PT_sidebar(Panel):
             settings_col.prop(settings, "shrink_mult")
             settings_col.prop(settings, "trim_thin")
         
+        # Offset Tools section
+        tools_panel.draw_offset_tools(col, context)
+        
         # Test CUDA button (commented out)
         # col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")
 

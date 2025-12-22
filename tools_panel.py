@@ -30,6 +30,12 @@ class QuickInfillToolsSettings(PropertyGroup):
         description="Automatically decimate after operations",
         default=False,
     )
+    
+    replace_original: bpy.props.BoolProperty(
+        name="Replace Original",
+        description="Replace the original object with the result instead of creating a new object",
+        default=False,
+    )
 
 
 class QUICKINFILL_PT_tools(Panel):
@@ -56,6 +62,7 @@ class QUICKINFILL_PT_tools(Panel):
         
         # Auto Decimate checkbox at the top
         col.prop(settings, "auto_decimate", text="Auto Decimate")
+        col.prop(settings, "replace_original", text="Replace Original")
         
         col.separator()
         

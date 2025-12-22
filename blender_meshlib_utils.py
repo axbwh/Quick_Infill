@@ -209,7 +209,7 @@ def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     return new_obj
 
 
-def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1):
+def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False):
     """
     Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
     
@@ -219,6 +219,7 @@ def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decima
         output_suffix: Suffix for the output object name (e.g., "_Grown")
         auto_decimate: If True, decimate output to match initial vertex count
         import_scale: Scale factor for STL import (default 0.1)
+        replace_original: If True, replace the original object's mesh data instead of creating new object
     
     Returns:
         tuple: (output_blender_obj, initial_vertex_count, final_vertex_count)
@@ -243,4 +244,71 @@ def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decima
     # Convert back to Blender
     result_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + output_suffix, import_scale=import_scale)
     
+    # If replace_original is enabled, swap mesh data and delete the temp object
+    if replace_original:
+        result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
+    
     return result_obj, initial_vertex_count, final_vertex_count
+
+
+def replace_mesh_keep_transforms(original_obj, new_obj):
+    """
+    Replace the mesh data of original_obj with new_obj's mesh data,
+    keeping original_obj's transforms (location, rotation, scale) intact.
+    
+    The new mesh is transformed so it appears in the correct position
+    when using the original object's transforms.
+    
+    Args:
+        original_obj: The original Blender object to update
+        new_obj: The new object with the mesh data to use
+    
+    Returns:
+        The original object (now with new mesh data)
+    """
+    import bpy
+    import bmesh
+    
+    # Get the transformation matrices
+    # new_obj is at origin with some scale (e.g., 0.1 from STL import)
+    # original_obj has its own transforms
+    # We need to transform new_obj's mesh so it appears correct with original_obj's transforms
+    
+    # The mesh vertices in new_obj are in new_obj's local space
+    # When we assign them to original_obj, they'll be interpreted in original_obj's local space
+    # So we need: new_world_position = original_world_position
+    # new_obj.matrix_world @ new_local = original_obj.matrix_world @ original_local
+    # original_local = original_obj.matrix_world.inverted() @ new_obj.matrix_world @ new_local
+    
+    transform_matrix = original_obj.matrix_world.inverted() @ new_obj.matrix_world
+    
+    # Apply the transformation to the new mesh vertices
+    new_mesh = new_obj.data
+    bm = bmesh.new()
+    bm.from_mesh(new_mesh)
+    bmesh.ops.transform(bm, matrix=transform_matrix, verts=bm.verts)
+    bm.to_mesh(new_mesh)
+    bm.free()
+    new_mesh.update()
+    
+    # Store reference to old mesh data for cleanup
+    old_mesh = original_obj.data
+    
+    # Assign the new mesh data to the original object
+    original_obj.data = new_mesh
+    
+    # Give the mesh a proper name
+    original_obj.data.name = original_obj.name
+    
+    # Remove the temporary imported object (but not its mesh data, which is now in use)
+    bpy.data.objects.remove(new_obj, do_unlink=True)
+    
+    # Clean up old mesh data if it has no users
+    if old_mesh.users == 0:
+        bpy.data.meshes.remove(old_mesh)
+    
+    # Reselect the original object and make it active
+    original_obj.select_set(True)
+    bpy.context.view_layer.objects.active = original_obj
+    
+    return original_obj

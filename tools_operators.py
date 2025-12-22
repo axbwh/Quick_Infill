@@ -21,6 +21,7 @@ class QUICKINFILL_OT_grow(Operator):
             distance = float(settings.distance)
             resolution = float(settings.resolution)
             auto_decimate = settings.auto_decimate
+            replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
             if not selected_objs:
@@ -34,11 +35,14 @@ class QUICKINFILL_OT_grow(Operator):
                 return cuda_offset(mesh, resolution, distance)
             
             result_obj, initial_verts, final_verts = process_mesh_operation(
-                src_obj, grow_op, "_Grown", auto_decimate=auto_decimate
+                src_obj, grow_op, "_Grown", auto_decimate=auto_decimate, replace_original=replace_original
             )
             
             print(f"[Quick Infill] Grow: {initial_verts} → {final_verts} vertices, offset +{distance}mm")
-            self.report({'INFO'}, f"Grow completed. Created '{result_obj.name}'")
+            if replace_original:
+                self.report({'INFO'}, f"Grow completed. Updated '{result_obj.name}'")
+            else:
+                self.report({'INFO'}, f"Grow completed. Created '{result_obj.name}'")
             return {'FINISHED'}
 
         except Exception as e:
@@ -59,6 +63,7 @@ class QUICKINFILL_OT_shrink(Operator):
             distance = float(settings.distance)
             resolution = float(settings.resolution)
             auto_decimate = settings.auto_decimate
+            replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
             if not selected_objs:
@@ -72,11 +77,14 @@ class QUICKINFILL_OT_shrink(Operator):
                 return cuda_offset(mesh, resolution, -distance)
             
             result_obj, initial_verts, final_verts = process_mesh_operation(
-                src_obj, shrink_op, "_Shrunk", auto_decimate=auto_decimate
+                src_obj, shrink_op, "_Shrunk", auto_decimate=auto_decimate, replace_original=replace_original
             )
             
             print(f"[Quick Infill] Shrink: {initial_verts} → {final_verts} vertices, offset -{distance}mm")
-            self.report({'INFO'}, f"Shrink completed. Created '{result_obj.name}'")
+            if replace_original:
+                self.report({'INFO'}, f"Shrink completed. Updated '{result_obj.name}'")
+            else:
+                self.report({'INFO'}, f"Shrink completed. Created '{result_obj.name}'")
             return {'FINISHED'}
 
         except Exception as e:
@@ -96,6 +104,7 @@ class QUICKINFILL_OT_remesh(Operator):
             settings = context.scene.quick_infill_tools_settings
             resolution = float(settings.resolution)
             auto_decimate = settings.auto_decimate
+            replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
             if not selected_objs:
@@ -109,11 +118,14 @@ class QUICKINFILL_OT_remesh(Operator):
                 return cuda_offset(mesh, resolution, 0.0)
             
             result_obj, initial_verts, final_verts = process_mesh_operation(
-                src_obj, remesh_op, "_Remeshed", auto_decimate=auto_decimate
+                src_obj, remesh_op, "_Remeshed", auto_decimate=auto_decimate, replace_original=replace_original
             )
             
             print(f"[Quick Infill] Remesh: {initial_verts} → {final_verts} vertices at {resolution}mm")
-            self.report({'INFO'}, f"Remesh completed. Created '{result_obj.name}'")
+            if replace_original:
+                self.report({'INFO'}, f"Remesh completed. Updated '{result_obj.name}'")
+            else:
+                self.report({'INFO'}, f"Remesh completed. Created '{result_obj.name}'")
             return {'FINISHED'}
 
         except Exception as e:
@@ -133,6 +145,7 @@ class QUICKINFILL_OT_trim_thin(Operator):
             settings = context.scene.quick_infill_tools_settings
             resolution = float(settings.resolution)
             auto_decimate = settings.auto_decimate
+            replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
             if not selected_objs:
@@ -147,11 +160,14 @@ class QUICKINFILL_OT_trim_thin(Operator):
                 return cuda_offset(shrunk, resolution, resolution)
             
             result_obj, initial_verts, final_verts = process_mesh_operation(
-                src_obj, trim_thin_op, "_TrimThin", auto_decimate=auto_decimate
+                src_obj, trim_thin_op, "_TrimThin", auto_decimate=auto_decimate, replace_original=replace_original
             )
             
             print(f"[Quick Infill] Trim Thin: {initial_verts} → {final_verts} vertices at {resolution}mm")
-            self.report({'INFO'}, f"Trim Thin completed. Created '{result_obj.name}'")
+            if replace_original:
+                self.report({'INFO'}, f"Trim Thin completed. Updated '{result_obj.name}'")
+            else:
+                self.report({'INFO'}, f"Trim Thin completed. Created '{result_obj.name}'")
             return {'FINISHED'}
 
         except Exception as e:

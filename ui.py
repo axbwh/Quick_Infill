@@ -63,6 +63,11 @@ class QuickInfillSettings(PropertyGroup):
         description="Expand/collapse settings panel",
         default=True,
     )
+    show_presets: BoolProperty(
+        name="Show Presets",
+        description="Expand/collapse presets panel",
+        default=True,
+    )
     # Preset tracking
     active_preset: EnumProperty(
         name="Active Preset",
@@ -199,33 +204,45 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Scene Settings
         settings = getattr(context.scene, 'quick_infill_settings', None)
         
-        # Presets section
-        presets_box = col.box()
-        presets_col = presets_box.column(align=True)
-        presets_col.label(text="Presets")
-        
-        # Building row
-        building_row = presets_col.row(align=True)
-        building_row.label(text="Building:")
-        
-        # Fast button - highlight if active
-        active_preset = getattr(settings, 'active_preset', 'NONE')
-        fast_op = building_row.operator("quick_infill.preset_building_fast", text="Fast", depress=(active_preset == 'BUILDING_FAST'))
-        
-        # Accurate button - highlight if active  
-        accurate_op = building_row.operator("quick_infill.preset_building_accurate", text="Accurate", depress=(active_preset == 'BUILDING_ACCURATE'))
-        
-        # Mini row
-        mini_row = presets_col.row(align=True)
-        mini_row.label(text="Mini:")
-        
-        # Large Holes button - highlight if active
-        holes_op = mini_row.operator("quick_infill.preset_mini_large_holes", text="Large Holes", depress=(active_preset == 'MINI_LARGE_HOLES'))
-        
-        # Mini Accurate button - highlight if active
-        mini_acc_op = mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_preset == 'MINI_ACCURATE'))
+        # Create Cavity Infill button at top
+        ifRow = col.row(align=True)
+        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
         
         col.separator(factor=1.0)
+        
+        # Presets section (collapsible)
+        presets_box = col.box()
+        presets_header = presets_box.row()
+        
+        # Collapsible header with arrow icon
+        show_presets = getattr(settings, 'show_presets', True)
+        icon = 'DOWNARROW_HLT' if show_presets else 'RIGHTARROW'
+        presets_header.prop(settings, "show_presets", text="Presets", icon=icon, emboss=False)
+        
+        # Show presets when expanded
+        if show_presets:
+            presets_col = presets_box.column(align=True)
+            
+            # Building row
+            building_row = presets_col.row(align=True)
+            building_row.label(text="Building:")
+            
+            # Fast button - highlight if active
+            active_preset = getattr(settings, 'active_preset', 'NONE')
+            fast_op = building_row.operator("quick_infill.preset_building_fast", text="Fast", depress=(active_preset == 'BUILDING_FAST'))
+            
+            # Accurate button - highlight if active  
+            accurate_op = building_row.operator("quick_infill.preset_building_accurate", text="Accurate", depress=(active_preset == 'BUILDING_ACCURATE'))
+            
+            # Mini row
+            mini_row = presets_col.row(align=True)
+            mini_row.label(text="Mini:")
+            
+            # Large Holes button - highlight if active
+            holes_op = mini_row.operator("quick_infill.preset_mini_large_holes", text="Large Holes", depress=(active_preset == 'MINI_LARGE_HOLES'))
+            
+            # Mini Accurate button - highlight if active
+            mini_acc_op = mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_preset == 'MINI_ACCURATE'))
         def prop_with_suffix(layout, data, attr, label="", suffix="mm"):
             split = layout.split(factor=0.9, align=True)
             col = split.column(align=True)
@@ -279,11 +296,6 @@ class QUICKINFILL_PT_sidebar(Panel):
             prop_with_suffix(settings_col, settings, "grow", "Grow", "mm")
             settings_col.prop(settings, "shrink_mult")
             settings_col.prop(settings, "trim_thin")
-        
-        # Heal Cavity Operator - below settings
-        col.separator(factor=1.0)
-        ifRow = col.row(align=True)
-        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
         
         # Test CUDA button (commented out)
         # col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")

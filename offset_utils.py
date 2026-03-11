@@ -11,8 +11,8 @@ def cuda_offset(mesh, resolution: float, distance: float):
 	- resolution: voxel size used for offset grid
 	- distance: positive grows, negative shrinks
 	"""
-	from meshlib import mrmeshpy as mm
-	from meshlib import mrcudapy as mc
+	from .meshlib_utils import get_meshlib
+	mm, mc = get_meshlib()
 	
 	p = mm.GeneralOffsetParameters()
 	p.voxelSize = float(resolution)
@@ -39,7 +39,8 @@ def weighted_dist_shell(
 	
 	Automatically decimates mesh if too dense to prevent "vector too long" errors.
 	"""
-	from meshlib import mrmeshpy as mm
+	from .meshlib_utils import get_meshlib
+	mm, _ = get_meshlib()
 	
 	# Check if mesh is too dense for vector operations
 	# Use provided limit or fallback to conservative default
@@ -100,7 +101,8 @@ def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float
 	"""
 	Suggest voxel size from mesh and clamp by the minimum resolution provided.
 	"""
-	from meshlib import mrmeshpy as mm
+	from .meshlib_utils import get_meshlib
+	mm, _ = get_meshlib()
 	
 	suggested = mm.suggestVoxelSize(mm.MeshPart(mesh), float(target_voxels))
 	return max(float(suggested), float(min_resolution))
@@ -119,7 +121,8 @@ def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio
 	Returns:
 		Decimated mesh
 	"""
-	from meshlib import mrmeshpy as mm
+	from .meshlib_utils import get_meshlib
+	mm, _ = get_meshlib()
 	
 	if target_face_count is None and reduction_ratio is None and target_vertex_count is None:
 		reduction_ratio = 0.5  # Default to 50% reduction

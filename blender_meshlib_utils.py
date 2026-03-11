@@ -5,7 +5,8 @@ def blender_to_meshlib(blender_obj):
     """
     Convert a Blender mesh object to a meshlib Mesh using MeshBuilder.
     """
-    from meshlib import mrmeshpy as mm
+    from .meshlib_utils import get_meshlib
+    mm, _ = get_meshlib()
     
     if blender_obj.type != 'MESH':
         raise ValueError("Selected object is not a mesh.")
@@ -51,7 +52,8 @@ def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None):
     import os
     import tempfile
     import bpy
-    from meshlib import mrmeshpy as mm
+    from .meshlib_utils import get_meshlib
+    mm, _ = get_meshlib()
     # Do not rely on enabling addons; use available operators
 
     # Prepare temp filepath
@@ -110,7 +112,8 @@ def meshlib_to_blender_via_stl(meshlib_mesh, name: str = "Converted Mesh", impor
     import os
     import tempfile
     import bpy
-    from meshlib import mrmeshpy as mm
+    from .meshlib_utils import get_meshlib
+    mm, _ = get_meshlib()
     # Do not rely on enabling addons; use available operators
 
     tmp_dir = tempfile.gettempdir()
@@ -183,7 +186,8 @@ def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     Returns:
         bpy.types.Object: The new Blender mesh object.
     """
-    from meshlib import mrmeshpy as mm
+    from .meshlib_utils import get_meshlib
+    mm, _ = get_meshlib()
     
     # Extract vertices
     vertices = []

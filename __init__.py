@@ -43,8 +43,13 @@ def get_meshlib():
 		raise ImportError(f"Failed to import meshlib after wheel loading: {str(e)}")
 
 def register():
-	# Ensure wheels are loaded during registration
-	ensure_wheels_loaded()
+	# Try to load wheels, but don't crash if they fail
+	try:
+		ensure_wheels_loaded()
+	except ImportError as e:
+		print(f"[Quick Infill] Warning: {e}")
+		print("[Quick Infill] Addon loaded but meshlib operations will fail until wheels are available")
+		# Continue registration so users can see the panel and get error messages
 	
 	# Register operator first so UI can reference it
 	heal_cavity.register()

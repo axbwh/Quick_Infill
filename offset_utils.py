@@ -4,16 +4,16 @@ Reusable mesh offset utilities for Quick Infill.
 
 from typing import Optional
 
-from meshlib import mrmeshpy as mm
-from meshlib import mrcudapy as mc
 
-
-def cuda_offset(mesh: mm.Mesh, resolution: float, distance: float) -> mm.Mesh:
+def cuda_offset(mesh, resolution: float, distance: float):
 	"""
 	CUDA-based general offset on a mesh.
 	- resolution: voxel size used for offset grid
 	- distance: positive grows, negative shrinks
 	"""
+	from meshlib import mrmeshpy as mm
+	from meshlib import mrcudapy as mc
+	
 	p = mm.GeneralOffsetParameters()
 	p.voxelSize = float(resolution)
 	p.signDetectionMode = mm.SignDetectionMode.HoleWindingRule
@@ -22,13 +22,13 @@ def cuda_offset(mesh: mm.Mesh, resolution: float, distance: float) -> mm.Mesh:
 
 
 def weighted_dist_shell(
-	mesh_to_offset: mm.Mesh,
-	reference_mesh: mm.Mesh,
+	mesh_to_offset,
+	reference_mesh,
 	voxel_size: float,
 	shrink_mult: float,
 	max_vertices: Optional[int] = None,
 	target_resolution: Optional[float] = None,
-) -> mm.Mesh:
+):
 	"""
 	Creates a variable-width shell based on distance to reference_mesh.
 	Thicker where farther from reference, used to reduce occlusion when booleaned.
@@ -39,6 +39,8 @@ def weighted_dist_shell(
 	
 	Automatically decimates mesh if too dense to prevent "vector too long" errors.
 	"""
+	from meshlib import mrmeshpy as mm
+	
 	# Check if mesh is too dense for vector operations
 	# Use provided limit or fallback to conservative default
 	MAX_VERTICES = max_vertices if max_vertices is not None else 1_000_000
@@ -94,15 +96,17 @@ def weighted_dist_shell(
 	return mm.WeightedShell.meshShell(working_mesh, scalars, params)
 
 
-def compute_voxel_size(mesh: mm.Mesh, target_voxels: int, min_resolution: float) -> float:
+def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float:
 	"""
 	Suggest voxel size from mesh and clamp by the minimum resolution provided.
 	"""
+	from meshlib import mrmeshpy as mm
+	
 	suggested = mm.suggestVoxelSize(mm.MeshPart(mesh), float(target_voxels))
 	return max(float(suggested), float(min_resolution))
 
 
-def decimate_mesh(mesh: mm.Mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None, target_vertex_count: Optional[int] = None) -> mm.Mesh:
+def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None, target_vertex_count: Optional[int] = None):
 	"""
 	Decimate mesh to reduce face count using mrmeshpy decimation.
 	
@@ -115,6 +119,8 @@ def decimate_mesh(mesh: mm.Mesh, target_face_count: Optional[int] = None, reduct
 	Returns:
 		Decimated mesh
 	"""
+	from meshlib import mrmeshpy as mm
+	
 	if target_face_count is None and reduction_ratio is None and target_vertex_count is None:
 		reduction_ratio = 0.5  # Default to 50% reduction
 	

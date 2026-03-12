@@ -2,6 +2,7 @@ import bpy
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import FloatProperty, IntProperty, PointerProperty, EnumProperty, BoolProperty
 from . import tools_panel
+from . import support_tools
 
 
 def reset_preset(self, context):
@@ -299,6 +300,9 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Offset Tools section
         tools_panel.draw_offset_tools(col, context)
         
+        # Support Tools section
+        support_tools.draw_support_tools(col, context)
+        
         # Test CUDA button (commented out)
         # col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")
 
@@ -319,9 +323,11 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.quick_infill_settings = PointerProperty(type=QuickInfillSettings)
     tools_panel.register()
+    support_tools.register()
 
 
 def unregister():
+    support_tools.unregister()
     tools_panel.unregister()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

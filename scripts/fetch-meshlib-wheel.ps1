@@ -99,5 +99,6 @@ if ($manifest -notmatch "(?ms)^wheels\s*=\s*\[") {
     $manifest = $manifest -replace '(?ms)^wheels\s*=\s*\[[^\]]*\]', "wheels = [`r`n  '$relPath'`r`n]"
 }
 
-Set-Content -Path "blender_manifest.toml" -Value $manifest -Encoding UTF8
+# Write without BOM (TOML parsers reject BOM)
+[System.IO.File]::WriteAllText("blender_manifest.toml", $manifest, [System.Text.UTF8Encoding]::new($false))
 Write-Host "Updated blender_manifest.toml with wheels entry: $relPath"

@@ -5,7 +5,7 @@ Provides Grow, Shrink, Remesh, and Trim Thin operations.
 
 import bpy
 from bpy.types import Operator
-from .offset_utils import cuda_offset, weighted_dist_shell
+from .offset_utils import cuda_offset
 from .blender_meshlib_utils import process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl
 
 
@@ -176,94 +176,11 @@ class QUICKINFILL_OT_trim_thin(Operator):
             return {'CANCELLED'}
 
 
-class QUICKINFILL_OT_shrinkwrap(Operator):
-    bl_idname = "quick_infill.shrinkwrap"
-    bl_label = "Shrinkwrap"
-    bl_description = "Create a variable-width shell on selected mesh based on distance to active mesh. Select the mesh to offset, then Ctrl+select the reference mesh (active)"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        try:
-            settings = context.scene.quick_infill_tools_settings
-            resolution = float(settings.resolution)
-            shrink_mult = float(settings.shrink_mult)
-            auto_decimate = settings.auto_decimate
-            replace_original = settings.replace_original
-
-            # Get active object (reference mesh)
-            active_obj = context.active_object
-            if not active_obj or active_obj.type != 'MESH':
-                self.report({'ERROR'}, "Active object must be a mesh (reference mesh).")
-                return {'CANCELLED'}
-
-            # Get selected mesh that is NOT active (mesh to offset)
-            selected_objs = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj != active_obj]
-            if not selected_objs:
-                self.report({'ERROR'}, "Select a mesh to offset, then Ctrl+click to set a reference mesh as active.")
-                return {'CANCELLED'}
-
-            mesh_to_offset_obj = selected_objs[0]
-            reference_obj = active_obj
-
-            # Convert both meshes to meshlib
-            mesh_to_offset = blender_to_meshlib_via_stl(mesh_to_offset_obj)
-            reference_mesh = blender_to_meshlib_via_stl(reference_obj)
-            
-            initial_vertex_count = mesh_to_offset.topology.numValidVerts()
-
-            # Perform weighted distance shell operation
-            # shrink_mult controls shell thickness
-            shell_mesh = weighted_dist_shell(
-                mesh_to_offset=mesh_to_offset,
-                reference_mesh=reference_mesh,
-                voxel_size=resolution,
-                shrink_mult=shrink_mult,
-                max_vertices=3_000_000,
-            )
-            
-            # Boolean subtract the shell from the original mesh
-            from meshlib import mrmeshpy as mm
-            out_mesh = mm.boolean(mesh_to_offset, shell_mesh, mm.BooleanOperation.DifferenceAB).mesh
-            
-            final_vertex_count = out_mesh.topology.numValidVerts()
-            
-            # Auto decimate if enabled
-            if auto_decimate and final_vertex_count > initial_vertex_count:
-                from .offset_utils import decimate_mesh
-                out_mesh = decimate_mesh(out_mesh, target_vertex_count=initial_vertex_count)
-                final_vertex_count = out_mesh.topology.numValidVerts()
-
-            # Convert back to Blender
-            result_obj = meshlib_to_blender_via_stl(
-                out_mesh, 
-                mesh_to_offset_obj.name + "_Shrinkwrap", 
-                import_scale=0.1
-            )
-            
-            # If replace_original is enabled, swap mesh data
-            if replace_original:
-                from .blender_meshlib_utils import replace_mesh_keep_transforms
-                result_obj = replace_mesh_keep_transforms(mesh_to_offset_obj, result_obj)
-
-            print(f"[Quick Infill] Shrinkwrap: {initial_vertex_count} → {final_vertex_count} vertices")
-            if replace_original:
-                self.report({'INFO'}, f"Shrinkwrap completed. Updated '{result_obj.name}'")
-            else:
-                self.report({'INFO'}, f"Shrinkwrap completed. Created '{result_obj.name}'")
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Shrinkwrap failed: {e}")
-            print(f"[Quick Infill] Shrinkwrap error: {e}")
-            return {'CANCELLED'}
-
-
 classes = (
     QUICKINFILL_OT_grow,
     QUICKINFILL_OT_shrink,
     QUICKINFILL_OT_remesh,
     QUICKINFILL_OT_trim_thin,
-    QUICKINFILL_OT_shrinkwrap,
 )
 
 

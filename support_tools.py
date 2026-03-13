@@ -35,44 +35,44 @@ class QuickInfillSupportSettings(PropertyGroup):
     dir_x_pos: BoolProperty(
         name="+X",
         description="Include +X direction",
-        default=False,
+        default=True,
     )
     dir_x_neg: BoolProperty(
         name="-X",
         description="Include -X direction",
-        default=False,
+        default=True,
     )
     dir_y_pos: BoolProperty(
         name="+Y",
         description="Include +Y direction",
-        default=False,
+        default=True,
     )
     dir_y_neg: BoolProperty(
         name="-Y",
         description="Include -Y direction",
-        default=False,
+        default=True,
     )
     
     # Diagonal directions
     dir_xpos_ypos: BoolProperty(
         name="+X+Y",
         description="Include +X+Y diagonal direction",
-        default=False,
+        default=True,
     )
     dir_xpos_yneg: BoolProperty(
         name="+X-Y",
         description="Include +X-Y diagonal direction",
-        default=False,
+        default=True,
     )
     dir_xneg_ypos: BoolProperty(
         name="-X+Y",
         description="Include -X+Y diagonal direction",
-        default=False,
+        default=True,
     )
     dir_xneg_yneg: BoolProperty(
         name="-X-Y",
         description="Include -X-Y diagonal direction",
-        default=False,
+        default=True,
     )
     
     # Center Z direction (straight on, no tilt)

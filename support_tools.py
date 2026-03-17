@@ -359,10 +359,115 @@ def intersect_meshes(mesh_a, mesh_b, voxel_size):
     return mm.voxelBooleanIntersect(mesh_a, mesh_b, voxel_size)
 
 
+def fix_undercuts_single_mesh(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle):
+    """
+    Process undercut fixing for a single meshlib mesh.
+    
+    Args:
+        mesh: MeshLib mesh to process
+        directions: List of direction tuples for undercut fixing
+        angle: Undercut angle in degrees
+        voxel_size: Voxel size for fixing
+        shrink_amount: Amount to shrink top faces (0 = disabled)
+        shrink_angle: Angle threshold for shrinking
+    
+    Returns:
+        tuple: (processed_mesh, total_undercuts)
+    """
+    mm, _ = get_meshlib()
+    
+    total_undercuts = 0
+    only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
+    
+    if angle == 0 or only_z_direction:
+        # Pure Z-up mode (no horizontal tilt)
+        up_vector = mm.Vector3f(0, 0, 1)
+        mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
+        total_undercuts = undercut_count
+    else:
+        # Process each direction and voxel-intersect results
+        results = []
+        for horiz_dir in directions:
+            if horiz_dir == (0, 0, 1):
+                # Z direction = pure Z-up
+                mesh_copy = mm.copyMesh(mesh)
+                up_vector = mm.Vector3f(0, 0, 1)
+                result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
+                results.append(result_mesh)
+                total_undercuts += undercut_count
+                continue
+            
+            # Make a copy of the mesh for each direction
+            mesh_copy = mm.copyMesh(mesh)
+            up_vector = compute_up_vector(horiz_dir, angle)
+            result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
+            results.append(result_mesh)
+            total_undercuts += undercut_count
+        
+        # Voxel intersect all results together
+        if len(results) == 1:
+            mesh = results[0]
+        else:
+            mesh = results[0]
+            for i in range(1, len(results)):
+                mesh = intersect_meshes(mesh, results[i], voxel_size)
+    
+    return mesh, total_undercuts
+
+
+def fix_undercuts_from_view_single_mesh(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle, view_rotation):
+    """
+    Process undercut fixing from view for a single meshlib mesh.
+    
+    Args:
+        mesh: MeshLib mesh to process
+        directions: List of screen-space direction tuples
+        angle: Undercut angle in degrees
+        voxel_size: Voxel size for fixing
+        shrink_amount: Amount to shrink top faces (0 = disabled)
+        shrink_angle: Angle threshold for shrinking
+        view_rotation: Blender quaternion for camera rotation
+    
+    Returns:
+        tuple: (processed_mesh, total_undercuts)
+    """
+    mm, _ = get_meshlib()
+    
+    total_undercuts = 0
+    only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
+    
+    if only_z_direction or angle == 0:
+        # Pure camera direction (no tilt)
+        camera_forward = view_rotation @ mathutils.Vector((0, 0, 1))
+        camera_forward.normalize()
+        up_vector = mm.Vector3f(camera_forward.x, camera_forward.y, camera_forward.z)
+        mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
+        total_undercuts = undercut_count
+    else:
+        # Process each direction in view space and voxel-intersect results
+        results = []
+        for screen_dir in directions:
+            mesh_copy = mm.copyMesh(mesh)
+            up_vector = compute_view_space_up_vector(screen_dir, view_rotation, angle)
+            result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
+            results.append(result_mesh)
+            total_undercuts += undercut_count
+        
+        # Voxel intersect all results together
+        if len(results) == 1:
+            mesh = results[0]
+        else:
+            mesh = results[0]
+            for i in range(1, len(results)):
+                mesh = intersect_meshes(mesh, results[i], voxel_size)
+    
+    return mesh, total_undercuts
+
+
 class QUICKINFILL_OT_fix_undercuts(Operator):
     bl_idname = "quick_infill.fix_undercuts"
     bl_label = "Fix Undercuts"
-    bl_description = "Fix undercuts on the selected mesh for better printability"
+    bl_description = "Fix undercuts on selected mesh(es) for better printability. With multiple selections, processes each object individually"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -380,88 +485,71 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                 self.report({'ERROR'}, "No mesh selected.")
                 return {'CANCELLED'}
 
-            src_obj = selected_objs[0]
-            
             # Get selected directions
             directions = get_selected_directions(settings)
-            
             if not directions:
-                # Default to Z-up if no directions selected
-                directions = [(0, 0, 1)]  # Pure Z-up
-            
-            # Convert to meshlib
-            mesh = blender_to_meshlib_via_stl(src_obj)
-            initial_verts = mesh.topology.numValidVerts()
-            total_undercuts = 0
+                directions = [(0, 0, 1)]  # Default to Z-up
             
             # Get shrink settings if auto_shrink enabled
             shrink_amount = float(settings.shrink_amount) if auto_shrink else 0.0
             shrink_angle = float(settings.shrink_angle_threshold) if auto_shrink else 30.0
             
-            # Check for pure Z-up case: angle is 0, or only Z direction selected
-            only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
+            # Process all selected objects
+            results = []
+            total_obj_undercuts = 0
             
-            if angle == 0 or only_z_direction:
-                # Pure Z-up mode (no horizontal tilt)
-                up_vector = mm.Vector3f(0, 0, 1)
-                mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
-                total_undercuts = undercut_count
-            else:
-                # Process each direction and voxel-intersect results
-                results = []
-                for horiz_dir in directions:
-                    # Skip Z direction in multi-direction mode (it's handled separately if angle > 0)
-                    if horiz_dir == (0, 0, 1):
-                        # Z direction = pure Z-up, add to results
-                        mesh_copy = mm.copyMesh(mesh)
-                        up_vector = mm.Vector3f(0, 0, 1)
-                        print(f"[Quick Infill] Fixing undercuts for Z direction (pure Z-up)")
-                        result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
-                        results.append(result_mesh)
-                        total_undercuts += undercut_count
-                        continue
-                    
-                    # Make a copy of the mesh for each direction
-                    mesh_copy = mm.copyMesh(mesh)
-                    up_vector = compute_up_vector(horiz_dir, angle)
-                    print(f"[Quick Infill] Fixing undercuts for direction {horiz_dir} at {angle}° with up=({up_vector.x:.3f}, {up_vector.y:.3f}, {up_vector.z:.3f})")
-                    result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
-                    results.append(result_mesh)
-                    total_undercuts += undercut_count
+            for src_obj in selected_objs:
+                # Convert to meshlib
+                mesh = blender_to_meshlib_via_stl(src_obj)
+                initial_faces = mesh.topology.numValidFaces()
+                initial_verts = mesh.topology.numValidVerts()
                 
-                # Voxel intersect all results together
-                if len(results) == 1:
-                    mesh = results[0]
+                # Fix undercuts using the helper
+                mesh, undercut_count = fix_undercuts_single_mesh(
+                    mesh, directions, angle, voxel_size, shrink_amount, shrink_angle
+                )
+                total_obj_undercuts += undercut_count
+                
+                # Auto decimate if enabled - only when significant face growth occurred
+                if auto_decimate:
+                    from .offset_utils import decimate_mesh, should_auto_decimate_faces
+                    current_faces = mesh.topology.numValidFaces()
+                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
+                    if do_decimate:
+                        mesh = decimate_mesh(mesh, target_face_count=target_faces, resolution=voxel_size)
+                
+                final_verts = mesh.topology.numValidVerts()
+                
+                # Convert back to Blender
+                new_name = src_obj.name + "_NoUndercuts"
+                result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
+                
+                # Handle transforms
+                if replace_original:
+                    from .blender_meshlib_utils import replace_mesh_keep_transforms
+                    result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
+                
+                results.append((result_obj, initial_verts, final_verts, undercut_count))
+                print(f"[Quick Infill] Fix Undercuts ({src_obj.name}): {initial_verts} → {final_verts} vertices, {undercut_count} undercut faces")
+            
+            # Report results
+            obj_count = len(results)
+            dir_count = len(directions)
+            
+            if obj_count == 1:
+                result_obj, _, _, undercut_count = results[0]
+                if undercut_count == 0:
+                    self.report({'INFO'}, "No undercuts found on mesh.")
                 else:
-                    mesh = results[0]
-                    for i in range(1, len(results)):
-                        mesh = intersect_meshes(mesh, results[i], voxel_size)
-            
-            # Auto decimate if enabled
-            if auto_decimate:
-                from .offset_utils import decimate_mesh
-                current_verts = mesh.topology.numValidVerts()
-                if current_verts > initial_verts:
-                    mesh = decimate_mesh(mesh, target_vertex_count=initial_verts)
-            
-            final_verts = mesh.topology.numValidVerts()
-            
-            # Convert back to Blender
-            new_name = src_obj.name + "_NoUndercuts"
-            result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
-            
-            # Handle transforms
-            if replace_original:
-                from .blender_meshlib_utils import replace_mesh_keep_transforms
-                result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-            # Note: non-replace leaves object at origin with correct scale
-            
-            if total_undercuts == 0:
-                self.report({'INFO'}, "No undercuts found on mesh.")
+                    self.report({'INFO'}, f"Fixed undercuts from {dir_count} direction(s). Result: '{result_obj.name}'")
             else:
-                dir_count = len(directions)
-                print(f"[Quick Infill] Fix Undercuts: {initial_verts} → {final_verts} vertices, {dir_count} direction(s), {total_undercuts} total undercut faces")
-                self.report({'INFO'}, f"Fixed undercuts from {dir_count} direction(s). Result: '{result_obj.name}'")
+                if total_obj_undercuts == 0:
+                    self.report({'INFO'}, f"No undercuts found on {obj_count} meshes.")
+                else:
+                    if replace_original:
+                        self.report({'INFO'}, f"Fixed undercuts on {obj_count} objects from {dir_count} direction(s)")
+                    else:
+                        self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} direction(s)")
             
             return {'FINISHED'}
 
@@ -476,7 +564,7 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
 class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
     bl_idname = "quick_infill.fix_undercuts_from_view"
     bl_label = "From View"
-    bl_description = "Fix undercuts using the viewport direction, with direction grid mapped to screen space"
+    bl_description = "Fix undercuts using the viewport direction. With multiple selections, processes each object individually"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -509,74 +597,69 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
             
             # Get selected directions (in screen space)
             directions = get_selected_directions(settings)
-            
             if not directions:
-                # Default to pure camera direction if nothing selected
-                directions = [(0, 0, 1)]
-            
-            src_obj = selected_objs[0]
-            mesh = blender_to_meshlib_via_stl(src_obj)
-            initial_verts = mesh.topology.numValidVerts()
-            total_undercuts = 0
+                directions = [(0, 0, 1)]  # Default to pure camera direction
             
             # Get shrink settings if auto_shrink enabled
             shrink_amount = float(settings.shrink_amount) if auto_shrink else 0.0
             shrink_angle = float(settings.shrink_angle_threshold) if auto_shrink else 70.0
             
-            # Check if we only have Z direction or angle is 0
-            only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
+            # Process all selected objects
+            results = []
+            total_obj_undercuts = 0
             
-            if only_z_direction or angle == 0:
-                # Pure camera direction (no tilt)
-                camera_forward = view_rotation @ mathutils.Vector((0, 0, 1))
-                camera_forward.normalize()
-                up_vector = mm.Vector3f(camera_forward.x, camera_forward.y, camera_forward.z)
-                print(f"[Quick Infill] From View: pure camera direction = ({camera_forward.x:.3f}, {camera_forward.y:.3f}, {camera_forward.z:.3f})")
-                mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
-                total_undercuts = undercut_count
-            else:
-                # Process each direction in view space and voxel-intersect results
-                results = []
-                for screen_dir in directions:
-                    mesh_copy = mm.copyMesh(mesh)
-                    up_vector = compute_view_space_up_vector(screen_dir, view_rotation, angle)
-                    print(f"[Quick Infill] From View: screen dir {screen_dir} at {angle}° → up=({up_vector.x:.3f}, {up_vector.y:.3f}, {up_vector.z:.3f})")
-                    result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
-                    results.append(result_mesh)
-                    total_undercuts += undercut_count
+            for src_obj in selected_objs:
+                # Convert to meshlib
+                mesh = blender_to_meshlib_via_stl(src_obj)
+                initial_faces = mesh.topology.numValidFaces()
+                initial_verts = mesh.topology.numValidVerts()
                 
-                # Voxel intersect all results together
-                if len(results) == 1:
-                    mesh = results[0]
+                # Fix undercuts using the view-based helper
+                mesh, undercut_count = fix_undercuts_from_view_single_mesh(
+                    mesh, directions, angle, voxel_size, shrink_amount, shrink_angle, view_rotation
+                )
+                total_obj_undercuts += undercut_count
+                
+                # Auto decimate if enabled - only when significant face growth occurred
+                if auto_decimate:
+                    from .offset_utils import decimate_mesh, should_auto_decimate_faces
+                    current_faces = mesh.topology.numValidFaces()
+                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
+                    if do_decimate:
+                        mesh = decimate_mesh(mesh, target_face_count=target_faces, resolution=voxel_size)
+                
+                final_verts = mesh.topology.numValidVerts()
+                
+                # Convert back to Blender
+                new_name = src_obj.name + "_NoUndercuts"
+                result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
+                
+                # Handle transforms
+                if replace_original:
+                    from .blender_meshlib_utils import replace_mesh_keep_transforms
+                    result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
+                
+                results.append((result_obj, initial_verts, final_verts, undercut_count))
+                print(f"[Quick Infill] Fix Undercuts View ({src_obj.name}): {initial_verts} → {final_verts} vertices, {undercut_count} undercut faces")
+            
+            # Report results
+            obj_count = len(results)
+            dir_count = len(directions)
+            
+            if obj_count == 1:
+                result_obj, _, _, undercut_count = results[0]
+                if undercut_count == 0:
+                    self.report({'INFO'}, "No undercuts found from view direction.")
                 else:
-                    mesh = results[0]
-                    for i in range(1, len(results)):
-                        mesh = intersect_meshes(mesh, results[i], voxel_size)
-            
-            # Auto decimate if enabled
-            if auto_decimate:
-                from .offset_utils import decimate_mesh
-                current_verts = mesh.topology.numValidVerts()
-                if current_verts > initial_verts:
-                    mesh = decimate_mesh(mesh, target_vertex_count=initial_verts)
-            
-            final_verts = mesh.topology.numValidVerts()
-            
-            # Convert back to Blender
-            new_name = src_obj.name + "_NoUndercuts"
-            result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
-            
-            # Handle transforms
-            if replace_original:
-                from .blender_meshlib_utils import replace_mesh_keep_transforms
-                result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-            
-            if total_undercuts == 0:
-                self.report({'INFO'}, "No undercuts found from view direction.")
+                    self.report({'INFO'}, f"Fixed undercuts from {dir_count} view direction(s). Result: '{result_obj.name}'")
             else:
-                dir_count = len(directions)
-                print(f"[Quick Infill] Fix Undercuts (View): {initial_verts} → {final_verts} vertices, {dir_count} direction(s), {total_undercuts} total undercut faces")
-                self.report({'INFO'}, f"Fixed undercuts from {dir_count} view direction(s). Result: '{result_obj.name}'")
+                if total_obj_undercuts == 0:
+                    self.report({'INFO'}, f"No undercuts found on {obj_count} meshes.")
+                else:
+                    if replace_original:
+                        self.report({'INFO'}, f"Fixed undercuts on {obj_count} objects from {dir_count} view direction(s)")
+                    else:
+                        self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} view direction(s)")
             
             return {'FINISHED'}
 
@@ -667,6 +750,7 @@ class QUICKINFILL_OT_shrink_from_view(Operator):
     """Shrink top-facing faces based on the current viewport direction"""
     bl_idname = "quick_infill.shrink_from_view"
     bl_label = "Shrink from View"
+    bl_description = "Shrink top-facing faces on selected mesh(es) based on viewport direction. With multiple selections, processes each object individually"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -696,31 +780,45 @@ class QUICKINFILL_OT_shrink_from_view(Operator):
             # Get view direction - the direction pointing toward the viewer
             view_dir = region_3d.view_rotation @ mathutils.Vector((0, 0, 1))
             view_dir.normalize()
-            
             up_vector = mm.Vector3f(view_dir.x, view_dir.y, view_dir.z)
             
             print(f"[Quick Infill] Shrink from View: up direction = ({view_dir.x:.3f}, {view_dir.y:.3f}, {view_dir.z:.3f})")
 
-            src_obj = selected_objs[0]
-            mesh = blender_to_meshlib_via_stl(src_obj)
-            initial_verts = mesh.topology.numValidVerts()
+            # Process all selected objects
+            results = []
             
-            # Shrink top faces
-            mesh = shrink_top_faces_along_normals(mesh, up_vector, shrink_amount, shrink_angle)
+            for src_obj in selected_objs:
+                mesh = blender_to_meshlib_via_stl(src_obj)
+                initial_verts = mesh.topology.numValidVerts()
+                
+                # Shrink top faces
+                mesh = shrink_top_faces_along_normals(mesh, up_vector, shrink_amount, shrink_angle)
+                
+                final_verts = mesh.topology.numValidVerts()
+                
+                # Convert back to Blender
+                new_name = src_obj.name + "_Shrunk"
+                result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
+                
+                # Handle transforms
+                if replace_original:
+                    from .blender_meshlib_utils import replace_mesh_keep_transforms
+                    result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
+                
+                results.append((result_obj, initial_verts, final_verts))
+                print(f"[Quick Infill] Shrink from View ({src_obj.name}): {initial_verts} → {final_verts} vertices")
             
-            final_verts = mesh.topology.numValidVerts()
+            # Report results
+            obj_count = len(results)
             
-            # Convert back to Blender
-            new_name = src_obj.name + "_Shrunk"
-            result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
-            
-            # Handle transforms
-            if replace_original:
-                from .blender_meshlib_utils import replace_mesh_keep_transforms
-                result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-            
-            print(f"[Quick Infill] Shrink from View: {initial_verts} → {final_verts} vertices")
-            self.report({'INFO'}, f"Shrunk top faces from view. Result: '{result_obj.name}'")
+            if obj_count == 1:
+                result_obj, _, _ = results[0]
+                self.report({'INFO'}, f"Shrunk top faces from view. Result: '{result_obj.name}'")
+            else:
+                if replace_original:
+                    self.report({'INFO'}, f"Shrunk top faces on {obj_count} objects from view")
+                else:
+                    self.report({'INFO'}, f"Shrunk top faces, created {obj_count} new objects from view")
             
             return {'FINISHED'}
 

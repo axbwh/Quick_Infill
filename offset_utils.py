@@ -3,7 +3,30 @@ Reusable mesh offset utilities for Quick Infill.
 """
 
 from typing import Optional
+# Auto-decimate: decimate back to initial if mesh grew at all
+# This prevents both progressive detail loss AND progressive growth
 
+
+def should_auto_decimate_faces(initial_faces: int, final_faces: int) -> tuple:
+    """
+    Determine if auto-decimation should be applied and calculate target face count.
+    
+    Simple logic: if the mesh grew, decimate back to initial count.
+    This prevents progressive changes in either direction.
+    
+    Args:
+        initial_faces: Face count before the operation
+        final_faces: Face count after the operation
+    
+    Returns:
+        tuple: (should_decimate: bool, target_face_count: int)
+    """
+    if final_faces > initial_faces:
+        # Mesh grew - decimate back to initial
+        return True, initial_faces
+    
+    # Mesh stayed same or shrunk - no decimation needed
+    return False, final_faces
 
 def cuda_offset(mesh, resolution: float, distance: float):
 	"""
@@ -108,60 +131,65 @@ def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float
 	return max(float(suggested), float(min_resolution))
 
 
-def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None, target_vertex_count: Optional[int] = None):
+def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None, max_error: Optional[float] = None, resolution: Optional[float] = None):
 	"""
 	Decimate mesh to reduce face count using mrmeshpy decimation.
 	
 	Args:
 		mesh: Input mesh to decimate
-		target_face_count: Target number of faces (if specified, takes priority)
+		target_face_count: Target number of faces
 		reduction_ratio: Ratio of faces to keep (0.0-1.0, e.g., 0.5 = keep 50% of faces)
-		target_vertex_count: Target number of vertices (approximated via face reduction)
+		max_error: Maximum geometric deviation allowed (in mesh units). 
+		resolution: Voxel/remesh resolution - if provided, maxError defaults to 0.5 * resolution
 	
 	Returns:
-		Decimated mesh
+		Decimated mesh (modified in-place)
 	"""
 	from .meshlib_utils import get_meshlib
 	mm, _ = get_meshlib()
 	
-	if target_face_count is None and reduction_ratio is None and target_vertex_count is None:
+	current_faces = mesh.topology.numValidFaces()
+	
+	if target_face_count is None and reduction_ratio is None:
 		reduction_ratio = 0.5  # Default to 50% reduction
 	
 	settings = mm.DecimateSettings()
 	
+	# Calculate target face count
 	if target_face_count is not None:
-		# Use target face count - calculate how many faces to delete
-		current_faces = mesh.topology.numValidFaces()
-		faces_to_delete = max(0, current_faces - int(target_face_count))
-		settings.maxDeletedFaces = faces_to_delete
-	elif target_vertex_count is not None:
-		# Use target vertex count - estimate face reduction needed
-		# Rough approximation: vertex/face ratio is usually around 0.5-2.0
-		current_vertices = mesh.topology.numValidVerts()
-		if current_vertices > target_vertex_count:
-			vertex_ratio = float(target_vertex_count) / float(current_vertices)
-			# Use slightly more aggressive face reduction to ensure vertex target is met
-			face_ratio = vertex_ratio * 0.8  # Reduce faces more aggressively
-			current_faces = mesh.topology.numValidFaces()
-			faces_to_keep = max(1, int(current_faces * face_ratio))
-			faces_to_delete = max(0, current_faces - faces_to_keep)
-			settings.maxDeletedFaces = faces_to_delete
-		else:
-			# Already below target, no decimation needed
-			settings.maxDeletedFaces = 0
+		target = int(target_face_count)
 	elif reduction_ratio is not None:
-		# Use reduction ratio - calculate faces to delete
-		current_faces = mesh.topology.numValidFaces()
-		faces_to_keep = max(1, int(current_faces * float(reduction_ratio)))
-		faces_to_delete = max(0, current_faces - faces_to_keep)
-		settings.maxDeletedFaces = faces_to_delete
+		target = max(1, int(current_faces * float(reduction_ratio)))
+	else:
+		target = current_faces
+	
+	# MeshLib decimation uses maxDeletedFaces (limit on faces to delete)
+	# Calculate how many faces need to be deleted to reach target
+	faces_to_delete = max(0, current_faces - target)
+	settings.maxDeletedFaces = faces_to_delete
+	
+	# Set maxError to preserve detail - limits geometric deviation
+	# Note: MeshLib mesh is scaled 10x from Blender, so resolution must be scaled too
+	if max_error is not None:
+		settings.maxError = float(max_error)
+	elif resolution is not None:
+		# Resolution is in Blender units, scale to match MeshLib (10x)
+		# Allow error equal to voxel size since voxel ops already quantize to this
+		settings.maxError = float(resolution) * 10.0
+	else:
+		# Fallback: estimate from bounding box (0.5% of diagonal)
+		bbox = mesh.computeBoundingBox()
+		diagonal = (bbox.max - bbox.min).length()
+		settings.maxError = diagonal * 0.005
+	
+	# Use parallel processing for better performance
+	settings.packMesh = True
 	
 	# Apply decimation
 	result = mm.decimateMesh(mesh, settings)
 	
-	# DecimateResult contains info about the operation, mesh is modified in-place
-	print(f"[Quick Infill] Decimation: deleted {result.facesDeleted} faces, {result.vertsDeleted} vertices")
+	final_faces = mesh.topology.numValidFaces()
+	print(f"[Quick Infill] Decimation: {current_faces} → {final_faces} faces (maxError: {settings.maxError:.4f}, {result.vertsDeleted} verts removed)")
 	
-	# Return the modified mesh
 	return mesh
 

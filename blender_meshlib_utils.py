@@ -218,7 +218,7 @@ def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     return new_obj
 
 
-def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False):
+def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
     """
     Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
     
@@ -233,22 +233,26 @@ def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decima
     Returns:
         tuple: (output_blender_obj, initial_vertex_count, final_vertex_count)
     """
-    from .offset_utils import decimate_mesh
+    from .offset_utils import decimate_mesh, should_auto_decimate_faces
     
     obj_name = blender_obj.name
     
     # Convert to meshlib
     src_mesh = blender_to_meshlib_via_stl(blender_obj)
+    initial_face_count = src_mesh.topology.numValidFaces()
     initial_vertex_count = src_mesh.topology.numValidVerts()
     
     # Apply the operation
     out_mesh = operation_fn(src_mesh)
     
-    # Auto decimate if enabled - match initial vertex count
+    # Auto decimate if enabled - only when significant face growth occurred
+    final_face_count = out_mesh.topology.numValidFaces()
+    if auto_decimate:
+        do_decimate, target_faces = should_auto_decimate_faces(initial_face_count, final_face_count)
+        if do_decimate:
+            out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+    
     final_vertex_count = out_mesh.topology.numValidVerts()
-    if auto_decimate and final_vertex_count > initial_vertex_count:
-        out_mesh = decimate_mesh(out_mesh, target_vertex_count=initial_vertex_count)
-        final_vertex_count = out_mesh.topology.numValidVerts()
     
     # Convert back to Blender
     result_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + output_suffix, import_scale=import_scale)
@@ -321,3 +325,157 @@ def replace_mesh_keep_transforms(original_obj, new_obj):
     bpy.context.view_layer.objects.active = original_obj
     
     return original_obj
+
+
+def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
+    """
+    Optimized batch wrapper for mesh operations on multiple objects.
+    Processes each object individually but batches Blender I/O for efficiency.
+    
+    Args:
+        blender_objs: List of source Blender mesh objects
+        operation_fn: Function that takes meshlib mesh and returns processed meshlib mesh
+        output_suffix: Suffix for output object names (e.g., "_Grown")
+        auto_decimate: If True, decimate output to match initial vertex count per object
+        import_scale: Scale factor for STL import (default 0.1)
+        replace_original: If True, replace original objects' mesh data instead of creating new objects
+    
+    Returns:
+        list of tuples: [(output_blender_obj, initial_vertex_count, final_vertex_count), ...]
+    """
+    import os
+    import tempfile
+    from .meshlib_utils import get_meshlib
+    from .offset_utils import decimate_mesh
+    mm, _ = get_meshlib()
+    
+    if not blender_objs:
+        return []
+    
+    results = []
+    tmp_dir = tempfile.gettempdir()
+    
+    # Save current selection state once
+    view_layer = bpy.context.view_layer
+    prev_active = view_layer.objects.active
+    prev_selection = [obj for obj in bpy.context.selected_objects]
+    
+    try:
+        # Phase 1: Export all objects to STL files (batch export setup)
+        stl_paths = []
+        for obj in blender_objs:
+            fd, stl_path = tempfile.mkstemp(prefix=f"qi_batch_{obj.name}_", suffix=".stl", dir=tmp_dir)
+            os.close(fd)
+            stl_paths.append(stl_path)
+        
+        # Export each object (Blender requires individual selection for STL export)
+        meshlib_meshes = []
+        initial_face_counts = []
+        initial_vert_counts = []
+        
+        for i, obj in enumerate(blender_objs):
+            # Select only this object
+            for o in bpy.context.selected_objects:
+                o.select_set(False)
+            obj.select_set(True)
+            view_layer.objects.active = obj
+            
+            # Export to STL
+            bpy.ops.wm.stl_export(
+                'EXEC_DEFAULT',
+                filepath=stl_paths[i],
+                export_selected_objects=True,
+                use_batch=False,
+                global_scale=10.0,
+                apply_modifiers=True,
+            )
+            
+            # Load into meshlib
+            loaded = mm.loadMesh(stl_paths[i])
+            mesh = loaded.mesh if hasattr(loaded, 'mesh') else loaded
+            meshlib_meshes.append(mesh)
+            initial_face_counts.append(mesh.topology.numValidFaces())
+            initial_vert_counts.append(mesh.topology.numValidVerts())
+            
+            # Clean up input STL immediately
+            try:
+                os.remove(stl_paths[i])
+            except Exception:
+                pass
+        
+        # Phase 2: Process all meshes through the operation (pure meshlib, no Blender calls)
+        from .offset_utils import should_auto_decimate_faces
+        processed_meshes = []
+        for i, mesh in enumerate(meshlib_meshes):
+            out_mesh = operation_fn(mesh)
+            
+            # Auto decimate if enabled - only when significant face growth occurred
+            if auto_decimate:
+                final_faces = out_mesh.topology.numValidFaces()
+                do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
+                if do_decimate:
+                    out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+            
+            processed_meshes.append(out_mesh)
+        
+        # Phase 3: Export all processed meshes to STL and import back to Blender
+        output_stl_paths = []
+        for i, mesh in enumerate(processed_meshes):
+            fd, stl_path = tempfile.mkstemp(prefix=f"qi_out_{blender_objs[i].name}_", suffix=".stl", dir=tmp_dir)
+            os.close(fd)
+            output_stl_paths.append(stl_path)
+            
+            # Save meshlib mesh to STL
+            try:
+                mm.saveMesh(mesh, stl_path)
+            except Exception:
+                mm.saveMeshAs(mesh, stl_path)
+        
+        # Phase 4: Import all results back to Blender
+        result_objs = []
+        for i, stl_path in enumerate(output_stl_paths):
+            prev_objs = set(bpy.data.objects)
+            
+            # Import STL
+            if hasattr(bpy.ops.wm, "stl_import"):
+                bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+            else:
+                bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+            
+            # Find the newly imported object
+            new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
+            if not new_objs:
+                new_objs = list(bpy.context.selected_objects)
+            
+            if new_objs:
+                result_obj = new_objs[0]
+                result_obj.name = blender_objs[i].name + output_suffix
+                result_objs.append(result_obj)
+            
+            # Clean up output STL
+            try:
+                os.remove(stl_path)
+            except Exception:
+                pass
+        
+        # Phase 5: Handle replace_original and build final results
+        for i, result_obj in enumerate(result_objs):
+            original_obj = blender_objs[i]
+            final_verts = processed_meshes[i].topology.numValidVerts()
+            
+            if replace_original:
+                result_obj = replace_mesh_keep_transforms(original_obj, result_obj)
+            
+            results.append((result_obj, initial_vert_counts[i], final_verts))
+    
+    finally:
+        # Restore selection state
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in prev_selection:
+            if obj and obj.name in bpy.data.objects:
+                obj.select_set(True)
+        if prev_active and prev_active.name in bpy.data.objects:
+            view_layer.objects.active = prev_active
+    
+    return results

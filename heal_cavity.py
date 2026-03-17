@@ -53,7 +53,8 @@ class QUICKINFILL_OT_heal_cavity(Operator):
             # Convert to meshlib; fallback to STL route for very dense meshes
             src_mesh = blender_to_meshlib_via_stl(src_mesh_blender)
             INITIAL_VERTEX_COUNT = src_mesh.topology.numValidVerts()
-            print(f"Initial vertex count: {INITIAL_VERTEX_COUNT}")
+            INITIAL_FACE_COUNT = src_mesh.topology.numValidFaces()
+            print(f"Initial mesh: {INITIAL_VERTEX_COUNT} vertices, {INITIAL_FACE_COUNT} faces")
             
             # Decimate if mesh exceeds target resolution limit
             if INITIAL_VERTEX_COUNT > max_vertices_limit:
@@ -92,15 +93,15 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                 ss_mesh_shrink = cuda_offset(out_mesh, vox, -vox)
                 out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
             
-            # Decimate output mesh if it's higher resolution than initial mesh
-            final_vertex_count = out_mesh.topology.numValidVerts()
-            if final_vertex_count > INITIAL_VERTEX_COUNT:
-                from .offset_utils import decimate_mesh
-                target_vertices = INITIAL_VERTEX_COUNT
-                out_mesh = decimate_mesh(out_mesh, target_face_count=None, reduction_ratio=None, target_vertex_count=target_vertices)
-                new_final_count = out_mesh.topology.numValidVerts()
-                print(f"Decimated output mesh from {final_vertex_count} to {new_final_count} vertices (target: {target_vertices})")
-                self.report({'INFO'}, f"Decimated result: {final_vertex_count} → {new_final_count} vertices")
+            # Decimate output mesh if face count increased significantly
+            from .offset_utils import decimate_mesh, should_auto_decimate_faces
+            final_face_count = out_mesh.topology.numValidFaces()
+            do_decimate, target_faces = should_auto_decimate_faces(INITIAL_FACE_COUNT, final_face_count)
+            if do_decimate:
+                out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=vox)
+                new_final_count = out_mesh.topology.numValidFaces()
+                print(f"Decimated output mesh from {final_face_count} to {new_final_count} faces (target: {target_faces})")
+                self.report({'INFO'}, f"Decimated result: {final_face_count} → {new_final_count} faces")
         
             infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
             

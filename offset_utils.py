@@ -193,3 +193,25 @@ def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio
 	
 	return mesh
 
+
+def target_faces_for_density(mesh, faces_per_sq_unit: float, min_faces: int = 200, max_faces: Optional[int] = None) -> int:
+	"""
+	Estimate target face count from mesh size for approximately consistent face density.
+
+	Uses bounding-box surface area as a robust size proxy, then scales by
+	faces_per_sq_unit to get a size-aware decimation target.
+	"""
+	bbox = mesh.computeBoundingBox()
+	dx = abs(bbox.max.x - bbox.min.x)
+	dy = abs(bbox.max.y - bbox.min.y)
+	dz = abs(bbox.max.z - bbox.min.z)
+
+	# Bounding-box surface area proxy.
+	surface_area = max(1e-6, 2.0 * (dx * dy + dy * dz + dz * dx))
+	target_faces = int(max(float(min_faces), surface_area * float(faces_per_sq_unit)))
+
+	if max_faces is not None:
+		target_faces = min(target_faces, int(max_faces))
+
+	return target_faces
+

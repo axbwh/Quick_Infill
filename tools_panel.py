@@ -24,6 +24,25 @@ class QuickInfillToolsSettings(PropertyGroup):
         max=0.4,
         precision=3,
     )
+
+    trim_edges_x: FloatProperty(
+        name="Trim Edges X",
+        description="Extra factor for Trim Edges final grow step (1 + x)",
+        default=0.25,
+        min=0.0,
+        max=0.5,
+        precision=3,
+        subtype='FACTOR',
+    )
+
+    trim_edges_density: FloatProperty(
+        name="Trim Edges Density",
+        description="Target face density before Trim Edges boolean (faces per area unit)",
+        default=1.0,
+        min=0.5,
+        max=4.0,
+        precision=4,
+    )
     
     auto_decimate: bpy.props.BoolProperty(
         name="Auto Decimate",
@@ -101,6 +120,17 @@ def draw_offset_tools(layout, context):
         row = tools_col.row(align=True)
         row.operator("quick_infill.remesh", text="Remesh", icon='ALIASED')
         row.operator("quick_infill.trim_thin", text="Trim Thin", icon='MOD_WARP')
+
+        tools_col.separator()
+
+        # Density used for decimation before Trim Edges boolean
+        row = tools_col.row(align=True)
+        row.prop(settings, "trim_edges_density", text="Trim Density")
+
+        # Trim Edges controls (last row)
+        row = tools_col.row(align=True)
+        row.prop(settings, "trim_edges_x", text="X")
+        row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
 
 
 classes = (

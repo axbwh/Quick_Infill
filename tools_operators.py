@@ -1,12 +1,13 @@
 """
 Tool operators for Quick Infill addon.
-Provides Grow, Shrink, Remesh, and Trim Thin operations.
+Provides Grow, Shrink, Remesh, Trim Thin, and Trim Edges operations.
 """
 
 import bpy
 from bpy.types import Operator
-from .offset_utils import cuda_offset
-from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl
+from .meshlib_utils import get_meshlib
+from .offset_utils import cuda_offset, decimate_mesh, target_faces_for_density, should_auto_decimate_faces
+from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl, select_results
 
 
 class QUICKINFILL_OT_grow(Operator):
@@ -234,6 +235,121 @@ class QUICKINFILL_OT_trim_thin(Operator):
             self.report({'ERROR'}, f"Trim Thin failed: {e}")
             print(f"[Quick Infill] Trim Thin error: {e}")
             return {'CANCELLED'}
+
+
+class QUICKINFILL_OT_trim_edges(Operator):
+    bl_idname = "quick_infill.trim_edges"
+    bl_label = "Trim Edges"
+    bl_description = "Trim edges by offset sequence and intersect with original mesh. With multiple selections, processes each object individually"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        try:
+            mm, _ = get_meshlib()
+            settings = context.scene.quick_infill_tools_settings
+            distance = float(settings.distance)
+            resolution = float(settings.resolution)
+            trim_edges_x = float(settings.trim_edges_x)
+            trim_edges_density = float(settings.trim_edges_density)
+            auto_decimate = settings.auto_decimate
+            replace_original = settings.replace_original
+
+            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            if not selected_objs:
+                self.report({'ERROR'}, "No mesh selected.")
+                return {'CANCELLED'}
+
+            # Trim Edges sequence per object:
+            # 1) Keep original mesh copy
+            # 2) Grow by +2*distance
+            # 3) Shrink by -3*distance
+            # 4) Grow by +(1+x)*distance
+            # 5) Intersect with original mesh using voxel boolean (same style as support tools)
+            results = []
+            for src_obj in selected_objs:
+                original_mesh = blender_to_meshlib_via_stl(src_obj)
+                working_mesh = mm.copyMesh(original_mesh)
+                initial_faces = original_mesh.topology.numValidFaces()
+                initial_verts = original_mesh.topology.numValidVerts()
+
+                working_mesh = cuda_offset(working_mesh, resolution, 2.0 * distance)
+                working_mesh = cuda_offset(working_mesh, resolution, -3.0 * distance)
+                working_mesh = cuda_offset(working_mesh, resolution, (1.0 + trim_edges_x) * distance)
+
+                # Normalize triangle density before boolean so output quality is more
+                # consistent across meshes of different physical size.
+                target_faces = target_faces_for_density(
+                    working_mesh,
+                    faces_per_sq_unit=trim_edges_density,
+                    min_faces=20,
+                    max_faces=working_mesh.topology.numValidFaces(),
+                )
+                current_faces = working_mesh.topology.numValidFaces()
+                if target_faces < current_faces:
+                    bbox = working_mesh.computeBoundingBox()
+                    diag = (bbox.max - bbox.min).length()
+                    target_ratio = float(target_faces) / float(max(1, current_faces))
+                    reduction_strength = max(0.0, 1.0 - target_ratio)
+                    adaptive_max_error = max(
+                        float(resolution) * 10.0,
+                        diag * (0.01 + 0.49 * reduction_strength),
+                    )
+                    working_mesh = decimate_mesh(
+                        working_mesh,
+                        target_face_count=target_faces,
+                        max_error=adaptive_max_error,
+                    )
+
+                from .support_tools import intersect_meshes
+                result_mesh = intersect_meshes(working_mesh, original_mesh, resolution)
+
+                # Optionally auto-decimate final output similar to other offset operators.
+                if auto_decimate:
+                    final_faces_before = result_mesh.topology.numValidFaces()
+                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, final_faces_before)
+                    if do_decimate:
+                        result_mesh = decimate_mesh(
+                            result_mesh,
+                            target_face_count=target_faces,
+                            resolution=resolution,
+                        )
+
+                final_verts = result_mesh.topology.numValidVerts()
+
+                result_name = src_obj.name + "_TrimEdges"
+                result_obj = meshlib_to_blender_via_stl(result_mesh, name=result_name)
+
+                if replace_original:
+                    from .blender_meshlib_utils import replace_mesh_keep_transforms
+                    result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
+
+                results.append((result_obj, initial_verts, final_verts))
+                print(
+                    f"[Quick Infill] Trim Edges ({src_obj.name}): {initial_verts} → {final_verts} vertices "
+                    f"(distance={distance}mm, x={trim_edges_x:.3f}, density={trim_edges_density:.2f})"
+                )
+
+            obj_count = len(results)
+            if obj_count == 1:
+                result_obj, _, _ = results[0]
+                if replace_original:
+                    self.report({'INFO'}, f"Trim Edges completed. Updated '{result_obj.name}'")
+                else:
+                    self.report({'INFO'}, f"Trim Edges completed. Created '{result_obj.name}'")
+            else:
+                if replace_original:
+                    self.report({'INFO'}, f"Trim Edges completed. Updated {obj_count} objects")
+                else:
+                    self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
+
+            # Restore selection to result objects
+            select_results([r[0] for r in results])
+
+            return {'FINISHED'}
+
+        except Exception as e:
+            self.report({'ERROR'}, f"Trim Edges failed: {e}")
+            print(f"[Quick Infill] Trim Edges error: {e}")
             return {'CANCELLED'}
 
 
@@ -242,6 +358,7 @@ classes = (
     QUICKINFILL_OT_shrink,
     QUICKINFILL_OT_remesh,
     QUICKINFILL_OT_trim_thin,
+    QUICKINFILL_OT_trim_edges,
 )
 
 

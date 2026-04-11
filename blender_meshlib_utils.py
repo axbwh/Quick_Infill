@@ -175,6 +175,21 @@ def meshlib_to_blender_via_stl(meshlib_mesh, name: str = "Converted Mesh", impor
 
     return obj
 
+
+def select_results(result_objs):
+    """Select the given result objects and make the first one active.
+    
+    Call after multi-object operator loops to keep selection consistent.
+    """
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
+    for obj in result_objs:
+        if obj and obj.name in bpy.data.objects:
+            obj.select_set(True)
+    if result_objs:
+        bpy.context.view_layer.objects.active = result_objs[0]
+
+
 def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     """
     Convert a meshlib Mesh to a Blender mesh object.

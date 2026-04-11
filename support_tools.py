@@ -9,7 +9,7 @@ import mathutils
 from bpy.types import Operator, PropertyGroup
 from bpy.props import FloatProperty, BoolProperty, EnumProperty
 from .meshlib_utils import get_meshlib
-from .blender_meshlib_utils import process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl
+from .blender_meshlib_utils import process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl, select_results
 
 
 class QuickInfillSupportSettings(PropertyGroup):
@@ -24,10 +24,12 @@ class QuickInfillSupportSettings(PropertyGroup):
     
     undercut_angle: FloatProperty(
         name="Angle",
-        description="Undercut angle in degrees. 0° = vertical (Z up), 90° = horizontal (selected axis)",
+        description="Undercut angle in degrees. 0° = vertical (Z up), +/-90° = horizontal (selected axis). Negative angles use voxel union when combining directions",
         default=60.0,
-        min=0.0,
+        min=-90.0,
         max=90.0,
+        soft_min=-90.0,
+        soft_max=90.0,
         precision=1,
     )
     
@@ -359,6 +361,13 @@ def intersect_meshes(mesh_a, mesh_b, voxel_size):
     return mm.voxelBooleanIntersect(mesh_a, mesh_b, voxel_size)
 
 
+def union_meshes(mesh_a, mesh_b, voxel_size):
+    """Perform voxel-based boolean union of two meshlib meshes."""
+    mm, _ = get_meshlib()
+
+    return mm.voxelBooleanUnite(mesh_a, mesh_b, voxel_size)
+
+
 def fix_undercuts_single_mesh(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle):
     """
     Process undercut fixing for a single meshlib mesh.
@@ -377,17 +386,26 @@ def fix_undercuts_single_mesh(mesh, directions, angle, voxel_size, shrink_amount
     mm, _ = get_meshlib()
     
     total_undercuts = 0
+    abs_angle = abs(float(angle))
+    use_union_combine = float(angle) < 0.0
     only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
     
-    if angle == 0 or only_z_direction:
+    if abs_angle == 0 or only_z_direction:
         # Pure Z-up mode (no horizontal tilt)
         up_vector = mm.Vector3f(0, 0, 1)
         mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
         total_undercuts = undercut_count
     else:
-        # Process each direction and voxel-intersect results
+        # In union mode (negative angle), Z is applied as a post-process on the
+        # merged result rather than being unioned as a separate direction.
+        has_z = (0, 0, 1) in directions
+        apply_z_after = use_union_combine and has_z
+        process_dirs = [d for d in directions if d != (0, 0, 1)] if apply_z_after else directions
+
+        # Process each direction, then combine with voxel intersect (positive angle)
+        # or voxel union (negative angle).
         results = []
-        for horiz_dir in directions:
+        for horiz_dir in process_dirs:
             if horiz_dir == (0, 0, 1):
                 # Z direction = pure Z-up
                 mesh_copy = mm.copyMesh(mesh)
@@ -399,18 +417,27 @@ def fix_undercuts_single_mesh(mesh, directions, angle, voxel_size, shrink_amount
             
             # Make a copy of the mesh for each direction
             mesh_copy = mm.copyMesh(mesh)
-            up_vector = compute_up_vector(horiz_dir, angle)
+            up_vector = compute_up_vector(horiz_dir, abs_angle)
             result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
             results.append(result_mesh)
             total_undercuts += undercut_count
         
-        # Voxel intersect all results together
+        # Combine all results together.
         if len(results) == 1:
             mesh = results[0]
         else:
             mesh = results[0]
             for i in range(1, len(results)):
-                mesh = intersect_meshes(mesh, results[i], voxel_size)
+                if use_union_combine:
+                    mesh = union_meshes(mesh, results[i], voxel_size)
+                else:
+                    mesh = intersect_meshes(mesh, results[i], voxel_size)
+
+        # In union mode, apply Z fix on the merged result instead of the original.
+        if apply_z_after:
+            up_vector = mm.Vector3f(0, 0, 1)
+            mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
+            total_undercuts += undercut_count
     
     return mesh, total_undercuts
 
@@ -434,9 +461,11 @@ def fix_undercuts_from_view_single_mesh(mesh, directions, angle, voxel_size, shr
     mm, _ = get_meshlib()
     
     total_undercuts = 0
+    abs_angle = abs(float(angle))
+    use_union_combine = float(angle) < 0.0
     only_z_direction = len(directions) == 1 and directions[0] == (0, 0, 1)
     
-    if only_z_direction or angle == 0:
+    if only_z_direction or abs_angle == 0:
         # Pure camera direction (no tilt)
         camera_forward = view_rotation @ mathutils.Vector((0, 0, 1))
         camera_forward.normalize()
@@ -444,22 +473,40 @@ def fix_undercuts_from_view_single_mesh(mesh, directions, angle, voxel_size, shr
         mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
         total_undercuts = undercut_count
     else:
-        # Process each direction in view space and voxel-intersect results
+        # In union mode (negative angle), Z is applied as a post-process on the
+        # merged result rather than being unioned as a separate direction.
+        has_z = (0, 0, 1) in directions
+        apply_z_after = use_union_combine and has_z
+        process_dirs = [d for d in directions if d != (0, 0, 1)] if apply_z_after else directions
+
+        # Process each direction in view space, then combine with voxel intersect
+        # (positive angle) or voxel union (negative angle).
         results = []
-        for screen_dir in directions:
+        for screen_dir in process_dirs:
             mesh_copy = mm.copyMesh(mesh)
-            up_vector = compute_view_space_up_vector(screen_dir, view_rotation, angle)
+            up_vector = compute_view_space_up_vector(screen_dir, view_rotation, abs_angle)
             result_mesh, undercut_count = fix_undercuts_for_direction(mesh_copy, up_vector, voxel_size, shrink_amount, shrink_angle)
             results.append(result_mesh)
             total_undercuts += undercut_count
         
-        # Voxel intersect all results together
+        # Combine all results together.
         if len(results) == 1:
             mesh = results[0]
         else:
             mesh = results[0]
             for i in range(1, len(results)):
-                mesh = intersect_meshes(mesh, results[i], voxel_size)
+                if use_union_combine:
+                    mesh = union_meshes(mesh, results[i], voxel_size)
+                else:
+                    mesh = intersect_meshes(mesh, results[i], voxel_size)
+
+        # In union mode, apply Z fix on the merged result instead of the original.
+        if apply_z_after:
+            camera_forward = view_rotation @ mathutils.Vector((0, 0, 1))
+            camera_forward.normalize()
+            up_vector = mm.Vector3f(camera_forward.x, camera_forward.y, camera_forward.z)
+            mesh, undercut_count = fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount, shrink_angle)
+            total_undercuts += undercut_count
     
     return mesh, total_undercuts
 
@@ -551,6 +598,9 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                     else:
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} direction(s)")
             
+            # Restore selection to result objects
+            select_results([r[0] for r in results])
+
             return {'FINISHED'}
 
         except Exception as e:
@@ -661,6 +711,9 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
                     else:
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} view direction(s)")
             
+            # Restore selection to result objects
+            select_results([r[0] for r in results])
+
             return {'FINISHED'}
 
         except Exception as e:
@@ -820,6 +873,9 @@ class QUICKINFILL_OT_shrink_from_view(Operator):
                 else:
                     self.report({'INFO'}, f"Shrunk top faces, created {obj_count} new objects from view")
             
+            # Restore selection to result objects
+            select_results([r[0] for r in results])
+
             return {'FINISHED'}
 
         except Exception as e:
@@ -945,6 +1001,10 @@ def register():
 
 def unregister():
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError:
+            pass
     
-    del bpy.types.Scene.quick_infill_support_settings
+    if hasattr(bpy.types.Scene, 'quick_infill_support_settings'):
+        del bpy.types.Scene.quick_infill_support_settings

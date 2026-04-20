@@ -532,57 +532,129 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                 self.report({'ERROR'}, "No mesh selected.")
                 return {'CANCELLED'}
 
-            # Get selected directions
             directions = get_selected_directions(settings)
             if not directions:
-                directions = [(0, 0, 1)]  # Default to Z-up
-            
-            # Get shrink settings if auto_shrink enabled
+                directions = [(0, 0, 1)]
+
             shrink_amount = float(settings.shrink_amount) if auto_shrink else 0.0
             shrink_angle = float(settings.shrink_angle_threshold) if auto_shrink else 30.0
-            
-            # Process all selected objects
-            results = []
-            total_obj_undercuts = 0
-            
-            for src_obj in selected_objs:
-                # Convert to meshlib
-                mesh = blender_to_meshlib_via_stl(src_obj)
-                initial_faces = mesh.topology.numValidFaces()
-                initial_verts = mesh.topology.numValidVerts()
-                
-                # Fix undercuts using the helper
-                mesh, undercut_count = fix_undercuts_single_mesh(
+
+            from .offset_utils import decimate_mesh, should_auto_decimate_faces
+            from .blender_meshlib_utils import replace_mesh_keep_transforms
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import os, tempfile
+
+            tmp_dir = tempfile.gettempdir()
+            import_scale = 0.1
+
+            # ── Phase 1: Export to meshlib (Blender API, sequential) ──
+            view_layer = bpy.context.view_layer
+            prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
+            prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
+
+            meshlib_meshes = []
+            for obj in selected_objs:
+                try:
+                    mesh = blender_to_meshlib_via_stl(obj)
+                    meshlib_meshes.append((mesh, mesh.topology.numValidFaces(), mesh.topology.numValidVerts()))
+                except Exception:
+                    meshlib_meshes.append(None)
+
+            # ── Phase 2: Process meshes in parallel (pure meshlib) ──
+            def _process_one(args):
+                i, entry = args
+                if entry is None:
+                    raise RuntimeError("failed to load mesh")
+                mesh, initial_faces, initial_verts = entry
+                result_mesh, undercut_count = fix_undercuts_single_mesh(
                     mesh, directions, angle, voxel_size, shrink_amount, shrink_angle
                 )
-                total_obj_undercuts += undercut_count
-                
-                # Auto decimate if enabled - only when significant face growth occurred
                 if auto_decimate:
-                    from .offset_utils import decimate_mesh, should_auto_decimate_faces
-                    current_faces = mesh.topology.numValidFaces()
+                    current_faces = result_mesh.topology.numValidFaces()
                     do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
                     if do_decimate:
-                        mesh = decimate_mesh(mesh, target_face_count=target_faces, resolution=voxel_size)
-                
-                final_verts = mesh.topology.numValidVerts()
-                
-                # Convert back to Blender
-                new_name = src_obj.name + "_NoUndercuts"
-                result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
-                
-                # Handle transforms
+                        result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=voxel_size)
+                return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts(), undercut_count
+
+            n_workers = min(len(selected_objs), 4)
+            success_map = {}
+            error_map = {}
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_process_one, (i, meshlib_meshes[i])): i
+                           for i in range(len(selected_objs))}
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        idx, result_mesh, iv, fv, uc = future.result()
+                        success_map[idx] = (result_mesh, iv, fv, uc)
+                    except Exception as exc:
+                        error_map[i] = exc
+
+            surviving_indices = sorted(success_map.keys())
+
+            # ── Phase 3: Save STLs in parallel (file I/O) ──
+            output_stl_paths = {}
+            for i in surviving_indices:
+                fd, stl_path = tempfile.mkstemp(prefix=f"qi_uc_{selected_objs[i].name}_", suffix=".stl", dir=tmp_dir)
+                os.close(fd)
+                output_stl_paths[i] = stl_path
+
+            def _save_one(args):
+                i, stl_path = args
+                mesh = success_map[i][0]
+                try:
+                    mm.saveMesh(mesh, stl_path)
+                except Exception:
+                    mm.saveMeshAs(mesh, stl_path)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                list(executor.map(_save_one, output_stl_paths.items()))
+
+            # ── Phase 4: Import results back to Blender (sequential) ──
+            result_objs = {}
+            for i in surviving_indices:
+                stl_path = output_stl_paths[i]
+                prev_objs = set(bpy.data.objects)
+                if hasattr(bpy.ops.wm, "stl_import"):
+                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                else:
+                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs] or list(bpy.context.selected_objects)
+                if new_objs:
+                    result_obj = new_objs[0]
+                    result_obj.name = selected_objs[i].name + "_NoUndercuts"
+                    result_objs[i] = result_obj
+                try:
+                    os.remove(stl_path)
+                except Exception:
+                    pass
+
+            # ── Phase 5: replace_original and build results ──
+            results = []
+            total_obj_undercuts = 0
+            for i in surviving_indices:
+                if i not in result_objs:
+                    continue
+                result_obj = result_objs[i]
+                src_obj = selected_objs[i]
+                _, initial_verts, final_verts, undercut_count = success_map[i]
+                total_obj_undercuts += undercut_count
                 if replace_original:
-                    from .blender_meshlib_utils import replace_mesh_keep_transforms
                     result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-                
                 results.append((result_obj, initial_verts, final_verts, undercut_count))
-                print(f"[Quick Infill] Fix Undercuts ({src_obj.name}): {initial_verts} → {final_verts} vertices, {undercut_count} undercut faces")
-            
-            # Report results
+
+            # Restore selection state
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
+            for name in prev_selection_names:
+                if name in bpy.data.objects:
+                    bpy.data.objects[name].select_set(True)
+            if prev_active_name and prev_active_name in bpy.data.objects:
+                view_layer.objects.active = bpy.data.objects[prev_active_name]
+
+            # Report
             obj_count = len(results)
             dir_count = len(directions)
-            
             if obj_count == 1:
                 result_obj, _, _, undercut_count = results[0]
                 if undercut_count == 0:
@@ -597,15 +669,12 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                         self.report({'INFO'}, f"Fixed undercuts on {obj_count} objects from {dir_count} direction(s)")
                     else:
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} direction(s)")
-            
-            # Restore selection to result objects
-            select_results([r[0] for r in results])
 
+            select_results([r[0] for r in results])
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Fix Undercuts failed: {e}")
-            print(f"[Quick Infill] Fix Undercuts error: {e}")
             import traceback
             traceback.print_exc()
             return {'CANCELLED'}
@@ -632,70 +701,141 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
                 self.report({'ERROR'}, "No mesh selected.")
                 return {'CANCELLED'}
 
-            # Get viewport view rotation
             region_3d = None
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
                     region_3d = area.spaces.active.region_3d
                     break
-            
             if region_3d is None:
                 self.report({'ERROR'}, "No 3D viewport found.")
                 return {'CANCELLED'}
-            
-            view_rotation = region_3d.view_rotation
-            
-            # Get selected directions (in screen space)
+
+            # Capture view rotation before entering threads
+            view_rotation = region_3d.view_rotation.copy()
+
             directions = get_selected_directions(settings)
             if not directions:
-                directions = [(0, 0, 1)]  # Default to pure camera direction
-            
-            # Get shrink settings if auto_shrink enabled
+                directions = [(0, 0, 1)]
+
             shrink_amount = float(settings.shrink_amount) if auto_shrink else 0.0
             shrink_angle = float(settings.shrink_angle_threshold) if auto_shrink else 70.0
-            
-            # Process all selected objects
-            results = []
-            total_obj_undercuts = 0
-            
-            for src_obj in selected_objs:
-                # Convert to meshlib
-                mesh = blender_to_meshlib_via_stl(src_obj)
-                initial_faces = mesh.topology.numValidFaces()
-                initial_verts = mesh.topology.numValidVerts()
-                
-                # Fix undercuts using the view-based helper
-                mesh, undercut_count = fix_undercuts_from_view_single_mesh(
+
+            from .offset_utils import decimate_mesh, should_auto_decimate_faces
+            from .blender_meshlib_utils import replace_mesh_keep_transforms
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import os, tempfile
+
+            tmp_dir = tempfile.gettempdir()
+            import_scale = 0.1
+
+            # ── Phase 1: Export to meshlib (Blender API, sequential) ──
+            view_layer = bpy.context.view_layer
+            prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
+            prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
+
+            meshlib_meshes = []
+            for obj in selected_objs:
+                try:
+                    mesh = blender_to_meshlib_via_stl(obj)
+                    meshlib_meshes.append((mesh, mesh.topology.numValidFaces(), mesh.topology.numValidVerts()))
+                except Exception:
+                    meshlib_meshes.append(None)
+
+            # ── Phase 2: Process meshes in parallel (pure meshlib) ──
+            def _process_one(args):
+                i, entry = args
+                if entry is None:
+                    raise RuntimeError("failed to load mesh")
+                mesh, initial_faces, initial_verts = entry
+                result_mesh, undercut_count = fix_undercuts_from_view_single_mesh(
                     mesh, directions, angle, voxel_size, shrink_amount, shrink_angle, view_rotation
                 )
-                total_obj_undercuts += undercut_count
-                
-                # Auto decimate if enabled - only when significant face growth occurred
                 if auto_decimate:
-                    from .offset_utils import decimate_mesh, should_auto_decimate_faces
-                    current_faces = mesh.topology.numValidFaces()
+                    current_faces = result_mesh.topology.numValidFaces()
                     do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
                     if do_decimate:
-                        mesh = decimate_mesh(mesh, target_face_count=target_faces, resolution=voxel_size)
-                
-                final_verts = mesh.topology.numValidVerts()
-                
-                # Convert back to Blender
-                new_name = src_obj.name + "_NoUndercuts"
-                result_obj = meshlib_to_blender_via_stl(mesh, name=new_name)
-                
-                # Handle transforms
+                        result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=voxel_size)
+                return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts(), undercut_count
+
+            n_workers = min(len(selected_objs), 4)
+            success_map = {}
+            error_map = {}
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_process_one, (i, meshlib_meshes[i])): i
+                           for i in range(len(selected_objs))}
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        idx, result_mesh, iv, fv, uc = future.result()
+                        success_map[idx] = (result_mesh, iv, fv, uc)
+                    except Exception as exc:
+                        error_map[i] = exc
+
+            surviving_indices = sorted(success_map.keys())
+
+            # ── Phase 3: Save STLs in parallel (file I/O) ──
+            output_stl_paths = {}
+            for i in surviving_indices:
+                fd, stl_path = tempfile.mkstemp(prefix=f"qi_ucv_{selected_objs[i].name}_", suffix=".stl", dir=tmp_dir)
+                os.close(fd)
+                output_stl_paths[i] = stl_path
+
+            def _save_one(args):
+                i, stl_path = args
+                mesh = success_map[i][0]
+                try:
+                    mm.saveMesh(mesh, stl_path)
+                except Exception:
+                    mm.saveMeshAs(mesh, stl_path)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                list(executor.map(_save_one, output_stl_paths.items()))
+
+            # ── Phase 4: Import results back to Blender (sequential) ──
+            result_objs = {}
+            for i in surviving_indices:
+                stl_path = output_stl_paths[i]
+                prev_objs = set(bpy.data.objects)
+                if hasattr(bpy.ops.wm, "stl_import"):
+                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                else:
+                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs] or list(bpy.context.selected_objects)
+                if new_objs:
+                    result_obj = new_objs[0]
+                    result_obj.name = selected_objs[i].name + "_NoUndercuts"
+                    result_objs[i] = result_obj
+                try:
+                    os.remove(stl_path)
+                except Exception:
+                    pass
+
+            # ── Phase 5: replace_original and build results ──
+            results = []
+            total_obj_undercuts = 0
+            for i in surviving_indices:
+                if i not in result_objs:
+                    continue
+                result_obj = result_objs[i]
+                src_obj = selected_objs[i]
+                _, initial_verts, final_verts, undercut_count = success_map[i]
+                total_obj_undercuts += undercut_count
                 if replace_original:
-                    from .blender_meshlib_utils import replace_mesh_keep_transforms
                     result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-                
                 results.append((result_obj, initial_verts, final_verts, undercut_count))
-                print(f"[Quick Infill] Fix Undercuts View ({src_obj.name}): {initial_verts} → {final_verts} vertices, {undercut_count} undercut faces")
-            
-            # Report results
+
+            # Restore selection state
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
+            for name in prev_selection_names:
+                if name in bpy.data.objects:
+                    bpy.data.objects[name].select_set(True)
+            if prev_active_name and prev_active_name in bpy.data.objects:
+                view_layer.objects.active = bpy.data.objects[prev_active_name]
+
+            # Report
             obj_count = len(results)
             dir_count = len(directions)
-            
             if obj_count == 1:
                 result_obj, _, _, undercut_count = results[0]
                 if undercut_count == 0:
@@ -710,15 +850,12 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
                         self.report({'INFO'}, f"Fixed undercuts on {obj_count} objects from {dir_count} view direction(s)")
                     else:
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} view direction(s)")
-            
-            # Restore selection to result objects
-            select_results([r[0] for r in results])
 
+            select_results([r[0] for r in results])
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Fix Undercuts (View) failed: {e}")
-            print(f"[Quick Infill] Fix Undercuts (View) error: {e}")
             import traceback
             traceback.print_exc()
             return {'CANCELLED'}

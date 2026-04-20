@@ -368,6 +368,7 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
         return []
     
     results = []
+    collapsed_objs = []
     tmp_dir = tempfile.gettempdir()
     
     # Save current selection state once
@@ -418,70 +419,81 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
             except Exception:
                 pass
         
-        # Phase 2: Process all meshes through the operation (pure meshlib, no Blender calls)
+        # Phase 2: Process all meshes through the operation (pure meshlib, no Blender calls).
+        # Exceptions are caught per-mesh so a single collapse does not abort the whole batch.
         from .offset_utils import should_auto_decimate_faces
-        processed_meshes = []
+        processed_meshes = []   # only surviving meshes
+        surviving_indices = []  # original index in blender_objs for each surviving mesh
+        collapsed_objs = []     # (blender_obj, exception) for each collapsed mesh
+
         for i, mesh in enumerate(meshlib_meshes):
-            out_mesh = operation_fn(mesh)
-            
-            # Auto decimate if enabled - only when significant face growth occurred
-            if auto_decimate:
-                final_faces = out_mesh.topology.numValidFaces()
-                do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
-                if do_decimate:
-                    out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
-            
-            processed_meshes.append(out_mesh)
-        
-        # Phase 3: Export all processed meshes to STL and import back to Blender
+            try:
+                out_mesh = operation_fn(mesh)
+
+                # Auto decimate if enabled - only when significant face growth occurred
+                if auto_decimate:
+                    final_faces = out_mesh.topology.numValidFaces()
+                    do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
+                    if do_decimate:
+                        out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+
+                processed_meshes.append(out_mesh)
+                surviving_indices.append(i)
+            except Exception as exc:
+                collapsed_objs.append((blender_objs[i], exc))
+
+        # Phase 3: Export only surviving meshes to STL
         output_stl_paths = []
-        for i, mesh in enumerate(processed_meshes):
-            fd, stl_path = tempfile.mkstemp(prefix=f"qi_out_{blender_objs[i].name}_", suffix=".stl", dir=tmp_dir)
+        for j, mesh in enumerate(processed_meshes):
+            src_idx = surviving_indices[j]
+            fd, stl_path = tempfile.mkstemp(prefix=f"qi_out_{blender_objs[src_idx].name}_", suffix=".stl", dir=tmp_dir)
             os.close(fd)
             output_stl_paths.append(stl_path)
-            
+
             # Save meshlib mesh to STL
             try:
                 mm.saveMesh(mesh, stl_path)
             except Exception:
                 mm.saveMeshAs(mesh, stl_path)
-        
-        # Phase 4: Import all results back to Blender
+
+        # Phase 4: Import surviving results back to Blender
         result_objs = []
-        for i, stl_path in enumerate(output_stl_paths):
+        for j, stl_path in enumerate(output_stl_paths):
+            src_idx = surviving_indices[j]
             prev_objs = set(bpy.data.objects)
-            
+
             # Import STL
             if hasattr(bpy.ops.wm, "stl_import"):
                 bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
             else:
                 bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-            
+
             # Find the newly imported object
             new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
             if not new_objs:
                 new_objs = list(bpy.context.selected_objects)
-            
+
             if new_objs:
                 result_obj = new_objs[0]
-                result_obj.name = blender_objs[i].name + output_suffix
+                result_obj.name = blender_objs[src_idx].name + output_suffix
                 result_objs.append(result_obj)
-            
+
             # Clean up output STL
             try:
                 os.remove(stl_path)
             except Exception:
                 pass
-        
-        # Phase 5: Handle replace_original and build final results
-        for i, result_obj in enumerate(result_objs):
-            original_obj = blender_objs[i]
-            final_verts = processed_meshes[i].topology.numValidVerts()
-            
+
+        # Phase 5: Handle replace_original and build final results (survivors only)
+        for j, result_obj in enumerate(result_objs):
+            src_idx = surviving_indices[j]
+            original_obj = blender_objs[src_idx]
+            final_verts = processed_meshes[j].topology.numValidVerts()
+
             if replace_original:
                 result_obj = replace_mesh_keep_transforms(original_obj, result_obj)
-            
-            results.append((result_obj, initial_vert_counts[i], final_verts))
+
+            results.append((result_obj, initial_vert_counts[src_idx], final_verts))
     
     finally:
         # Restore selection state
@@ -493,4 +505,4 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
         if prev_active and prev_active.name in bpy.data.objects:
             view_layer.objects.active = prev_active
     
-    return results
+    return results, collapsed_objs

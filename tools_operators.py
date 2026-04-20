@@ -10,6 +10,11 @@ from .offset_utils import cuda_offset, decimate_mesh, target_faces_for_density, 
 from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl, select_results
 
 
+class _MeshCollapsedError(Exception):
+    """Raised when a mesh offset collapses the mesh to no remaining geometry."""
+    pass
+
+
 class QUICKINFILL_OT_grow(Operator):
     bl_idname = "quick_infill.grow"
     bl_label = "Grow"
@@ -38,14 +43,14 @@ class QUICKINFILL_OT_grow(Operator):
                 result_obj, initial_verts, final_verts = process_mesh_operation(
                     selected_objs[0], grow_op, "_Grown", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
-                print(f"[Quick Infill] Grow: {initial_verts} → {final_verts} vertices, offset +{distance}mm")
+                # print(f"[Quick Infill] Grow: {initial_verts} → {final_verts} vertices, offset +{distance}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Grow completed. Updated '{result_obj.name}'")
                 else:
                     self.report({'INFO'}, f"Grow completed. Created '{result_obj.name}'")
             else:
                 # Batch process all selected objects
-                results = batch_process_mesh_operation(
+                results, _ = batch_process_mesh_operation(
                     selected_objs, grow_op, "_Grown", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
                 
@@ -53,7 +58,7 @@ class QUICKINFILL_OT_grow(Operator):
                 total_final = sum(r[2] for r in results)
                 obj_count = len(results)
                 
-                print(f"[Quick Infill] Grow (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset +{distance}mm")
+                # print(f"[Quick Infill] Grow (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset +{distance}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Grow completed. Updated {obj_count} objects")
                 else:
@@ -63,7 +68,7 @@ class QUICKINFILL_OT_grow(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Grow failed: {e}")
-            print(f"[Quick Infill] Grow error: {e}")
+            # print(f"[Quick Infill] Grow error: {e}")
             return {'CANCELLED'}
 
 
@@ -95,14 +100,14 @@ class QUICKINFILL_OT_shrink(Operator):
                 result_obj, initial_verts, final_verts = process_mesh_operation(
                     selected_objs[0], shrink_op, "_Shrunk", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
-                print(f"[Quick Infill] Shrink: {initial_verts} → {final_verts} vertices, offset -{distance}mm")
+                # print(f"[Quick Infill] Shrink: {initial_verts} → {final_verts} vertices, offset -{distance}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Shrink completed. Updated '{result_obj.name}'")
                 else:
                     self.report({'INFO'}, f"Shrink completed. Created '{result_obj.name}'")
             else:
                 # Batch process all selected objects
-                results = batch_process_mesh_operation(
+                results, _ = batch_process_mesh_operation(
                     selected_objs, shrink_op, "_Shrunk", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
                 
@@ -110,7 +115,7 @@ class QUICKINFILL_OT_shrink(Operator):
                 total_final = sum(r[2] for r in results)
                 obj_count = len(results)
                 
-                print(f"[Quick Infill] Shrink (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset -{distance}mm")
+                # print(f"[Quick Infill] Shrink (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset -{distance}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Shrink completed. Updated {obj_count} objects")
                 else:
@@ -120,7 +125,7 @@ class QUICKINFILL_OT_shrink(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Shrink failed: {e}")
-            print(f"[Quick Infill] Shrink error: {e}")
+            # print(f"[Quick Infill] Shrink error: {e}")
             return {'CANCELLED'}
 
 
@@ -151,14 +156,14 @@ class QUICKINFILL_OT_remesh(Operator):
                 result_obj, initial_verts, final_verts = process_mesh_operation(
                     selected_objs[0], remesh_op, "_Remeshed", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
-                print(f"[Quick Infill] Remesh: {initial_verts} → {final_verts} vertices at {resolution}mm")
+                # print(f"[Quick Infill] Remesh: {initial_verts} → {final_verts} vertices at {resolution}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Remesh completed. Updated '{result_obj.name}'")
                 else:
                     self.report({'INFO'}, f"Remesh completed. Created '{result_obj.name}'")
             else:
                 # Batch process all selected objects
-                results = batch_process_mesh_operation(
+                results, _ = batch_process_mesh_operation(
                     selected_objs, remesh_op, "_Remeshed", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
                 
@@ -166,7 +171,7 @@ class QUICKINFILL_OT_remesh(Operator):
                 total_final = sum(r[2] for r in results)
                 obj_count = len(results)
                 
-                print(f"[Quick Infill] Remesh (batch): {obj_count} objects, {total_initial} → {total_final} total vertices at {resolution}mm")
+                # print(f"[Quick Infill] Remesh (batch): {obj_count} objects, {total_initial} → {total_final} total vertices at {resolution}mm")
                 if replace_original:
                     self.report({'INFO'}, f"Remesh completed. Updated {obj_count} objects")
                 else:
@@ -176,7 +181,7 @@ class QUICKINFILL_OT_remesh(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Remesh failed: {e}")
-            print(f"[Quick Infill] Remesh error: {e}")
+            # print(f"[Quick Infill] Remesh error: {e}")
             return {'CANCELLED'}
 
 
@@ -198,42 +203,69 @@ class QUICKINFILL_OT_trim_thin(Operator):
                 self.report({'ERROR'}, "No mesh selected.")
                 return {'CANCELLED'}
 
-            # Trim thin = shrink then grow by resolution (removes thin features)
+            # Trim thin = shrink then grow by resolution (removes thin features).
+            # If the shrink collapses the mesh to nothing, raise _MeshCollapsedError
+            # so batch_process_mesh_operation can skip it and return it as collapsed.
             def trim_thin_op(mesh):
                 shrunk = cuda_offset(mesh, resolution, -resolution)
+                if shrunk.topology.numValidFaces() == 0:
+                    raise _MeshCollapsedError()
                 return cuda_offset(shrunk, resolution, resolution)
-            
-            # Use batch processing for multiple objects, single processing for one
+
+            # Use batch processing for all objects. Collapsed meshes are returned
+            # separately in the second element without aborting the batch.
             if len(selected_objs) == 1:
-                result_obj, initial_verts, final_verts = process_mesh_operation(
-                    selected_objs[0], trim_thin_op, "_TrimThin", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                print(f"[Quick Infill] Trim Thin: {initial_verts} → {final_verts} vertices at {resolution}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Trim Thin completed. Updated '{result_obj.name}'")
-                else:
-                    self.report({'INFO'}, f"Trim Thin completed. Created '{result_obj.name}'")
+                try:
+                    result_obj, initial_verts, final_verts = process_mesh_operation(
+                        selected_objs[0], trim_thin_op, "_TrimThin",
+                        auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
+                    )
+                    results = [(result_obj, initial_verts, final_verts)]
+                    collapsed = []
+                except _MeshCollapsedError:
+                    results = []
+                    collapsed = [(selected_objs[0], _MeshCollapsedError())]
             else:
-                # Batch process all selected objects
-                results = batch_process_mesh_operation(
-                    selected_objs, trim_thin_op, "_TrimThin", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
+                results, collapsed = batch_process_mesh_operation(
+                    selected_objs, trim_thin_op, "_TrimThin",
+                    auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                 )
-                
+
+            # Delete any objects whose mesh fully collapsed
+            removed_names = []
+            for obj, exc in collapsed:
+                obj_name = obj.name
+                removed_names.append(obj_name)
+                bpy.data.objects.remove(obj, do_unlink=True)
+                # print(f"[Quick Infill] Trim Thin ({obj_name}): mesh fully collapsed, object deleted")
+
+            if removed_names:
+                names_str = ", ".join(f"'{n}'" for n in removed_names)
+                self.report({'WARNING'}, f"Trim Thin: {len(removed_names)} object(s) fully removed (too thin for current resolution): {names_str}")
+
+            if results:
                 total_initial = sum(r[1] for r in results)
                 total_final = sum(r[2] for r in results)
                 obj_count = len(results)
-                
-                print(f"[Quick Infill] Trim Thin (batch): {obj_count} objects, {total_initial} → {total_final} total vertices at {resolution}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Trim Thin completed. Updated {obj_count} objects")
+                # print(f"[Quick Infill] Trim Thin: {obj_count} objects, {total_initial} → {total_final} vertices at {resolution}mm")
+                select_results([r[0] for r in results])
+                if obj_count == 1:
+                    result_obj, _, _ = results[0]
+                    if replace_original:
+                        self.report({'INFO'}, f"Trim Thin completed. Updated '{result_obj.name}'")
+                    else:
+                        self.report({'INFO'}, f"Trim Thin completed. Created '{result_obj.name}'")
                 else:
-                    self.report({'INFO'}, f"Trim Thin completed. Created {obj_count} new objects")
-            
+                    if replace_original:
+                        self.report({'INFO'}, f"Trim Thin completed. Updated {obj_count} objects")
+                    else:
+                        self.report({'INFO'}, f"Trim Thin completed. Created {obj_count} new objects")
+
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Trim Thin failed: {e}")
-            print(f"[Quick Infill] Trim Thin error: {e}")
+            # print(f"[Quick Infill] Trim Thin error: {e}")
             return {'CANCELLED'}
 
 
@@ -266,6 +298,7 @@ class QUICKINFILL_OT_trim_edges(Operator):
             # 4) Grow by +(1+x)*distance
             # 5) Intersect with original mesh using voxel boolean (same style as support tools)
             results = []
+            removed_names = []
             for src_obj in selected_objs:
                 original_mesh = blender_to_meshlib_via_stl(src_obj)
                 working_mesh = mm.copyMesh(original_mesh)
@@ -274,6 +307,14 @@ class QUICKINFILL_OT_trim_edges(Operator):
 
                 working_mesh = cuda_offset(working_mesh, resolution, 2.0 * distance)
                 working_mesh = cuda_offset(working_mesh, resolution, -3.0 * distance)
+
+                # If the shrink collapsed the mesh entirely, delete the object and skip.
+                if working_mesh.topology.numValidFaces() == 0:
+                    # print(f"[Quick Infill] Trim Edges ({src_obj.name}): mesh fully collapsed, object deleted")
+                    removed_names.append(src_obj.name)
+                    bpy.data.objects.remove(src_obj, do_unlink=True)
+                    continue
+
                 working_mesh = cuda_offset(working_mesh, resolution, (1.0 + trim_edges_x) * distance)
 
                 # Normalize triangle density before boolean so output quality is more
@@ -324,10 +365,14 @@ class QUICKINFILL_OT_trim_edges(Operator):
                     result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
 
                 results.append((result_obj, initial_verts, final_verts))
-                print(
-                    f"[Quick Infill] Trim Edges ({src_obj.name}): {initial_verts} → {final_verts} vertices "
-                    f"(distance={distance}mm, x={trim_edges_x:.3f}, density={trim_edges_density:.2f})"
-                )
+                # print(
+                #     f"[Quick Infill] Trim Edges ({src_obj.name}): {initial_verts} → {final_verts} vertices "
+                #     f"(distance={distance}mm, x={trim_edges_x:.3f}, density={trim_edges_density:.2f})"
+                # )
+
+            if removed_names:
+                names_str = ", ".join(f"'{n}'" for n in removed_names)
+                self.report({'WARNING'}, f"Trim Edges: {len(removed_names)} object(s) fully removed (mesh collapsed during trim): {names_str}")
 
             obj_count = len(results)
             if obj_count == 1:
@@ -336,20 +381,21 @@ class QUICKINFILL_OT_trim_edges(Operator):
                     self.report({'INFO'}, f"Trim Edges completed. Updated '{result_obj.name}'")
                 else:
                     self.report({'INFO'}, f"Trim Edges completed. Created '{result_obj.name}'")
-            else:
+            elif obj_count > 1:
                 if replace_original:
                     self.report({'INFO'}, f"Trim Edges completed. Updated {obj_count} objects")
                 else:
                     self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
 
             # Restore selection to result objects
-            select_results([r[0] for r in results])
+            if results:
+                select_results([r[0] for r in results])
 
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Trim Edges failed: {e}")
-            print(f"[Quick Infill] Trim Edges error: {e}")
+            # print(f"[Quick Infill] Trim Edges error: {e}")
             return {'CANCELLED'}
 
 

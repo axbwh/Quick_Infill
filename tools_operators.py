@@ -291,34 +291,49 @@ class QUICKINFILL_OT_trim_edges(Operator):
                 self.report({'ERROR'}, "No mesh selected.")
                 return {'CANCELLED'}
 
-            # Trim Edges sequence per object:
-            # 1) Keep original mesh copy
-            # 2) Grow by +2*distance
-            # 3) Shrink by -3*distance
-            # 4) Grow by +(1+x)*distance
-            # 5) Intersect with original mesh using voxel boolean (same style as support tools)
-            results = []
-            removed_names = []
-            for src_obj in selected_objs:
-                original_mesh = blender_to_meshlib_via_stl(src_obj)
-                working_mesh = mm.copyMesh(original_mesh)
-                initial_faces = original_mesh.topology.numValidFaces()
-                initial_verts = original_mesh.topology.numValidVerts()
+            from .support_tools import intersect_meshes
+            from .blender_meshlib_utils import replace_mesh_keep_transforms
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import os, tempfile
 
+            tmp_dir = tempfile.gettempdir()
+            import_scale = 0.1
+
+            # ── Phase 1: Export each Blender object to a meshlib mesh (Blender API, sequential) ──
+            meshlib_meshes = []      # (original_mesh, initial_faces, initial_verts) per obj
+            collapsed_on_load = []   # indices of objects that failed to load
+
+            view_layer = bpy.context.view_layer
+            prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
+            prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
+
+            for obj in selected_objs:
+                try:
+                    original_mesh = blender_to_meshlib_via_stl(obj)
+                    meshlib_meshes.append((
+                        original_mesh,
+                        original_mesh.topology.numValidFaces(),
+                        original_mesh.topology.numValidVerts(),
+                    ))
+                except Exception:
+                    meshlib_meshes.append(None)
+
+            # ── Phase 2: Process meshes in parallel (pure meshlib, no Blender API) ──
+            def _process_one(args):
+                i, entry = args
+                if entry is None:
+                    raise RuntimeError("failed to load mesh")
+                original_mesh, initial_faces, initial_verts = entry
+
+                working_mesh = mm.copyMesh(original_mesh)
                 working_mesh = cuda_offset(working_mesh, resolution, 2.0 * distance)
                 working_mesh = cuda_offset(working_mesh, resolution, -3.0 * distance)
 
-                # If the shrink collapsed the mesh entirely, delete the object and skip.
                 if working_mesh.topology.numValidFaces() == 0:
-                    # print(f"[Quick Infill] Trim Edges ({src_obj.name}): mesh fully collapsed, object deleted")
-                    removed_names.append(src_obj.name)
-                    bpy.data.objects.remove(src_obj, do_unlink=True)
-                    continue
+                    raise _MeshCollapsedError()
 
                 working_mesh = cuda_offset(working_mesh, resolution, (1.0 + trim_edges_x) * distance)
 
-                # Normalize triangle density before boolean so output quality is more
-                # consistent across meshes of different physical size.
                 target_faces = target_faces_for_density(
                     working_mesh,
                     faces_per_sq_unit=trim_edges_density,
@@ -335,40 +350,100 @@ class QUICKINFILL_OT_trim_edges(Operator):
                         float(resolution) * 10.0,
                         diag * (0.01 + 0.49 * reduction_strength),
                     )
-                    working_mesh = decimate_mesh(
-                        working_mesh,
-                        target_face_count=target_faces,
-                        max_error=adaptive_max_error,
-                    )
+                    working_mesh = decimate_mesh(working_mesh, target_face_count=target_faces, max_error=adaptive_max_error)
 
-                from .support_tools import intersect_meshes
                 result_mesh = intersect_meshes(working_mesh, original_mesh, resolution)
 
-                # Optionally auto-decimate final output similar to other offset operators.
                 if auto_decimate:
                     final_faces_before = result_mesh.topology.numValidFaces()
-                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, final_faces_before)
+                    do_decimate, tgt = should_auto_decimate_faces(initial_faces, final_faces_before)
                     if do_decimate:
-                        result_mesh = decimate_mesh(
-                            result_mesh,
-                            target_face_count=target_faces,
-                            resolution=resolution,
-                        )
+                        result_mesh = decimate_mesh(result_mesh, target_face_count=tgt, resolution=resolution)
 
-                final_verts = result_mesh.topology.numValidVerts()
+                return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts()
 
-                result_name = src_obj.name + "_TrimEdges"
-                result_obj = meshlib_to_blender_via_stl(result_mesh, name=result_name)
+            n_workers = min(len(selected_objs), 4)
+            success_map = {}   # i → (result_mesh, initial_verts, final_verts)
+            collapsed_map = {} # i → exception
 
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_process_one, (i, meshlib_meshes[i])): i
+                           for i in range(len(selected_objs))}
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        idx, result_mesh, initial_verts, final_verts = future.result()
+                        success_map[idx] = (result_mesh, initial_verts, final_verts)
+                    except Exception as exc:
+                        collapsed_map[i] = exc
+
+            # ── Phase 3: Save processed meshes to STL in parallel (file I/O) ──
+            surviving_indices = sorted(success_map.keys())
+            output_stl_paths = {}
+
+            for i in surviving_indices:
+                fd, stl_path = tempfile.mkstemp(prefix=f"qi_te_{selected_objs[i].name}_", suffix=".stl", dir=tmp_dir)
+                os.close(fd)
+                output_stl_paths[i] = stl_path
+
+            def _save_one(args):
+                i, stl_path = args
+                mesh = success_map[i][0]
+                try:
+                    mm.saveMesh(mesh, stl_path)
+                except Exception:
+                    mm.saveMeshAs(mesh, stl_path)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                list(executor.map(_save_one, output_stl_paths.items()))
+
+            # ── Phase 4: Import results back to Blender (Blender API, sequential) ──
+            result_objs = {}
+            for i in surviving_indices:
+                stl_path = output_stl_paths[i]
+                prev_objs = set(bpy.data.objects)
+                if hasattr(bpy.ops.wm, "stl_import"):
+                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                else:
+                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs] or list(bpy.context.selected_objects)
+                if new_objs:
+                    result_obj = new_objs[0]
+                    result_obj.name = selected_objs[i].name + "_TrimEdges"
+                    result_objs[i] = result_obj
+                try:
+                    os.remove(stl_path)
+                except Exception:
+                    pass
+
+            # ── Phase 5: Handle replace_original, deletions, and build final results ──
+            # Pre-capture names before any removal so stale StructRNA is never accessed.
+            collapsed_names = {i: selected_objs[i].name for i in collapsed_map}
+            removed_names = []
+            for i, obj_name in collapsed_names.items():
+                removed_names.append(obj_name)
+                if obj_name in bpy.data.objects:
+                    bpy.data.objects.remove(bpy.data.objects[obj_name], do_unlink=True)
+
+            results = []
+            for i in surviving_indices:
+                if i not in result_objs:
+                    continue
+                result_obj = result_objs[i]
+                src_obj = selected_objs[i]
+                _, initial_verts, final_verts = success_map[i]
                 if replace_original:
-                    from .blender_meshlib_utils import replace_mesh_keep_transforms
                     result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-
                 results.append((result_obj, initial_verts, final_verts))
-                # print(
-                #     f"[Quick Infill] Trim Edges ({src_obj.name}): {initial_verts} → {final_verts} vertices "
-                #     f"(distance={distance}mm, x={trim_edges_x:.3f}, density={trim_edges_density:.2f})"
-                # )
+
+            # Restore selection state (use names to avoid stale StructRNA references)
+            for obj in bpy.context.selected_objects:
+                obj.select_set(False)
+            for name in prev_selection_names:
+                if name in bpy.data.objects:
+                    bpy.data.objects[name].select_set(True)
+            if prev_active_name and prev_active_name in bpy.data.objects:
+                view_layer.objects.active = bpy.data.objects[prev_active_name]
 
             if removed_names:
                 names_str = ", ".join(f"'{n}'" for n in removed_names)
@@ -387,7 +462,6 @@ class QUICKINFILL_OT_trim_edges(Operator):
                 else:
                     self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
 
-            # Restore selection to result objects
             if results:
                 select_results([r[0] for r in results])
 

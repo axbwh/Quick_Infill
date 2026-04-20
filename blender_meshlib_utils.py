@@ -371,10 +371,10 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
     collapsed_objs = []
     tmp_dir = tempfile.gettempdir()
     
-    # Save current selection state once
+    # Save current selection state once (store names to avoid stale StructRNA references)
     view_layer = bpy.context.view_layer
-    prev_active = view_layer.objects.active
-    prev_selection = [obj for obj in bpy.context.selected_objects]
+    prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
+    prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
     
     try:
         # Phase 1: Export all objects to STL files (batch export setup)
@@ -419,42 +419,64 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
             except Exception:
                 pass
         
-        # Phase 2: Process all meshes through the operation (pure meshlib, no Blender calls).
-        # Exceptions are caught per-mesh so a single collapse does not abort the whole batch.
+        # Phase 2: Process meshes in parallel (pure meshlib, no Blender API).
+        # ThreadPoolExecutor lets multiple C++ meshlib operations run concurrently
+        # because MeshLib releases the GIL. Worker count is capped to avoid
+        # saturating the GPU if CUDA offsets are in use.
         from .offset_utils import should_auto_decimate_faces
-        processed_meshes = []   # only surviving meshes
-        surviving_indices = []  # original index in blender_objs for each surviving mesh
-        collapsed_objs = []     # (blender_obj, exception) for each collapsed mesh
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for i, mesh in enumerate(meshlib_meshes):
-            try:
-                out_mesh = operation_fn(mesh)
+        n_workers = min(len(meshlib_meshes), 4)
 
-                # Auto decimate if enabled - only when significant face growth occurred
-                if auto_decimate:
-                    final_faces = out_mesh.topology.numValidFaces()
-                    do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
-                    if do_decimate:
-                        out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+        def _process_one(args):
+            i, mesh = args
+            out_mesh = operation_fn(mesh)
+            if auto_decimate:
+                final_faces = out_mesh.topology.numValidFaces()
+                do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
+                if do_decimate:
+                    out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+            return i, out_mesh
 
-                processed_meshes.append(out_mesh)
+        success_map = {}
+        error_map = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_process_one, (i, mesh)): i for i, mesh in enumerate(meshlib_meshes)}
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    idx, out_mesh = future.result()
+                    success_map[idx] = out_mesh
+                except Exception as exc:
+                    error_map[i] = exc
+
+        # Rebuild survivors in original order so subsequent phases stay aligned
+        processed_meshes = []
+        surviving_indices = []
+        for i in range(len(meshlib_meshes)):
+            if i in success_map:
+                processed_meshes.append(success_map[i])
                 surviving_indices.append(i)
-            except Exception as exc:
-                collapsed_objs.append((blender_objs[i], exc))
+            else:
+                collapsed_objs.append((blender_objs[i], error_map.get(i, RuntimeError("unknown"))))
 
-        # Phase 3: Export only surviving meshes to STL
+        # Phase 3: Save surviving meshes to STL in parallel (pure file I/O)
         output_stl_paths = []
-        for j, mesh in enumerate(processed_meshes):
+        for j in range(len(processed_meshes)):
             src_idx = surviving_indices[j]
             fd, stl_path = tempfile.mkstemp(prefix=f"qi_out_{blender_objs[src_idx].name}_", suffix=".stl", dir=tmp_dir)
             os.close(fd)
             output_stl_paths.append(stl_path)
 
-            # Save meshlib mesh to STL
+        def _save_one(args):
+            mesh, stl_path = args
             try:
                 mm.saveMesh(mesh, stl_path)
             except Exception:
                 mm.saveMeshAs(mesh, stl_path)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            list(executor.map(_save_one, zip(processed_meshes, output_stl_paths)))
 
         # Phase 4: Import surviving results back to Blender
         result_objs = []
@@ -496,13 +518,13 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
             results.append((result_obj, initial_vert_counts[src_idx], final_verts))
     
     finally:
-        # Restore selection state
+        # Restore selection state (use names to avoid stale StructRNA references)
         for obj in bpy.context.selected_objects:
             obj.select_set(False)
-        for obj in prev_selection:
-            if obj and obj.name in bpy.data.objects:
-                obj.select_set(True)
-        if prev_active and prev_active.name in bpy.data.objects:
-            view_layer.objects.active = prev_active
+        for name in prev_selection_names:
+            if name in bpy.data.objects:
+                bpy.data.objects[name].select_set(True)
+        if prev_active_name and prev_active_name in bpy.data.objects:
+            view_layer.objects.active = bpy.data.objects[prev_active_name]
     
     return results, collapsed_objs

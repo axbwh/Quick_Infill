@@ -70,6 +70,19 @@ def _setup_meshlib_paths():
 	# Windows: Register DLL directory BEFORE any import attempt
 	if sys.platform == 'win32':
 		meshlib_libs = os.path.join(meshlib_site, 'meshlib.libs')
+		# If not found in the current Python version's site-packages, search
+		# sibling Python version directories (e.g. python3.11 alongside python3.13)
+		if not os.path.isdir(meshlib_libs):
+			try:
+				lib_dir = os.path.dirname(os.path.dirname(meshlib_site))
+				for entry in os.listdir(lib_dir):
+					candidate = os.path.join(lib_dir, entry, 'site-packages', 'meshlib.libs')
+					if os.path.isdir(candidate):
+						meshlib_libs = candidate
+						print(f"[Quick Infill] Found meshlib.libs in sibling Python dir: {meshlib_libs}")
+						break
+			except Exception as e:
+				print(f"[Quick Infill] Warning searching for meshlib.libs: {e}")
 		if os.path.isdir(meshlib_libs):
 			try:
 				os.add_dll_directory(meshlib_libs)

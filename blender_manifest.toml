@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "quick_infill"
-version = "1.0.5"
+version = "1.0.6"
 name = "Quick Infill"
 tagline = "Fixes resin trapping cavities"
 maintainer = "Alex Bannwarth"

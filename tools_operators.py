@@ -25,7 +25,7 @@ class QUICKINFILL_OT_grow(Operator):
         try:
             settings = context.scene.quick_infill_tools_settings
             distance = float(settings.distance)
-            resolution = float(settings.resolution)
+            resolution = float(settings.voxel_size)
             auto_decimate = settings.auto_decimate
             replace_original = settings.replace_original
 
@@ -82,7 +82,7 @@ class QUICKINFILL_OT_shrink(Operator):
         try:
             settings = context.scene.quick_infill_tools_settings
             distance = float(settings.distance)
-            resolution = float(settings.resolution)
+            resolution = float(settings.voxel_size)
             auto_decimate = settings.auto_decimate
             replace_original = settings.replace_original
 
@@ -138,7 +138,7 @@ class QUICKINFILL_OT_remesh(Operator):
     def execute(self, context):
         try:
             settings = context.scene.quick_infill_tools_settings
-            resolution = float(settings.resolution)
+            resolution = float(settings.voxel_size)
             auto_decimate = settings.auto_decimate
             replace_original = settings.replace_original
 
@@ -194,7 +194,7 @@ class QUICKINFILL_OT_trim_thin(Operator):
     def execute(self, context):
         try:
             settings = context.scene.quick_infill_tools_settings
-            resolution = float(settings.resolution)
+            resolution = float(settings.voxel_size)
             auto_decimate = settings.auto_decimate
             replace_original = settings.replace_original
 
@@ -280,7 +280,7 @@ class QUICKINFILL_OT_trim_edges(Operator):
             mm, _ = get_meshlib()
             settings = context.scene.quick_infill_tools_settings
             distance = float(settings.distance)
-            resolution = float(settings.resolution)
+            resolution = float(settings.voxel_size)
             trim_edges_x = float(settings.trim_edges_x)
             trim_edges_density = float(settings.trim_edges_density)
             auto_decimate = settings.auto_decimate

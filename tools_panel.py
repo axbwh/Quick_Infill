@@ -16,11 +16,11 @@ class QuickInfillToolsSettings(PropertyGroup):
         precision=3,
     )
     
-    resolution: FloatProperty(
-        name="Resolution",
-        description="Voxel resolution for remesh operations",
+    voxel_size: FloatProperty(
+        name="Voxel Size",
+        description="Voxel size for remesh operations",
         default=0.2,
-        min=0.05,
+        min=0.025,
         max=0.4,
         precision=3,
     )
@@ -104,8 +104,8 @@ def draw_offset_tools(layout, context):
         # Distance slider
         prop_with_suffix(tools_col, settings, "distance", "Distance", "mm")
         
-        # Resolution slider
-        prop_with_suffix(tools_col, settings, "resolution", "Resolution", "mm")
+        # Voxel size slider
+        prop_with_suffix(tools_col, settings, "voxel_size", "Voxel Size", "mm")
         
         tools_col.separator()
         

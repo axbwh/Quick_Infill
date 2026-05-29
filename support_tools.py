@@ -17,7 +17,7 @@ class QuickInfillSupportSettings(PropertyGroup):
         name="Voxel Size",
         description="Voxel size for undercut fixing (smaller = more precise but slower)",
         default=0.2,
-        min=0.05,
+        min=0.025,
         max=1.0,
         precision=3,
     )

@@ -99,6 +99,20 @@ class QuickInfillSettings(PropertyGroup):
     )
 
 
+class QUICKINFILL_OT_voxel_preset(Operator):
+    bl_idname = "quick_infill.voxel_preset"
+    bl_label = "Voxel Preset"
+    bl_description = "Set voxel size for Offset Tools and Support Tools"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    size: FloatProperty(name="Size", default=0.1)  # type: ignore
+
+    def execute(self, context):
+        context.scene.quick_infill_tools_settings.voxel_size = self.size
+        context.scene.quick_infill_support_settings.voxel_size = self.size
+        return {'FINISHED'}
+
+
 class QUICKINFILL_OT_test_cuda(Operator):
     bl_idname = "quick_infill.test_cuda"
     bl_label = "Test CUDA"
@@ -302,13 +316,18 @@ class QUICKINFILL_PT_sidebar(Panel):
         
         # Support Tools section
         support_tools.draw_support_tools(col, context)
-        
-        # Test CUDA button (commented out)
-        # col.operator(QUICKINFILL_OT_test_cuda.bl_idname, text="Test CUDA")
+
+        # Voxel Size Presets (minimal, not collapsible)
+        col.separator(factor=0.5)
+        col.label(text="Voxel Size Presets:")
+        row = col.row(align=True)
+        for size in (0.025, 0.05, 0.1, 0.2, 0.4):
+            row.operator("quick_infill.voxel_preset", text=str(size)).size = size
 
 
 classes = (
     QuickInfillSettings,
+    QUICKINFILL_OT_voxel_preset,
     QUICKINFILL_OT_test_cuda,
     QUICKINFILL_OT_preset_building_fast,
     QUICKINFILL_OT_preset_building_accurate,

@@ -30,11 +30,11 @@ This installs:
 Following Blender's official guidance, we ship a wheel in `wheels/` and reference it in `blender_manifest.toml`.
 
 ```powershell
-# Auto-detect Blender 4.5 and download a compatible meshlib wheel into wheels/
+# Auto-detect Blender 5.2 and download a compatible meshlib wheel into wheels/
 ./scripts/fetch-meshlib-wheel.ps1
 
 # Or specify a custom Blender path or meshlib version
-./scripts/fetch-meshlib-wheel.ps1 -BlenderPath "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe" -MeshlibVersion 2.2.2
+./scripts/fetch-meshlib-wheel.ps1 -BlenderPath "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe" -MeshlibVersion 2.2.2
 
 # Package the extension for distribution
 ./scripts/package-extension.ps1

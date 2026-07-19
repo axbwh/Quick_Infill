@@ -74,7 +74,7 @@ def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None):
         blender_obj.select_set(True)
         view_layer.objects.active = blender_obj
 
-        # Export selection to STL using Blender 4.5 native operator
+        # Export selection to STL using Blender native operator
         res = bpy.ops.wm.stl_export(
             'EXEC_DEFAULT',
             filepath=stl_path,
@@ -327,7 +327,7 @@ def replace_mesh_keep_transforms(original_obj, new_obj):
     
     # Give the mesh a proper name
     original_obj.data.name = original_obj.name
-    
+
     # Remove the temporary imported object (but not its mesh data, which is now in use)
     bpy.data.objects.remove(new_obj, do_unlink=True)
     

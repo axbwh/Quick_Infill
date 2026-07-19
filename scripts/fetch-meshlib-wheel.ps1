@@ -11,7 +11,7 @@ function Find-BlenderExe {
     param([string]$Hint)
     if ($Hint -and (Test-Path $Hint)) { return $Hint }
     $candidates = @(
-        "$env:ProgramFiles\Blender Foundation\Blender 4.5\blender.exe",
+        "$env:ProgramFiles\Blender Foundation\Blender 5.2\blender.exe",
         "$env:ProgramFiles\Blender Foundation\Blender\blender.exe",
         "$env:ProgramFiles(x86)\Steam\steamapps\common\Blender\blender.exe"
     )

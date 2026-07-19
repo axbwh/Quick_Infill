@@ -236,8 +236,16 @@ class QUICKINFILL_OT_trim_thin(Operator):
             for obj, exc in collapsed:
                 obj_name = obj.name
                 removed_names.append(obj_name)
+                # Save mesh reference before removal: bpy.data.objects.remove()
+                # decrements the mesh's user count but never removes the mesh
+                # itself, leaving it as an orphan that gets serialised on save.
+                mesh_to_del = obj.data if obj.type == 'MESH' else None
                 bpy.data.objects.remove(obj, do_unlink=True)
-                # print(f"[Quick Infill] Trim Thin ({obj_name}): mesh fully collapsed, object deleted")
+                if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
+                    try:
+                        bpy.data.meshes.remove(mesh_to_del)
+                    except Exception:
+                        pass
 
             if removed_names:
                 names_str = ", ".join(f"'{n}'" for n in removed_names)
@@ -260,6 +268,13 @@ class QUICKINFILL_OT_trim_thin(Operator):
                         self.report({'INFO'}, f"Trim Thin completed. Updated {obj_count} objects")
                     else:
                         self.report({'INFO'}, f"Trim Thin completed. Created {obj_count} new objects")
+
+            # Force the depsgraph to fully evaluate the result mesh now, inside
+            # the operator where the user expects a wait.  Without this, Blender
+            # defers the evaluation (split-normal computation, BVH construction,
+            # etc.) until the next time it is needed – which is the file save –
+            # causing the save to appear frozen.
+            bpy.context.view_layer.update()
 
             return {'FINISHED'}
 
@@ -423,7 +438,14 @@ class QUICKINFILL_OT_trim_edges(Operator):
             for i, obj_name in collapsed_names.items():
                 removed_names.append(obj_name)
                 if obj_name in bpy.data.objects:
-                    bpy.data.objects.remove(bpy.data.objects[obj_name], do_unlink=True)
+                    obj_to_del = bpy.data.objects[obj_name]
+                    mesh_to_del = obj_to_del.data if obj_to_del.type == 'MESH' else None
+                    bpy.data.objects.remove(obj_to_del, do_unlink=True)
+                    # The object removal decrements the mesh user count; if it
+                    # reached 0 the mesh is now orphaned – remove it explicitly
+                    # so Blender does not have to serialize it during save.
+                    if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
+                        bpy.data.meshes.remove(mesh_to_del)
 
             results = []
             for i in surviving_indices:
@@ -464,6 +486,13 @@ class QUICKINFILL_OT_trim_edges(Operator):
 
             if results:
                 select_results([r[0] for r in results])
+
+            # Force the depsgraph to fully evaluate the result mesh now, inside
+            # the operator where the user expects a wait.  Without this, Blender
+            # defers the evaluation (split-normal computation, BVH construction,
+            # etc.) until the next time it is needed – which is the file save –
+            # causing the save to appear frozen.
+            bpy.context.view_layer.update()
 
             return {'FINISHED'}
 

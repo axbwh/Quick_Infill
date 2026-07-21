@@ -82,6 +82,7 @@ def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None):
             use_batch=False,
             global_scale=10.0,
             apply_modifiers=True,
+            evaluation_mode='DAG_EVAL_VIEWPORT',
         )
         if res != {'FINISHED'}:
             raise RuntimeError("Could not export STL with Blender 4.5 native operator")
@@ -404,6 +405,7 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
                 use_batch=False,
                 global_scale=10.0,
                 apply_modifiers=True,
+                evaluation_mode='DAG_EVAL_VIEWPORT',
             )
             
             # Load into meshlib

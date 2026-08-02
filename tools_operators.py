@@ -63,7 +63,14 @@ class QUICKINFILL_OT_grow(Operator):
                     self.report({'INFO'}, f"Grow completed. Updated {obj_count} objects")
                 else:
                     self.report({'INFO'}, f"Grow completed. Created {obj_count} new objects")
-            
+
+            # Force the depsgraph to fully evaluate the result mesh now, inside
+            # the operator where the user expects a wait.  Without this, Blender
+            # defers the evaluation (split-normal computation, BVH construction,
+            # etc.) until the next time it is needed – which is the file save –
+            # causing the save to appear frozen.
+            bpy.context.view_layer.update()
+
             return {'FINISHED'}
 
         except Exception as e:
@@ -120,7 +127,14 @@ class QUICKINFILL_OT_shrink(Operator):
                     self.report({'INFO'}, f"Shrink completed. Updated {obj_count} objects")
                 else:
                     self.report({'INFO'}, f"Shrink completed. Created {obj_count} new objects")
-            
+
+            # Force the depsgraph to fully evaluate the result mesh now, inside
+            # the operator where the user expects a wait.  Without this, Blender
+            # defers the evaluation (split-normal computation, BVH construction,
+            # etc.) until the next time it is needed – which is the file save –
+            # causing the save to appear frozen.
+            bpy.context.view_layer.update()
+
             return {'FINISHED'}
 
         except Exception as e:
@@ -176,7 +190,14 @@ class QUICKINFILL_OT_remesh(Operator):
                     self.report({'INFO'}, f"Remesh completed. Updated {obj_count} objects")
                 else:
                     self.report({'INFO'}, f"Remesh completed. Created {obj_count} new objects")
-            
+
+            # Force the depsgraph to fully evaluate the result mesh now, inside
+            # the operator where the user expects a wait.  Without this, Blender
+            # defers the evaluation (split-normal computation, BVH construction,
+            # etc.) until the next time it is needed – which is the file save –
+            # causing the save to appear frozen.
+            bpy.context.view_layer.update()
+
             return {'FINISHED'}
 
         except Exception as e:

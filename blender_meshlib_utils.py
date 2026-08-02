@@ -331,15 +331,22 @@ def replace_mesh_keep_transforms(original_obj, new_obj):
 
     # Remove the temporary imported object (but not its mesh data, which is now in use)
     bpy.data.objects.remove(new_obj, do_unlink=True)
-    
-    # Clean up old mesh data if it has no users
-    if old_mesh.users == 0:
-        bpy.data.meshes.remove(old_mesh)
-    
+
     # Reselect the original object and make it active
     original_obj.select_set(True)
     bpy.context.view_layer.objects.active = original_obj
-    
+
+    # Sync the depsgraph so it transitions from old_mesh to new_mesh
+    # BEFORE freeing old_mesh.  Without this the depsgraph still holds a
+    # reference to old_mesh internally; removing the mesh while that reference
+    # is live leaves a dangling pointer that Blender dereferences on the next
+    # file save, causing a freeze.
+    bpy.context.view_layer.update()
+
+    # Now safe to free the old mesh – the depsgraph no longer references it.
+    if old_mesh.users == 0:
+        bpy.data.meshes.remove(old_mesh)
+
     return original_obj
 
 

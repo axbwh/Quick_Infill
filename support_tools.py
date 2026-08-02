@@ -671,6 +671,7 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} direction(s)")
 
             select_results([r[0] for r in results])
+            bpy.context.view_layer.update()
             return {'FINISHED'}
 
         except Exception as e:
@@ -852,6 +853,7 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
                         self.report({'INFO'}, f"Fixed undercuts, created {obj_count} new objects from {dir_count} view direction(s)")
 
             select_results([r[0] for r in results])
+            bpy.context.view_layer.update()
             return {'FINISHED'}
 
         except Exception as e:
@@ -925,7 +927,7 @@ class QUICKINFILL_OT_voxel_intersect(Operator):
             
             print(f"[Quick Infill] Voxel Intersect: {len(mesh_names)} objects → {final_verts} vertices")
             self.report({'INFO'}, f"Intersected {len(mesh_names)} objects. Result: '{result_obj.name}'")
-            
+            bpy.context.view_layer.update()
             return {'FINISHED'}
             
         except Exception as e:
@@ -1012,7 +1014,7 @@ class QUICKINFILL_OT_shrink_from_view(Operator):
             
             # Restore selection to result objects
             select_results([r[0] for r in results])
-
+            bpy.context.view_layer.update()
             return {'FINISHED'}
 
         except Exception as e:

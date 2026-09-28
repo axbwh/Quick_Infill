@@ -503,8 +503,8 @@ class QUICKINFILL_PT_sidebar(Panel):
         toggle_row.prop(context.scene.quick_infill_settings, "process_islands", text="Islands", toggle=True)
 
         col.separator(factor=0.5)
+        col.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart Res", toggle=True)
         col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
-        col.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart", toggle=True)
         row = col.row(align=True)
         for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
             row.operator("quick_infill.voxel_preset", text=str(size)).size = size

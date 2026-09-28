@@ -81,10 +81,26 @@ class QuickInfillSupportSettings(PropertyGroup):
         default=True,
     )
     
-    auto_decimate: BoolProperty(
-        name="Auto Decimate",
-        description="Automatically decimate after operations to match original vertex count",
-        default=True,
+    decimate_mode: EnumProperty(
+        name="Decimate Mode",
+        description="Choose when auto-decimation is active",
+        items=[
+            ("OFF", "Off", "Disable auto-decimation"),
+            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
+            ("VOXEL_RATIO", "Ratio", "Decimate based on the current ratio value"),
+        ],
+        default="VOXEL_RATIO",
+        options={'HIDDEN'},
+    )
+
+    decimation_ratio: FloatProperty(
+        name="Decimation Ratio",
+        description="Fraction of final faces to keep during auto-decimation",
+        default=0.015,
+        min=0.0,
+        max=1.0,
+        precision=4,
+        options={'HIDDEN'},
     )
     
     auto_shrink: BoolProperty(
@@ -525,7 +541,7 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
             voxel_size = float(settings.voxel_size)
             angle = float(settings.undercut_angle)
             replace_original = settings.replace_original
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             auto_shrink = settings.auto_shrink
 
             selected_objs = [obj for obj in context.selected_objects if obj.type == 'MESH']
@@ -572,7 +588,14 @@ class QUICKINFILL_OT_fix_undercuts(Operator):
                 )
                 if auto_decimate:
                     current_faces = result_mesh.topology.numValidFaces()
-                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
+                    mode = settings.decimate_mode
+                    do_decimate, target_faces = should_auto_decimate_faces(
+                        initial_faces,
+                        current_faces,
+                        voxel_size=voxel_size,
+                        mode=mode,
+                        ratio=settings.decimation_ratio,
+                    )
                     if do_decimate:
                         result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=voxel_size)
                 return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts(), undercut_count
@@ -695,7 +718,7 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
             voxel_size = float(settings.voxel_size)
             angle = float(settings.undercut_angle)
             replace_original = settings.replace_original
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             auto_shrink = settings.auto_shrink
 
             selected_objs = [obj for obj in context.selected_objects if obj.type == 'MESH']
@@ -754,7 +777,14 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
                 )
                 if auto_decimate:
                     current_faces = result_mesh.topology.numValidFaces()
-                    do_decimate, target_faces = should_auto_decimate_faces(initial_faces, current_faces)
+                    mode = settings.decimate_mode
+                    do_decimate, target_faces = should_auto_decimate_faces(
+                        initial_faces,
+                        current_faces,
+                        voxel_size=voxel_size,
+                        mode=mode,
+                        ratio=settings.decimation_ratio,
+                    )
                     if do_decimate:
                         result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=voxel_size)
                 return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts(), undercut_count
@@ -881,7 +911,7 @@ class QUICKINFILL_OT_voxel_intersect(Operator):
             mm, _ = get_meshlib()
             settings = context.scene.quick_infill_support_settings
             voxel_size = settings.voxel_size
-            keep_original = settings.voxel_intersect_keep_original
+            replace_original = settings.replace_original
             
             # Get all selected mesh objects
             selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
@@ -905,6 +935,20 @@ class QUICKINFILL_OT_voxel_intersect(Operator):
                 result_mesh = intersect_meshes(result_mesh, other_mesh, voxel_size)
                 mesh_names.append(obj.name)
             
+            # Respect the shared auto-decimation option before exporting back to Blender.
+            if settings.decimate_mode != "OFF":
+                from .offset_utils import should_auto_decimate_faces, decimate_mesh
+                final_faces_before = result_mesh.topology.numValidFaces()
+                do_decimate, target_faces = should_auto_decimate_faces(
+                    sum(obj.data.vertices.__len__() for obj in selected_meshes if obj.type == 'MESH' and obj.data is not None),
+                    final_faces_before,
+                    voxel_size=float(voxel_size),
+                    mode=settings.decimate_mode,
+                    ratio=settings.decimation_ratio,
+                )
+                if do_decimate:
+                    result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=float(voxel_size))
+
             # Check if result is valid
             if result_mesh.topology.numValidVerts() == 0:
                 self.report({'ERROR'}, "Intersection resulted in empty mesh. Objects may not overlap.")
@@ -916,8 +960,8 @@ class QUICKINFILL_OT_voxel_intersect(Operator):
             new_name = active_obj.name + "_Intersect"
             result_obj = meshlib_to_blender_via_stl(result_mesh, name=new_name)
             
-            # Handle transforms
-            if not keep_original:
+            # Handle transforms using the shared Replace toggle.
+            if replace_original:
                 from .blender_meshlib_utils import replace_mesh_keep_transforms
                 result_obj = replace_mesh_keep_transforms(active_obj, result_obj)
                 
@@ -1069,11 +1113,6 @@ def draw_support_tools(layout, context):
             c.prop(data, attr, text=label)
             split.label(text=suffix)
         
-        # Auto Decimate, Replace Original checkboxes
-        row = tools_col.row(align=True)
-        row.prop(settings, "auto_decimate", text="Auto Decimate")
-        row.prop(settings, "replace_original", text="Replace Original")
-        
         tools_col.separator()
         
         # Directions 3x3 grid layout (top-down view)
@@ -1131,12 +1170,6 @@ def draw_support_tools(layout, context):
         # Shrink from View button
         tools_col.operator("quick_infill.shrink_from_view", text="Shrink from View", icon='FULLSCREEN_EXIT')
         
-        tools_col.separator()
-        
-        # Voxel Intersect with Keep Original on same line
-        row = tools_col.row(align=True)
-        row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='MOD_BOOLEAN')
-        row.prop(settings, "voxel_intersect_keep_original", text="Keep Original")
 
 
 classes = (

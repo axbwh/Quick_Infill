@@ -20,6 +20,30 @@ def sync_shared_voxel_size(self, context):
         context.scene.quick_infill_support_settings.voxel_size = value
 
 
+def sync_shared_decimate_mode(self, context):
+    """Mirror the shared decimation mode to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.decimate_mode = self.decimate_mode
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.decimate_mode = self.decimate_mode
+
+
+def sync_shared_decimation_ratio(self, context):
+    """Mirror the shared decimation ratio to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.decimation_ratio = self.decimation_ratio
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.decimation_ratio = self.decimation_ratio
+
+
+def sync_shared_replace_original(self, context):
+    """Mirror the shared replace-original toggle to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.replace_original = self.replace_original
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.replace_original = self.replace_original
+
+
 class QuickInfillSettings(PropertyGroup):
     shared_voxel_size: FloatProperty(
         name="Voxel Size",
@@ -29,6 +53,35 @@ class QuickInfillSettings(PropertyGroup):
         max=0.4,
         precision=3,
         update=sync_shared_voxel_size,
+    )
+
+    replace_original: BoolProperty(
+        name="Replace Original",
+        description="Replace the original object with the result instead of creating a new object",
+        default=True,
+        update=sync_shared_replace_original,
+    )
+
+    decimate_mode: EnumProperty(
+        name="Decimate Mode",
+        description="Choose when automatic decimation is active",
+        items=[
+            ("OFF", "Off", "Disable auto-decimation"),
+            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
+            ("VOXEL_RATIO", "Ratio", "Decimate based on the current ratio value"),
+        ],
+        default="VOXEL_RATIO",
+        update=sync_shared_decimate_mode,
+    )
+
+    decimation_ratio: FloatProperty(
+        name="Decimation Ratio",
+        description="Fraction of final faces to keep during auto-decimation",
+        default=0.015,
+        min=0.0,
+        max=1.0,
+        precision=4,
+        update=sync_shared_decimation_ratio,
     )
 
     resolution: FloatProperty(  # type: ignore
@@ -134,12 +187,13 @@ class QUICKINFILL_OT_voxel_preset(Operator):
 class QUICKINFILL_OT_offset_preset(Operator):
     bl_idname = "quick_infill.offset_preset"
     bl_label = "Offset Preset"
-    bl_description = "Set offset distance, voxel size and trim edge x factor"
+    bl_description = "Set offset distance, voxel size, trim edge x factor and decimation ratio"
     bl_options = {'REGISTER', 'UNDO'}
 
     voxel_size: FloatProperty(name="Voxel Size", default=0.05)
     distance: FloatProperty(name="Distance", default=0.7)
     x: FloatProperty(name="X", default=0.25)
+    ratio: FloatProperty(name="Ratio", default=0.015)
 
     def execute(self, context):
         tools = context.scene.quick_infill_tools_settings
@@ -147,7 +201,9 @@ class QUICKINFILL_OT_offset_preset(Operator):
         tools.distance = self.distance
         tools.trim_edges_x = self.x
         context.scene.quick_infill_settings.shared_voxel_size = self.voxel_size
+        context.scene.quick_infill_settings.decimation_ratio = self.ratio
         context.scene.quick_infill_support_settings.voxel_size = self.voxel_size
+        context.scene.quick_infill_support_settings.decimation_ratio = self.ratio
         return {'FINISHED'}
 
 
@@ -358,10 +414,21 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Tool Options
         col.separator(factor=0.5)
         col.label(text="Tool Options")
+        top_row = col.row(align=True)
+        top_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='MOD_BOOLEAN')
+        top_row.prop(context.scene.quick_infill_settings, "replace_original", text="Replace", toggle=True)
+
+        col.separator(factor=0.5)
         col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
         row = col.row(align=True)
         for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
             row.operator("quick_infill.voxel_preset", text=str(size)).size = size
+
+        auto_decimation_box = col.box()
+        auto_decimation_box.label(text="Auto Decimation")
+        decimate_row = auto_decimation_box.row(align=True)
+        decimate_row.prop(context.scene.quick_infill_settings, "decimate_mode", expand=True)
+        decimate_row.prop(context.scene.quick_infill_settings, "decimation_ratio", text="Ratio")
 
         col.separator(factor=0.5)
         col.label(text="Presets")
@@ -370,16 +437,19 @@ class QUICKINFILL_PT_sidebar(Panel):
         stone.voxel_size = 0.075
         stone.distance = 0.7
         stone.x = 0.25
+        stone.ratio = 0.015
 
         detail = preset_row.operator("quick_infill.offset_preset", text="Detail")
         detail.voxel_size = 0.05
         detail.distance = 0.3
         detail.x = 0.4
+        detail.ratio = 0.02
 
         fine = preset_row.operator("quick_infill.offset_preset", text="Fine")
         fine.voxel_size = 0.025
         fine.distance = 0.2
         fine.x = 0.25
+        fine.ratio = 0.01
 
 
 classes = (

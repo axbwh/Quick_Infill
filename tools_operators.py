@@ -26,7 +26,7 @@ class QUICKINFILL_OT_grow(Operator):
             settings = context.scene.quick_infill_tools_settings
             distance = float(settings.distance)
             resolution = float(settings.voxel_size)
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
@@ -90,7 +90,7 @@ class QUICKINFILL_OT_shrink(Operator):
             settings = context.scene.quick_infill_tools_settings
             distance = float(settings.distance)
             resolution = float(settings.voxel_size)
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
@@ -153,7 +153,7 @@ class QUICKINFILL_OT_remesh(Operator):
         try:
             settings = context.scene.quick_infill_tools_settings
             resolution = float(settings.voxel_size)
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
@@ -216,7 +216,7 @@ class QUICKINFILL_OT_trim_thin(Operator):
         try:
             settings = context.scene.quick_infill_tools_settings
             resolution = float(settings.voxel_size)
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
@@ -319,7 +319,7 @@ class QUICKINFILL_OT_trim_edges(Operator):
             resolution = float(settings.voxel_size)
             trim_edges_x = float(settings.trim_edges_x)
             trim_edges_density = float(settings.trim_edges_density)
-            auto_decimate = settings.auto_decimate
+            auto_decimate = settings.decimate_mode != "OFF"
             replace_original = settings.replace_original
 
             selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
@@ -392,7 +392,14 @@ class QUICKINFILL_OT_trim_edges(Operator):
 
                 if auto_decimate:
                     final_faces_before = result_mesh.topology.numValidFaces()
-                    do_decimate, tgt = should_auto_decimate_faces(initial_faces, final_faces_before)
+                    mode = settings.decimate_mode
+                    do_decimate, tgt = should_auto_decimate_faces(
+                        initial_faces,
+                        final_faces_before,
+                        voxel_size=resolution,
+                        mode=mode,
+                        ratio=settings.decimation_ratio,
+                    )
                     if do_decimate:
                         result_mesh = decimate_mesh(result_mesh, target_face_count=tgt, resolution=resolution)
 

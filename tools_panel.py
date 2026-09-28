@@ -45,16 +45,33 @@ class QuickInfillToolsSettings(PropertyGroup):
         precision=4,
     )
     
-    auto_decimate: bpy.props.BoolProperty(
-        name="Auto Decimate",
-        description="Automatically decimate after operations",
-        default=True,
+    decimate_mode: bpy.props.EnumProperty(
+        name="Decimate Mode",
+        description="Choose when auto-decimation is active",
+        items=[
+            ("OFF", "Off", "Disable auto-decimation"),
+            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
+            ("VOXEL_RATIO", "Ratio", "Decimate based on the current ratio value"),
+        ],
+        default="VOXEL_RATIO",
+        options={'HIDDEN'},
+    )
+
+    decimation_ratio: bpy.props.FloatProperty(
+        name="Decimation Ratio",
+        description="Fraction of final faces to keep during auto-decimation",
+        default=0.015,
+        min=0.0,
+        max=1.0,
+        precision=4,
+        options={'HIDDEN'},
     )
     
     replace_original: bpy.props.BoolProperty(
         name="Replace Original",
         description="Replace the original object with the result instead of creating a new object",
         default=True,
+        options={'HIDDEN'},
     )
     
     show_tools: bpy.props.BoolProperty(
@@ -94,11 +111,6 @@ def draw_offset_tools(layout, context):
             c.use_property_decorate = False
             c.prop(data, attr, text=label)
             split.label(text=suffix)
-        
-        # Auto Decimate and Replace Original checkboxes on same row
-        row = tools_col.row(align=True)
-        row.prop(settings, "auto_decimate", text="Auto Decimate")
-        row.prop(settings, "replace_original", text="Replace Original")
         
         tools_col.separator()
         

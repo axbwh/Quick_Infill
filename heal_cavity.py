@@ -96,7 +96,13 @@ class QUICKINFILL_OT_heal_cavity(Operator):
             # Decimate output mesh if face count increased significantly
             from .offset_utils import decimate_mesh, should_auto_decimate_faces
             final_face_count = out_mesh.topology.numValidFaces()
-            do_decimate, target_faces = should_auto_decimate_faces(INITIAL_FACE_COUNT, final_face_count)
+            do_decimate, target_faces = should_auto_decimate_faces(
+                INITIAL_FACE_COUNT,
+                final_face_count,
+                voxel_size=vox,
+                mode="VOXEL_RATIO",
+                ratio=getattr(s, 'decimation_ratio', None),
+            )
             if do_decimate:
                 out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=vox)
                 new_final_count = out_mesh.topology.numValidFaces()

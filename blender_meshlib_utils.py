@@ -264,7 +264,16 @@ def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decima
     # Auto decimate if enabled - only when significant face growth occurred
     final_face_count = out_mesh.topology.numValidFaces()
     if auto_decimate:
-        do_decimate, target_faces = should_auto_decimate_faces(initial_face_count, final_face_count)
+        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
+        mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
+        ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
+        do_decimate, target_faces = should_auto_decimate_faces(
+            initial_face_count,
+            final_face_count,
+            voxel_size=resolution,
+            mode=mode,
+            ratio=ratio,
+        )
         if do_decimate:
             out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
     
@@ -442,7 +451,16 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
             out_mesh = operation_fn(mesh)
             if auto_decimate:
                 final_faces = out_mesh.topology.numValidFaces()
-                do_decimate, target_faces = should_auto_decimate_faces(initial_face_counts[i], final_faces)
+                settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
+                mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
+                ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
+                do_decimate, target_faces = should_auto_decimate_faces(
+                    initial_face_counts[i],
+                    final_faces,
+                    voxel_size=resolution,
+                    mode=mode,
+                    ratio=ratio,
+                )
                 if do_decimate:
                     out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
             return i, out_mesh

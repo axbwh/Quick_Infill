@@ -7,25 +7,41 @@ from typing import Optional
 # This prevents both progressive detail loss AND progressive growth
 
 
-def should_auto_decimate_faces(initial_faces: int, final_faces: int) -> tuple:
+def voxel_size_to_decimation_ratio(voxel_size: float) -> float:
+    """Map the current voxel size preset to a decimation ratio.
+
+    The requested defaults are:
+        0.025 -> 0.0100
+        0.075 -> 0.0150
+    and the relationship continues linearly from there, so larger voxel sizes
+    keep a larger ratio and therefore decimate more aggressively.
+    """
+    voxel_size = float(voxel_size)
+    ratio = voxel_size / 5.0
+    return max(0.01, min(0.2, ratio))
+
+
+def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size: Optional[float] = None, mode: str = "VOXEL_RATIO", ratio: Optional[float] = None) -> tuple:
     """
     Determine if auto-decimation should be applied and calculate target face count.
-    
-    Simple logic: if the mesh grew, decimate back to initial count.
-    This prevents progressive changes in either direction.
-    
-    Args:
-        initial_faces: Face count before the operation
-        final_faces: Face count after the operation
-    
-    Returns:
-        tuple: (should_decimate: bool, target_face_count: int)
+
+    Mode "OFF" disables it. Mode "ORIGINAL" decimates back to the original
+    face count. Mode "VOXEL_RATIO" decimates based on the current ratio value,
+    which defaults to the voxel size preset mapping unless the caller provides an
+    explicit ratio override.
     """
-    if final_faces > initial_faces:
-        # Mesh grew - decimate back to initial
-        return True, initial_faces
-    
-    # Mesh stayed same or shrunk - no decimation needed
+    if mode == "OFF":
+        return False, final_faces
+
+    if mode == "ORIGINAL":
+        if final_faces > initial_faces:
+            return True, initial_faces
+        return False, final_faces
+
+    target_ratio = ratio if ratio is not None else (voxel_size_to_decimation_ratio(voxel_size) if voxel_size is not None else 0.015)
+    target_faces = max(1, int(final_faces * float(target_ratio)))
+    if target_faces < final_faces:
+        return True, target_faces
     return False, final_faces
 
 def cuda_offset(mesh, resolution: float, distance: float):

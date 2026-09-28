@@ -11,6 +11,17 @@ STL_EXPORT_SCALE = 10.0
 # mesh geometry with the Stone/Detail/Fine/Mini resolution it was processed at.
 RES_TAG_ATTR = "qi_res_tag"
 
+# Name of the visual color attribute mirroring the tag, for viewport shading.
+RES_COLOR_ATTR = "qi_res_color"
+RES_TAG_COLORS = {
+    'STONE': (0.55, 0.35, 0.2, 1.0),
+    'DETAIL': (0.2, 0.55, 0.9, 1.0),
+    'FINE': (0.25, 0.8, 0.3, 1.0),
+    'MINI': (0.95, 0.75, 0.1, 1.0),
+    'COARSE': (0.8, 0.15, 0.15, 1.0),
+}
+RES_UNTAGGED_COLOR = (0.5, 0.5, 0.5, 1.0)
+
 
 def _tag_to_index(tag_name):
     """Map a resolution tag name to its stable storage index, or -1 if unknown."""
@@ -105,9 +116,10 @@ def _approximate_tag_from_remesh_voxel_size(mesh):
 
 
 def write_mesh_resolution_tags(mesh, face_tag_indices, remesh_voxel_size=None):
-    """Write the per-face qi_res_tag attribute and remesh_voxel_size onto a mesh
-    datablock, so Blender's own voxel remesh in Sculpt Mode stays consistent
-    with the resolution Quick Infill last processed it at.
+    """Write the per-face qi_res_tag attribute, a matching color attribute for
+    viewport visualization, and remesh_voxel_size onto a mesh datablock, so
+    Blender's own voxel remesh in Sculpt Mode stays consistent with the
+    resolution Quick Infill last processed it at.
 
     remesh_voxel_size is given in meshlib/STL space (scaled by STL_EXPORT_SCALE);
     it is converted down to Blender's own local units before being stored.
@@ -121,8 +133,26 @@ def write_mesh_resolution_tags(mesh, face_tag_indices, remesh_voxel_size=None):
     if len(face_tag_indices) == polycount:
         for i, item in enumerate(attr.data):
             item.value = face_tag_indices[i]
+        _write_resolution_colors(mesh, face_tag_indices)
     if remesh_voxel_size is not None:
         mesh.remesh_voxel_size = float(remesh_voxel_size) / STL_EXPORT_SCALE
+
+
+def _write_resolution_colors(mesh, face_tag_indices):
+    """Mirror the per-face resolution tag onto a CORNER color attribute so it
+    can be visualized directly in the viewport (Color Attribute shading)."""
+    color_attr = mesh.color_attributes.get(RES_COLOR_ATTR)
+    if color_attr is None:
+        color_attr = mesh.color_attributes.new(name=RES_COLOR_ATTR, type='BYTE_COLOR', domain='CORNER')
+    for poly in mesh.polygons:
+        tag = _index_to_tag(face_tag_indices[poly.index])
+        color = RES_TAG_COLORS.get(tag, RES_UNTAGGED_COLOR)
+        for loop_index in poly.loop_indices:
+            color_attr.data[loop_index].color = color
+    try:
+        mesh.color_attributes.active_color = color_attr
+    except (AttributeError, TypeError):
+        pass
 
 
 def set_object_resolution_label(obj, label):

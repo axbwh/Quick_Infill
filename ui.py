@@ -262,6 +262,118 @@ class QUICKINFILL_OT_voxel_preset(Operator):
         return {'FINISHED'}
 
 
+class QUICKINFILL_OT_select_by_resolution_tag(Operator):
+    bl_idname = "quick_infill.select_by_resolution_tag"
+    bl_label = "Select Same Resolution"
+    bl_description = "Select currently visible objects (or mesh islands in Edit Mode) tagged with the current voxel size preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .offset_utils import RESOLUTION_TAG_ORDER, nearest_resolution_tag
+        from .blender_meshlib_utils import read_object_resolution_tag, RES_TAG_ATTR
+
+        settings = context.scene.quick_infill_settings
+        target_tag = nearest_resolution_tag(settings.shared_voxel_size)
+        target_index = RESOLUTION_TAG_ORDER.index(target_tag)
+
+        if context.mode == 'EDIT_MESH':
+            import bmesh
+            edit_objs = [obj for obj in context.objects_in_mode if obj.type == 'MESH']
+            if not edit_objs:
+                self.report({'ERROR'}, "No mesh in edit mode.")
+                return {'CANCELLED'}
+            matched = 0
+            untagged_objs = []
+            for obj in edit_objs:
+                me = obj.data
+                bm = bmesh.from_edit_mesh(me)
+                layer = bm.faces.layers.int.get(RES_TAG_ATTR)
+                if layer is None:
+                    untagged_objs.append(obj.name)
+                    continue
+                for f in bm.faces:
+                    is_match = f[layer] == target_index
+                    f.select = is_match
+                    if is_match:
+                        matched += 1
+                bm.select_flush_mode()
+                bmesh.update_edit_mesh(me)
+            if matched == 0:
+                self.report({'INFO'}, f"No faces tagged '{target_tag}'.")
+            elif untagged_objs:
+                names_str = ", ".join(f"'{n}'" for n in untagged_objs)
+                self.report({'INFO'}, f"Selected {matched} face(s) tagged '{target_tag}'. No tags on: {names_str}")
+            else:
+                self.report({'INFO'}, f"Selected {matched} face(s) tagged '{target_tag}'.")
+            return {'FINISHED'}
+
+        # Object mode: only touch currently visible objects; hidden objects
+        # are left untouched entirely.
+        matched = 0
+        last_match = None
+        for obj in bpy.data.objects:
+            if obj.type != 'MESH' or not obj.visible_get():
+                continue
+            if read_object_resolution_tag(obj) == target_tag:
+                obj.select_set(True)
+                matched += 1
+                last_match = obj
+            else:
+                obj.select_set(False)
+
+        if last_match is not None:
+            context.view_layer.objects.active = last_match
+
+        if matched == 0:
+            self.report({'INFO'}, f"No visible objects tagged '{target_tag}'.")
+        else:
+            self.report({'INFO'}, f"Selected {matched} object(s) tagged '{target_tag}'.")
+        return {'FINISHED'}
+
+
+class QUICKINFILL_OT_pick_resolution_tag(Operator):
+    bl_idname = "quick_infill.pick_resolution_tag"
+    bl_label = "Pick Resolution"
+    bl_description = "Set the voxel size and ratio preset from the active object's tag (or active face's tag in Edit Mode)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from .offset_utils import RESOLUTION_TAG_ORDER
+        from .blender_meshlib_utils import read_object_resolution_tag, RES_TAG_ATTR
+
+        tag = None
+
+        if context.mode == 'EDIT_MESH':
+            import bmesh
+            obj = context.edit_object
+            if obj is not None and obj.type == 'MESH':
+                bm = bmesh.from_edit_mesh(obj.data)
+                layer = bm.faces.layers.int.get(RES_TAG_ATTR)
+                if layer is not None:
+                    active_face = bm.faces.active
+                    if active_face is None:
+                        selected = [f for f in bm.faces if f.select]
+                        active_face = selected[0] if selected else None
+                    if active_face is not None:
+                        idx = active_face[layer]
+                        if 0 <= idx < len(RESOLUTION_TAG_ORDER):
+                            tag = RESOLUTION_TAG_ORDER[idx]
+        else:
+            tag = read_object_resolution_tag(context.active_object)
+
+        if tag is None:
+            self.report({'WARNING'}, "No resolution tag found to pick.")
+            return {'CANCELLED'}
+
+        voxel_size, ratio = RESOLUTION_PRESETS[tag]
+        settings = context.scene.quick_infill_settings
+        settings.shared_voxel_size = voxel_size
+        settings.decimation_ratio = ratio
+        settings.active_offset_preset = tag
+        self.report({'INFO'}, f"Set preset to '{tag}'.")
+        return {'FINISHED'}
+
+
 class QUICKINFILL_OT_offset_preset(Operator):
     bl_idname = "quick_infill.offset_preset"
     bl_label = "Offset Preset"
@@ -503,7 +615,6 @@ class QUICKINFILL_PT_sidebar(Panel):
         toggle_row.prop(context.scene.quick_infill_settings, "process_islands", text="Islands", toggle=True)
 
         col.separator(factor=0.5)
-        col.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart Res", toggle=True)
         col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
         row = col.row(align=True)
         for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
@@ -547,10 +658,17 @@ class QUICKINFILL_PT_sidebar(Panel):
         mini.x = 0.25
         mini.ratio = 0.04
 
+        tag_tools_row = col.row(align=True)
+        tag_tools_row.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart Res", toggle=True)
+        tag_tools_row.operator("quick_infill.select_by_resolution_tag", text="", icon='VIEWZOOM')
+        tag_tools_row.operator("quick_infill.pick_resolution_tag", text="", icon='EYEDROPPER')
+
 
 classes = (
     QuickInfillSettings,
     QUICKINFILL_OT_voxel_preset,
+    QUICKINFILL_OT_select_by_resolution_tag,
+    QUICKINFILL_OT_pick_resolution_tag,
     QUICKINFILL_OT_offset_preset,
     QUICKINFILL_OT_test_cuda,
     QUICKINFILL_OT_preset_building_fast,

@@ -8,19 +8,37 @@ from typing import Optional
 
 # Canonical resolution presets shared by the UI and the processing pipeline.
 # Order defines the tag index stored in the per-face "qi_res_tag" attribute.
+# COARSE is appended last (not reordered to the front) so existing stored
+# indices for Stone/Detail/Fine/Mini stay valid.
 RESOLUTION_PRESETS = {
     'STONE': (0.075, 0.0175),
     'DETAIL': (0.05, 0.03),
     'FINE': (0.03, 0.02),
     'MINI': (0.025, 0.04),
+    'COARSE': (0.2, 0.01),
 }
 RESOLUTION_TAG_ORDER = list(RESOLUTION_PRESETS.keys())
 
+# Voxel sizes above this are always bucketed as Coarse rather than matched by
+# nearest distance, since Stone is otherwise the closest (and much finer) tag.
+COARSE_RESOLUTION_THRESHOLD = 0.1
+
 
 def nearest_resolution_tag(voxel_size: float) -> str:
-    """Bucket an arbitrary voxel size into the closest Stone/Detail/Fine/Mini tag."""
+    """Bucket an arbitrary voxel size into the closest known resolution tag.
+
+    Anything above COARSE_RESOLUTION_THRESHOLD is always tagged Coarse; the
+    rest are matched to the closest of Stone/Detail/Fine/Mini by voxel size.
+
+    Blender's FloatProperty stores values as 32-bit floats, so a UI value of
+    exactly 0.1 can read back in Python as ~0.100000001. A small epsilon keeps
+    that float32 round-off from tipping 0.1 itself into Coarse.
+    """
     voxel_size = float(voxel_size)
-    return min(RESOLUTION_TAG_ORDER, key=lambda name: abs(RESOLUTION_PRESETS[name][0] - voxel_size))
+    if voxel_size > COARSE_RESOLUTION_THRESHOLD + 1e-6:
+        return 'COARSE'
+    fine_tags = [name for name in RESOLUTION_TAG_ORDER if name != 'COARSE']
+    return min(fine_tags, key=lambda name: abs(RESOLUTION_PRESETS[name][0] - voxel_size))
 
 
 def voxel_size_to_decimation_ratio(voxel_size: float) -> float:

@@ -76,29 +76,41 @@ Write-Host "Blender Python: $py"
 
 $pkg = if ($MeshlibVersion) { "meshlib==$MeshlibVersion" } else { "meshlib" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+# Keep the wheel cache scoped to the current bundle only; stale versions should not remain in the package.
+Get-ChildItem $OutDir -Filter "*.whl" -ErrorAction SilentlyContinue | Remove-Item -Force
 Write-Host "Downloading $pkg wheel compatible with Blender into $OutDir ..."
 & "$py" -m pip download $pkg --only-binary=:all: --dest $OutDir
 
-# Pick the wheel matching cp tag
+# Pick the wheels relevant for the dependency set, preserving the MeshLib package and required runtime deps.
 $wheels = Get-ChildItem $OutDir -Filter "*.whl"
 if (-not $wheels) { throw "No wheels downloaded" }
-$selected = $wheels | Where-Object { $_.Name -match "$tag" } | Select-Object -First 1
-if (-not $selected) { $selected = $wheels | Select-Object -First 1 }
 
-Write-Host "Selected wheel: $($selected.Name)"
+$selected = @(
+    $wheels | Where-Object {
+        $_.Name -match '^(meshlib|meshlib_core|numpy)-' -and $_.Name -match "$tag|py38|py39|py310|py311|py312|py313|py314"
+    } | Sort-Object Name
+)
+
+if (-not $selected -or $selected.Count -eq 0) {
+    $selected = @($wheels | Sort-Object Name)
+}
+
+Write-Host "Selected wheels: $($selected.Name -join ', ')"
 
 # Update blender_manifest.toml wheels list
 $manifest = Get-Content "blender_manifest.toml" -Raw
-$relPath = "./$($OutDir)/$($selected.Name)"
+$relPaths = $selected | ForEach-Object { "  './$($OutDir)/$($_.Name)'" }
+$wheelBlock = "wheels = [`r`n$($relPaths -join ',`r`n')`r`n]"
 
 if ($manifest -notmatch "(?ms)^wheels\s*=\s*\[") {
     # Insert wheels = [ ... ] block after license section
-    $manifest = $manifest -replace '(?ms)(license\s*=\s*\[[^\]]*\]\s*)', "`$1`r`n`r`nwheels = [`r`n  '$relPath'`r`n]`r`n"
+    $manifest = $manifest -replace '(?ms)(license\s*=\s*\[[^\]]*\]\s*)', "`$1`r`n`r`n$wheelBlock`r`n"
 } else {
     # Replace existing list contents
-    $manifest = $manifest -replace '(?ms)^wheels\s*=\s*\[[^\]]*\]', "wheels = [`r`n  '$relPath'`r`n]"
+    $manifest = $manifest -replace '(?ms)^wheels\s*=\s*\[[^\]]*\]', $wheelBlock
 }
 
 # Write without BOM (TOML parsers reject BOM)
 [System.IO.File]::WriteAllText("blender_manifest.toml", $manifest, [System.Text.UTF8Encoding]::new($false))
-Write-Host "Updated blender_manifest.toml with wheels entry: $relPath"
+Write-Host "Updated blender_manifest.toml with wheel entries:"
+$selected | ForEach-Object { Write-Host "  ./$($OutDir)/$($_.Name)" }

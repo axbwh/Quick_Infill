@@ -80,6 +80,13 @@ class QuickInfillToolsSettings(PropertyGroup):
         default=False,
         options={'HIDDEN'},
     )
+
+    smart_resolution: bpy.props.BoolProperty(
+        name="Smart",
+        description="Use each island/object's existing resolution tag (if any) for its voxel size and decimation ratio",
+        default=False,
+        options={'HIDDEN'},
+    )
     
     show_tools: bpy.props.BoolProperty(
         name="Show Tools",

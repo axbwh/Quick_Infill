@@ -3,6 +3,7 @@ from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import FloatProperty, IntProperty, PointerProperty, EnumProperty, BoolProperty
 from . import tools_panel
 from . import support_tools
+from .offset_utils import RESOLUTION_PRESETS
 
 
 def get_active_building_preset(settings):
@@ -32,13 +33,7 @@ def get_active_offset_preset(settings):
     """Return the matching preset for the current voxel and ratio values."""
     current_voxel = settings.shared_voxel_size
     current_ratio = settings.decimation_ratio
-    matches = {
-        'STONE': (0.075, 0.0175),
-        'DETAIL': (0.05, 0.03),
-        'FINE': (0.03, 0.02),
-        'MINI': (0.025, 0.04),
-    }
-    for key, (voxel, ratio) in matches.items():
+    for key, (voxel, ratio) in RESOLUTION_PRESETS.items():
         if abs(current_voxel - voxel) < 1e-6 and abs(current_ratio - ratio) < 1e-6:
             return key
     return 'NONE'
@@ -92,6 +87,14 @@ def sync_shared_process_islands(self, context):
         context.scene.quick_infill_support_settings.process_islands = self.process_islands
 
 
+def sync_shared_smart_resolution(self, context):
+    """Mirror the shared Smart resolution toggle to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.smart_resolution = self.smart_resolution
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.smart_resolution = self.smart_resolution
+
+
 class QuickInfillSettings(PropertyGroup):
     active_offset_preset: EnumProperty(
         name="Active Offset Preset",
@@ -128,6 +131,13 @@ class QuickInfillSettings(PropertyGroup):
         description="Process each mesh island individually, then join the result back into one object",
         default=False,
         update=sync_shared_process_islands,
+    )
+
+    smart_resolution: BoolProperty(
+        name="Smart",
+        description="Use each island/object's existing resolution tag (if any) for its voxel size and decimation ratio, falling back to the current settings for untagged geometry",
+        default=False,
+        update=sync_shared_smart_resolution,
     )
 
     decimate_mode: EnumProperty(
@@ -494,6 +504,7 @@ class QUICKINFILL_PT_sidebar(Panel):
 
         col.separator(factor=0.5)
         col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
+        col.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart", toggle=True)
         row = col.row(align=True)
         for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
             row.operator("quick_infill.voxel_preset", text=str(size)).size = size

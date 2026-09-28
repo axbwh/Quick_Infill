@@ -123,6 +123,12 @@ class QuickInfillSupportSettings(PropertyGroup):
         description="Process each mesh island individually, then join the result back into one object",
         default=False,
     )
+
+    smart_resolution: BoolProperty(
+        name="Smart",
+        description="Use each island/object's existing resolution tag (if any) for its voxel size and decimation ratio",
+        default=False,
+    )
     
     decimate_mode: EnumProperty(
         name="Decimate Mode",

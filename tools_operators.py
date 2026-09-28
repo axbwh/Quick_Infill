@@ -35,8 +35,8 @@ class QUICKINFILL_OT_grow(Operator):
                 return {'CANCELLED'}
 
             # Grow = positive offset
-            def grow_op(mesh):
-                return cuda_offset(mesh, resolution, distance)
+            def grow_op(mesh, res):
+                return cuda_offset(mesh, res, distance)
             
             # Use batch processing for multiple objects, single processing for one
             if len(selected_objs) == 1:
@@ -100,8 +100,8 @@ class QUICKINFILL_OT_shrink(Operator):
                 return {'CANCELLED'}
 
             # Shrink = negative offset
-            def shrink_op(mesh):
-                return cuda_offset(mesh, resolution, -distance)
+            def shrink_op(mesh, res):
+                return cuda_offset(mesh, res, -distance)
             
             # Use batch processing for multiple objects, single processing for one
             if len(selected_objs) == 1:
@@ -164,8 +164,8 @@ class QUICKINFILL_OT_remesh(Operator):
                 return {'CANCELLED'}
 
             # Remesh = offset with 0 distance (re-voxelizes)
-            def remesh_op(mesh):
-                return cuda_offset(mesh, resolution, 0.0)
+            def remesh_op(mesh, res):
+                return cuda_offset(mesh, res, 0.0)
             
             # Use batch processing for multiple objects, single processing for one
             if len(selected_objs) == 1:
@@ -230,11 +230,11 @@ class QUICKINFILL_OT_trim_thin(Operator):
             # Trim thin = shrink then grow by resolution (removes thin features).
             # If the shrink collapses the mesh to nothing, raise _MeshCollapsedError
             # so batch_process_mesh_operation can skip it and return it as collapsed.
-            def trim_thin_op(mesh):
-                shrunk = cuda_offset(mesh, resolution, -resolution)
+            def trim_thin_op(mesh, res):
+                shrunk = cuda_offset(mesh, res, -res)
                 if shrunk.topology.numValidFaces() == 0:
                     raise _MeshCollapsedError()
-                return cuda_offset(shrunk, resolution, resolution)
+                return cuda_offset(shrunk, res, res)
 
             # Use batch processing for all objects. Collapsed meshes are returned
             # separately in the second element without aborting the batch.

@@ -6,6 +6,22 @@ from typing import Optional
 # Auto-decimate: decimate back to initial if mesh grew at all
 # This prevents both progressive detail loss AND progressive growth
 
+# Canonical resolution presets shared by the UI and the processing pipeline.
+# Order defines the tag index stored in the per-face "qi_res_tag" attribute.
+RESOLUTION_PRESETS = {
+    'STONE': (0.075, 0.0175),
+    'DETAIL': (0.05, 0.03),
+    'FINE': (0.03, 0.02),
+    'MINI': (0.025, 0.04),
+}
+RESOLUTION_TAG_ORDER = list(RESOLUTION_PRESETS.keys())
+
+
+def nearest_resolution_tag(voxel_size: float) -> str:
+    """Bucket an arbitrary voxel size into the closest Stone/Detail/Fine/Mini tag."""
+    voxel_size = float(voxel_size)
+    return min(RESOLUTION_TAG_ORDER, key=lambda name: abs(RESOLUTION_PRESETS[name][0] - voxel_size))
+
 
 def voxel_size_to_decimation_ratio(voxel_size: float) -> float:
     """Map the current voxel size preset to a decimation ratio.

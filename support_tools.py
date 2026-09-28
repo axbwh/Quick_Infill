@@ -12,7 +12,43 @@ from .meshlib_utils import get_meshlib
 from .blender_meshlib_utils import process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl, select_results
 
 
+def reset_angle_preset(self, context):
+    """Clear the active angle preset only when the value is manually edited."""
+    active = getattr(self, 'active_angle_preset', 'NONE')
+    if active == 'NONE':
+        return
+
+    target = float(self.undercut_angle)
+    if active == '10' and abs(target - 10.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+    elif active == '15' and abs(target - 15.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+    elif active == '30' and abs(target - 30.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+    elif active == '45' and abs(target - 45.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+    elif active == '60' and abs(target - 60.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+    elif active == '90' and abs(target - 90.0) > 1e-6:
+        self.active_angle_preset = 'NONE'
+
+
 class QuickInfillSupportSettings(PropertyGroup):
+    active_angle_preset: EnumProperty(
+        name="Active Angle Preset",
+        description="Current angle preset selection",
+        items=[
+            ("NONE", "None", "No preset selected"),
+            ("10", "10°", "10 degree preset"),
+            ("15", "15°", "15 degree preset"),
+            ("30", "30°", "30 degree preset"),
+            ("45", "45°", "45 degree preset"),
+            ("60", "60°", "60 degree preset"),
+            ("90", "90°", "90 degree preset"),
+        ],
+        default="60",
+    )
+
     undercut_angle: FloatProperty(
         name="Angle",
         description="Undercut angle in degrees. 0° = vertical (Z up), +/-90° = horizontal (selected axis). Negative angles use voxel union when combining directions",
@@ -22,6 +58,7 @@ class QuickInfillSupportSettings(PropertyGroup):
         soft_min=-90.0,
         soft_max=90.0,
         precision=1,
+        update=reset_angle_preset,
     )
     
     # Multi-select direction booleans
@@ -79,6 +116,12 @@ class QuickInfillSupportSettings(PropertyGroup):
         name="Replace Original",
         description="Replace the original object with the result instead of creating a new object",
         default=True,
+    )
+
+    process_islands: BoolProperty(
+        name="Islands",
+        description="Process each mesh island individually, then join the result back into one object",
+        default=False,
     )
     
     decimate_mode: EnumProperty(
@@ -1078,7 +1121,9 @@ class QUICKINFILL_OT_support_angle_preset(Operator):
     angle: FloatProperty(name="Angle", default=60.0)
 
     def execute(self, context):
-        context.scene.quick_infill_support_settings.undercut_angle = self.angle
+        settings = context.scene.quick_infill_support_settings
+        settings.active_angle_preset = str(int(self.angle))
+        settings.undercut_angle = self.angle
         return {'FINISHED'}
 
 
@@ -1138,15 +1183,15 @@ def draw_support_tools(layout, context):
         
         tools_col.separator()
         
-        # Angle field with preset buttons inline in a balanced split row
+        # Angle field and preset row
         angle_row = tools_col.row(align=True)
-        angle_split = angle_row.split(factor=0.5, align=True)
-        angle_split.prop(settings, "undercut_angle", text="Angle")
+        angle_row.prop(settings, "undercut_angle", text="Angle")
+        tools_col.separator(factor=0.2)
 
-        preset_row = angle_split.row(align=True)
-        preset_row.alignment = 'RIGHT'
-        for angle_value in (30.0, 45.0, 60.0, 90.0):
-            op = preset_row.operator("quick_infill.support_angle_preset", text=str(int(angle_value)), icon='NONE')
+        preset_row = tools_col.row(align=True)
+        for angle_value in (10.0, 15.0, 30.0, 45.0, 60.0, 90.0):
+            active = settings.active_angle_preset == str(int(angle_value))
+            op = preset_row.operator("quick_infill.support_angle_preset", text=str(int(angle_value)), icon='NONE', depress=active)
             op.angle = angle_value
 
         tools_col.separator()

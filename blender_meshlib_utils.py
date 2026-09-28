@@ -234,33 +234,20 @@ def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
     return new_obj
 
 
-def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
-    """
-    Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
-    
-    Args:
-        blender_obj: Source Blender mesh object
-        operation_fn: Function that takes meshlib mesh and returns processed meshlib mesh
-        output_suffix: Suffix for the output object name (e.g., "_Grown")
-        auto_decimate: If True, decimate output to match initial vertex count
-        import_scale: Scale factor for STL import (default 0.1)
-        replace_original: If True, replace the original object's mesh data instead of creating new object
-    
-    Returns:
-        tuple: (output_blender_obj, initial_vertex_count, final_vertex_count)
-    """
+def _process_mesh_operation_single(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
+    """Actual operation pipeline without island splitting."""
     from .offset_utils import decimate_mesh, should_auto_decimate_faces
-    
+
     obj_name = blender_obj.name
-    
+
     # Convert to meshlib
     src_mesh = blender_to_meshlib_via_stl(blender_obj)
     initial_face_count = src_mesh.topology.numValidFaces()
     initial_vertex_count = src_mesh.topology.numValidVerts()
-    
+
     # Apply the operation
     out_mesh = operation_fn(src_mesh)
-    
+
     # Auto decimate if enabled - only when significant face growth occurred
     final_face_count = out_mesh.topology.numValidFaces()
     if auto_decimate:
@@ -276,17 +263,130 @@ def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decima
         )
         if do_decimate:
             out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
-    
+
     final_vertex_count = out_mesh.topology.numValidVerts()
-    
+
     # Convert back to Blender
     result_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + output_suffix, import_scale=import_scale)
-    
+
     # If replace_original is enabled, swap mesh data and delete the temp object
     if replace_original:
         result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
-    
+
     return result_obj, initial_vertex_count, final_vertex_count
+
+
+def process_object_with_island_split(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
+    """Process a mesh one connected-component (island) at a time, entirely inside
+    meshlib, then merge the results and import back into Blender exactly once.
+
+    This avoids Blender-side object duplication/split/join (bpy.ops.mesh.separate,
+    bpy.ops.object.join, bpy.data.objects.remove in a loop), which is slow and
+    prone to invalidating other Python Object references when objects are removed.
+    """
+    from .meshlib_utils import get_meshlib
+    from .offset_utils import decimate_mesh, should_auto_decimate_faces
+    mm, _ = get_meshlib()
+
+    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
+    if settings is None:
+        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
+    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
+
+    if not process_islands:
+        return _process_mesh_operation_single(
+            blender_obj,
+            operation_fn,
+            output_suffix,
+            auto_decimate=auto_decimate,
+            import_scale=import_scale,
+            replace_original=replace_original,
+            resolution=resolution,
+        )
+
+    obj_name = blender_obj.name
+    src_mesh = blender_to_meshlib_via_stl(blender_obj)
+
+    component_bitsets = mm.MeshComponents.getAllComponents(mm.MeshPart(src_mesh))
+    if len(component_bitsets) <= 1:
+        return _process_mesh_operation_single(
+            blender_obj,
+            operation_fn,
+            output_suffix,
+            auto_decimate=auto_decimate,
+            import_scale=import_scale,
+            replace_original=replace_original,
+            resolution=resolution,
+        )
+
+    mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
+    ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
+
+    total_initial = 0
+    total_final = 0
+    merged_mesh = mm.Mesh()
+
+    for bitset in component_bitsets:
+        island_mesh = mm.Mesh()
+        island_mesh.addMeshPart(mm.MeshPart(src_mesh, bitset))
+
+        initial_faces = island_mesh.topology.numValidFaces()
+        total_initial += island_mesh.topology.numValidVerts()
+
+        out_mesh = operation_fn(island_mesh)
+
+        if auto_decimate:
+            final_faces = out_mesh.topology.numValidFaces()
+            do_decimate, target_faces = should_auto_decimate_faces(
+                initial_faces,
+                final_faces,
+                voxel_size=resolution,
+                mode=mode,
+                ratio=ratio,
+            )
+            if do_decimate:
+                out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=resolution)
+
+        total_final += out_mesh.topology.numValidVerts()
+        merged_mesh.addMesh(out_mesh)
+
+    result_obj = meshlib_to_blender_via_stl(merged_mesh, obj_name + output_suffix, import_scale=import_scale)
+
+    if replace_original:
+        result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
+
+    return result_obj, total_initial, total_final
+
+
+def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
+    """
+    Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
+    """
+    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
+    if settings is None:
+        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
+    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
+
+    if process_islands:
+        return process_object_with_island_split(
+            blender_obj,
+            operation_fn,
+            output_suffix,
+            auto_decimate=auto_decimate,
+            import_scale=import_scale,
+            replace_original=replace_original,
+            resolution=resolution,
+        )
+
+    return _process_mesh_operation_single(
+        blender_obj,
+        operation_fn,
+        output_suffix,
+        auto_decimate=auto_decimate,
+        import_scale=import_scale,
+        replace_original=replace_original,
+        resolution=resolution,
+    )
 
 
 def replace_mesh_keep_transforms(original_obj, new_obj):
@@ -380,9 +480,33 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
     from .meshlib_utils import get_meshlib
     from .offset_utils import decimate_mesh
     mm, _ = get_meshlib()
+
+    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
+    if settings is None:
+        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
+    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
     
     if not blender_objs:
-        return []
+        return [], []
+
+    if process_islands:
+        results = []
+        collapsed_objs = []
+        for obj in blender_objs:
+            try:
+                result_obj, initial_verts, final_verts = process_object_with_island_split(
+                    obj,
+                    operation_fn,
+                    output_suffix,
+                    auto_decimate=auto_decimate,
+                    import_scale=import_scale,
+                    replace_original=replace_original,
+                    resolution=resolution,
+                )
+                results.append((result_obj, initial_verts, final_verts))
+            except Exception as exc:
+                collapsed_objs.append((obj, exc))
+        return results, collapsed_objs
     
     results = []
     collapsed_objs = []

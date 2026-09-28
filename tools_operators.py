@@ -75,7 +75,8 @@ class QUICKINFILL_OT_grow(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Grow failed: {e}")
-            # print(f"[Quick Infill] Grow error: {e}")
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
 
 
@@ -139,7 +140,8 @@ class QUICKINFILL_OT_shrink(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Shrink failed: {e}")
-            # print(f"[Quick Infill] Shrink error: {e}")
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
 
 
@@ -202,7 +204,8 @@ class QUICKINFILL_OT_remesh(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Remesh failed: {e}")
-            # print(f"[Quick Infill] Remesh error: {e}")
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
 
 
@@ -301,7 +304,8 @@ class QUICKINFILL_OT_trim_thin(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Trim Thin failed: {e}")
-            # print(f"[Quick Infill] Trim Thin error: {e}")
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
 
 

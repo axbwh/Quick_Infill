@@ -73,6 +73,13 @@ class QuickInfillToolsSettings(PropertyGroup):
         default=True,
         options={'HIDDEN'},
     )
+
+    process_islands: bpy.props.BoolProperty(
+        name="Islands",
+        description="Process each mesh island individually, then join the result back into one object",
+        default=False,
+        options={'HIDDEN'},
+    )
     
     show_tools: bpy.props.BoolProperty(
         name="Show Tools",

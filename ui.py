@@ -5,15 +5,54 @@ from . import tools_panel
 from . import support_tools
 
 
+def get_active_building_preset(settings):
+    """Return the matching preset for the current building settings."""
+    if getattr(settings, 'voxel_mode', 'TARGET_VOXELS') == 'TARGET_VOXELS':
+        if abs(getattr(settings, 'target_res', 1.0) - 0.5) < 1e-6 and abs(getattr(settings, 'resolution', 0.1) - 0.1) < 1e-6 and abs(getattr(settings, 'grow', 1.0) - 0.75) < 1e-6 and abs(getattr(settings, 'shrink_mult', 1.0) - 2.0) < 1e-6 and getattr(settings, 'method', 'ACCURATE') == 'NAIVE' and getattr(settings, 'trim_thin', True):
+            return 'BUILDING_FAST'
+        if abs(getattr(settings, 'target_res', 1.0) - 3.0) < 1e-6 and abs(getattr(settings, 'resolution', 0.1) - 0.1) < 1e-6 and abs(getattr(settings, 'grow', 1.0) - 1.0) < 1e-6 and abs(getattr(settings, 'shrink_mult', 1.0) - 1.2) < 1e-6 and getattr(settings, 'method', 'ACCURATE') == 'ACCURATE' and getattr(settings, 'trim_thin', True):
+            return 'BUILDING_ACCURATE'
+
+    if getattr(settings, 'voxel_mode', 'TARGET_VOXELS') == 'RESOLUTION':
+        if abs(getattr(settings, 'resolution', 0.1) - 0.1) < 1e-6 and abs(getattr(settings, 'grow', 1.0) - 1.0) < 1e-6 and abs(getattr(settings, 'shrink_mult', 1.0) - 1.5) < 1e-6 and getattr(settings, 'method', 'ACCURATE') == 'ACCURATE' and getattr(settings, 'trim_thin', True):
+            return 'MINI_LARGE_HOLES'
+        if abs(getattr(settings, 'resolution', 0.1) - 0.075) < 1e-6 and abs(getattr(settings, 'grow', 1.0) - 0.35) < 1e-6 and abs(getattr(settings, 'shrink_mult', 1.0) - 1.2) < 1e-6 and getattr(settings, 'method', 'ACCURATE') == 'ACCURATE' and getattr(settings, 'trim_thin', True):
+            return 'MINI_ACCURATE'
+
+    return 'NONE'
+
+
 def reset_preset(self, context):
     """Reset active preset when properties are manually changed"""
     if hasattr(self, 'active_preset'):
-        self.active_preset = 'NONE'
+        self.active_preset = get_active_building_preset(self)
+
+
+def get_active_offset_preset(settings):
+    """Return the matching preset for the current voxel and ratio values."""
+    current_voxel = settings.shared_voxel_size
+    current_ratio = settings.decimation_ratio
+    matches = {
+        'STONE': (0.075, 0.0175),
+        'DETAIL': (0.05, 0.03),
+        'FINE': (0.03, 0.02),
+        'MINI': (0.025, 0.04),
+    }
+    for key, (voxel, ratio) in matches.items():
+        if abs(current_voxel - voxel) < 1e-6 and abs(current_ratio - ratio) < 1e-6:
+            return key
+    return 'NONE'
+
+
+def reset_offset_preset(self, context):
+    """Keep the active offset preset synced to the current values."""
+    self.active_offset_preset = get_active_offset_preset(self)
 
 
 def sync_shared_voxel_size(self, context):
     """Keep the shared voxel size in sync with offset/support tool settings."""
     value = self.shared_voxel_size
+    reset_offset_preset(self, context)
     if hasattr(context.scene, 'quick_infill_tools_settings'):
         context.scene.quick_infill_tools_settings.voxel_size = value
     if hasattr(context.scene, 'quick_infill_support_settings'):
@@ -30,6 +69,7 @@ def sync_shared_decimate_mode(self, context):
 
 def sync_shared_decimation_ratio(self, context):
     """Mirror the shared decimation ratio to tool settings."""
+    reset_offset_preset(self, context)
     if hasattr(context.scene, 'quick_infill_tools_settings'):
         context.scene.quick_infill_tools_settings.decimation_ratio = self.decimation_ratio
     if hasattr(context.scene, 'quick_infill_support_settings'):
@@ -44,11 +84,32 @@ def sync_shared_replace_original(self, context):
         context.scene.quick_infill_support_settings.replace_original = self.replace_original
 
 
+def sync_shared_process_islands(self, context):
+    """Mirror the shared islands toggle to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.process_islands = self.process_islands
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.process_islands = self.process_islands
+
+
 class QuickInfillSettings(PropertyGroup):
+    active_offset_preset: EnumProperty(
+        name="Active Offset Preset",
+        description="Current Preset selection for Stone / Detail / Fine / Mini",
+        items=[
+            ("NONE", "None", "No preset selected"),
+            ("STONE", "Stone", "Stone preset selected"),
+            ("DETAIL", "Detail", "Detail preset selected"),
+            ("FINE", "Fine", "Fine preset selected"),
+            ("MINI", "Mini", "Mini preset selected"),
+        ],
+        default="STONE",
+    )
+
     shared_voxel_size: FloatProperty(
         name="Voxel Size",
         description="Shared voxel size for offset and support tools",
-        default=0.05,
+        default=0.075,
         min=0.025,
         max=0.4,
         precision=3,
@@ -62,13 +123,20 @@ class QuickInfillSettings(PropertyGroup):
         update=sync_shared_replace_original,
     )
 
+    process_islands: BoolProperty(
+        name="Islands",
+        description="Process each mesh island individually, then join the result back into one object",
+        default=False,
+        update=sync_shared_process_islands,
+    )
+
     decimate_mode: EnumProperty(
         name="Decimate Mode",
         description="Choose when automatic decimation is active",
         items=[
-            ("OFF", "Off", "Disable auto-decimation"),
-            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
             ("VOXEL_RATIO", "Ratio", "Decimate based on the current ratio value"),
+            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
+            ("OFF", "Off", "Disable auto-decimation"),
         ],
         default="VOXEL_RATIO",
         update=sync_shared_decimate_mode,
@@ -96,7 +164,7 @@ class QuickInfillSettings(PropertyGroup):
     grow: FloatProperty(  
         name="Grow",
         description="+grow / -shrink distance",
-        default=2.0,
+        default=1.0,
         min=0.1,
         max=2.0,
         precision=3,
@@ -105,7 +173,7 @@ class QuickInfillSettings(PropertyGroup):
     shrink_mult: FloatProperty( 
         name="Shrink Multiplier",
         description="Multiplier for shrink distance",
-        default=1.0,
+        default=1.2,
         min=0.1,
         max=3.0,
         step=0.1,
@@ -115,7 +183,7 @@ class QuickInfillSettings(PropertyGroup):
     target_res: FloatProperty(  # type: ignore
         name="Working Resolution (M)",
         description="Working resolution in millions - drives voxel count and decimation limit (~1M vertices)",
-        default=1.0,
+        default=3.0,
         min=0.2,
         max=3.0,
         update=reset_preset,
@@ -151,7 +219,7 @@ class QuickInfillSettings(PropertyGroup):
             ("MINI_LARGE_HOLES", "Mini Large Holes", "Large holes settings for miniatures"),
             ("MINI_ACCURATE", "Mini Accurate", "Accurate settings for miniatures"),
         ],
-        default="NONE",
+        default="BUILDING_ACCURATE",
     )
     method: EnumProperty(
         name="Method",
@@ -195,15 +263,28 @@ class QUICKINFILL_OT_offset_preset(Operator):
     x: FloatProperty(name="X", default=0.25)
     ratio: FloatProperty(name="Ratio", default=0.015)
 
+    preset_name: EnumProperty(
+        name="Preset Name",
+        items=[
+            ("STONE", "Stone", "Stone preset"),
+            ("DETAIL", "Detail", "Detail preset"),
+            ("FINE", "Fine", "Fine preset"),
+            ("MINI", "Mini", "Mini preset"),
+        ],
+        default="STONE",
+    )
+
     def execute(self, context):
+        settings = context.scene.quick_infill_settings
         tools = context.scene.quick_infill_tools_settings
         tools.voxel_size = self.voxel_size
         tools.distance = self.distance
         tools.trim_edges_x = self.x
-        context.scene.quick_infill_settings.shared_voxel_size = self.voxel_size
-        context.scene.quick_infill_settings.decimation_ratio = self.ratio
+        settings.shared_voxel_size = self.voxel_size
+        settings.decimation_ratio = self.ratio
         context.scene.quick_infill_support_settings.voxel_size = self.voxel_size
         context.scene.quick_infill_support_settings.decimation_ratio = self.ratio
+        settings.active_offset_preset = self.preset_name
         return {'FINISHED'}
 
 
@@ -330,26 +411,18 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Show presets when expanded
         if show_presets:
             presets_col = presets_box.column(align=True)
-            
+            active_preset = get_active_building_preset(settings)
+
             # Building row
             building_row = presets_col.row(align=True)
             building_row.label(text="Building:")
-            
-            # Fast button - highlight if active
-            active_preset = getattr(settings, 'active_preset', 'NONE')
             fast_op = building_row.operator("quick_infill.preset_building_fast", text="Fast", depress=(active_preset == 'BUILDING_FAST'))
-            
-            # Accurate button - highlight if active  
             accurate_op = building_row.operator("quick_infill.preset_building_accurate", text="Accurate", depress=(active_preset == 'BUILDING_ACCURATE'))
-            
+
             # Mini row
             mini_row = presets_col.row(align=True)
             mini_row.label(text="Mini:")
-            
-            # Large Holes button - highlight if active
             holes_op = mini_row.operator("quick_infill.preset_mini_large_holes", text="Large Holes", depress=(active_preset == 'MINI_LARGE_HOLES'))
-            
-            # Mini Accurate button - highlight if active
             mini_acc_op = mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_preset == 'MINI_ACCURATE'))
         def prop_with_suffix(layout, data, attr, label="", suffix="mm"):
             split = layout.split(factor=0.9, align=True)
@@ -411,12 +484,13 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Support Tools section
         support_tools.draw_support_tools(col, context)
 
-        # Tool Options
-        col.separator(factor=0.5)
         col.label(text="Tool Options")
-        top_row = col.row(align=True)
-        top_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='MOD_BOOLEAN')
-        top_row.prop(context.scene.quick_infill_settings, "replace_original", text="Replace", toggle=True)
+        voxel_row = col.row(align=True)
+        voxel_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='MOD_BOOLEAN')
+
+        toggle_row = col.row(align=True)
+        toggle_row.prop(context.scene.quick_infill_settings, "replace_original", text="Replace", toggle=True)
+        toggle_row.prop(context.scene.quick_infill_settings, "process_islands", text="Islands", toggle=True)
 
         col.separator(factor=0.5)
         col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
@@ -424,32 +498,43 @@ class QUICKINFILL_PT_sidebar(Panel):
         for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
             row.operator("quick_infill.voxel_preset", text=str(size)).size = size
 
+        col.separator(factor=0.5)
         auto_decimation_box = col.box()
         auto_decimation_box.label(text="Auto Decimation")
         decimate_row = auto_decimation_box.row(align=True)
         decimate_row.prop(context.scene.quick_infill_settings, "decimate_mode", expand=True)
-        decimate_row.prop(context.scene.quick_infill_settings, "decimation_ratio", text="Ratio")
+        auto_decimation_box.prop(context.scene.quick_infill_settings, "decimation_ratio", text="Ratio")
 
-        col.separator(factor=0.5)
         col.label(text="Presets")
         preset_row = col.row(align=True)
-        stone = preset_row.operator("quick_infill.offset_preset", text="Stone")
+        active_preset = get_active_offset_preset(context.scene.quick_infill_settings)
+        stone = preset_row.operator("quick_infill.offset_preset", text="Stone", depress=(active_preset == 'STONE'))
+        stone.preset_name = 'STONE'
         stone.voxel_size = 0.075
         stone.distance = 0.7
         stone.x = 0.25
-        stone.ratio = 0.015
+        stone.ratio = 0.0175
 
-        detail = preset_row.operator("quick_infill.offset_preset", text="Detail")
+        detail = preset_row.operator("quick_infill.offset_preset", text="Detail", depress=(active_preset == 'DETAIL'))
+        detail.preset_name = 'DETAIL'
         detail.voxel_size = 0.05
         detail.distance = 0.3
         detail.x = 0.4
-        detail.ratio = 0.02
+        detail.ratio = 0.03
 
-        fine = preset_row.operator("quick_infill.offset_preset", text="Fine")
-        fine.voxel_size = 0.025
+        fine = preset_row.operator("quick_infill.offset_preset", text="Fine", depress=(active_preset == 'FINE'))
+        fine.preset_name = 'FINE'
+        fine.voxel_size = 0.03
         fine.distance = 0.2
         fine.x = 0.25
-        fine.ratio = 0.01
+        fine.ratio = 0.02
+
+        mini = preset_row.operator("quick_infill.offset_preset", text="Mini", depress=(active_preset == 'MINI'))
+        mini.preset_name = 'MINI'
+        mini.voxel_size = 0.025
+        mini.distance = 0.2
+        mini.x = 0.25
+        mini.ratio = 0.04
 
 
 classes = (

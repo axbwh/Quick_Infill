@@ -13,15 +13,6 @@ from .blender_meshlib_utils import process_mesh_operation, blender_to_meshlib_vi
 
 
 class QuickInfillSupportSettings(PropertyGroup):
-    voxel_size: FloatProperty(
-        name="Voxel Size",
-        description="Voxel size for undercut fixing (smaller = more precise but slower)",
-        default=0.2,
-        min=0.025,
-        max=1.0,
-        precision=3,
-    )
-    
     undercut_angle: FloatProperty(
         name="Angle",
         description="Undercut angle in degrees. 0° = vertical (Z up), +/-90° = horizontal (selected axis). Negative angles use voxel union when combining directions",
@@ -87,7 +78,7 @@ class QuickInfillSupportSettings(PropertyGroup):
     replace_original: BoolProperty(
         name="Replace Original",
         description="Replace the original object with the result instead of creating a new object",
-        default=False,
+        default=True,
     )
     
     auto_decimate: BoolProperty(
@@ -130,6 +121,16 @@ class QuickInfillSupportSettings(PropertyGroup):
         name="Show Support Tools",
         description="Expand/collapse support tools panel",
         default=False,
+    )
+
+    voxel_size: FloatProperty(
+        name="Voxel Size",
+        description="Internal compatibility value for the shared voxel size",
+        default=0.05,
+        min=0.025,
+        max=0.4,
+        precision=3,
+        options={'HIDDEN'},
     )
 
 
@@ -1025,6 +1026,18 @@ class QUICKINFILL_OT_shrink_from_view(Operator):
             return {'CANCELLED'}
 
 
+class QUICKINFILL_OT_support_angle_preset(Operator):
+    bl_idname = "quick_infill.support_angle_preset"
+    bl_label = "Angle Preset"
+    bl_description = "Set the support undercut angle"
+
+    angle: FloatProperty(name="Angle", default=60.0)
+
+    def execute(self, context):
+        context.scene.quick_infill_support_settings.undercut_angle = self.angle
+        return {'FINISHED'}
+
+
 def draw_support_tools(layout, context):
     """Draw the Support Tools UI into the given layout.
     
@@ -1086,13 +1099,17 @@ def draw_support_tools(layout, context):
         
         tools_col.separator()
         
-        # Angle slider (degrees, shown without subtype conversion)
+        # Angle field with preset buttons inline in a balanced split row
         angle_row = tools_col.row(align=True)
-        angle_row.prop(settings, "undercut_angle", text="Angle")
-        
-        # Voxel size slider
-        prop_with_suffix(tools_col, settings, "voxel_size", "Voxel Size", "mm")
-        
+        angle_split = angle_row.split(factor=0.5, align=True)
+        angle_split.prop(settings, "undercut_angle", text="Angle")
+
+        preset_row = angle_split.row(align=True)
+        preset_row.alignment = 'RIGHT'
+        for angle_value in (30.0, 45.0, 60.0, 90.0):
+            op = preset_row.operator("quick_infill.support_angle_preset", text=str(int(angle_value)), icon='NONE')
+            op.angle = angle_value
+
         tools_col.separator()
         
         # Fix Undercuts and From View buttons on same line
@@ -1109,6 +1126,8 @@ def draw_support_tools(layout, context):
         prop_with_suffix(tools_col, settings, "shrink_amount", "Shrink Amount", "mm")
         prop_with_suffix(tools_col, settings, "shrink_angle_threshold", "Shrink Angle", "°")
         
+        tools_col.separator()
+        
         # Shrink from View button
         tools_col.operator("quick_infill.shrink_from_view", text="Shrink from View", icon='FULLSCREEN_EXIT')
         
@@ -1122,6 +1141,7 @@ def draw_support_tools(layout, context):
 
 classes = (
     QuickInfillSupportSettings,
+    QUICKINFILL_OT_support_angle_preset,
     QUICKINFILL_OT_fix_undercuts,
     QUICKINFILL_OT_fix_undercuts_from_view,
     QUICKINFILL_OT_voxel_intersect,

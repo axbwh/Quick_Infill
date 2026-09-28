@@ -10,7 +10,7 @@ class QuickInfillToolsSettings(PropertyGroup):
     distance: FloatProperty(
         name="Distance",
         description="Offset distance for grow/shrink operations",
-        default=0.3,
+        default=0.7,
         min=0.0,
         max=4.0,
         precision=3,
@@ -18,11 +18,12 @@ class QuickInfillToolsSettings(PropertyGroup):
     
     voxel_size: FloatProperty(
         name="Voxel Size",
-        description="Voxel size for remesh operations",
-        default=0.2,
+        description="Internal compatibility value for the shared voxel size",
+        default=0.05,
         min=0.025,
         max=0.4,
         precision=3,
+        options={'HIDDEN'},
     )
 
     trim_edges_x: FloatProperty(
@@ -53,7 +54,7 @@ class QuickInfillToolsSettings(PropertyGroup):
     replace_original: bpy.props.BoolProperty(
         name="Replace Original",
         description="Replace the original object with the result instead of creating a new object",
-        default=False,
+        default=True,
     )
     
     show_tools: bpy.props.BoolProperty(
@@ -104,9 +105,6 @@ def draw_offset_tools(layout, context):
         # Distance slider
         prop_with_suffix(tools_col, settings, "distance", "Distance", "mm")
         
-        # Voxel size slider
-        prop_with_suffix(tools_col, settings, "voxel_size", "Voxel Size", "mm")
-        
         tools_col.separator()
         
         # Buttons row
@@ -123,14 +121,14 @@ def draw_offset_tools(layout, context):
 
         tools_col.separator()
 
-        # Density used for decimation before Trim Edges boolean
-        row = tools_col.row(align=True)
-        row.prop(settings, "trim_edges_density", text="Trim Density")
-
         # Trim Edges controls (last row)
         row = tools_col.row(align=True)
         row.prop(settings, "trim_edges_x", text="X")
         row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
+
+        # Density used for decimation before Trim Edges boolean
+        row = tools_col.row(align=True)
+        row.prop(settings, "trim_edges_density", text="Trim Density")
 
 
 classes = (

@@ -11,7 +11,26 @@ def reset_preset(self, context):
         self.active_preset = 'NONE'
 
 
+def sync_shared_voxel_size(self, context):
+    """Keep the shared voxel size in sync with offset/support tool settings."""
+    value = self.shared_voxel_size
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.voxel_size = value
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.voxel_size = value
+
+
 class QuickInfillSettings(PropertyGroup):
+    shared_voxel_size: FloatProperty(
+        name="Voxel Size",
+        description="Shared voxel size for offset and support tools",
+        default=0.05,
+        min=0.025,
+        max=0.4,
+        precision=3,
+        update=sync_shared_voxel_size,
+    )
+
     resolution: FloatProperty(  # type: ignore
         name="Resolution",
         description="Voxel size",
@@ -108,8 +127,27 @@ class QUICKINFILL_OT_voxel_preset(Operator):
     size: FloatProperty(name="Size", default=0.1)  # type: ignore
 
     def execute(self, context):
-        context.scene.quick_infill_tools_settings.voxel_size = self.size
-        context.scene.quick_infill_support_settings.voxel_size = self.size
+        context.scene.quick_infill_settings.shared_voxel_size = self.size
+        return {'FINISHED'}
+
+
+class QUICKINFILL_OT_offset_preset(Operator):
+    bl_idname = "quick_infill.offset_preset"
+    bl_label = "Offset Preset"
+    bl_description = "Set offset distance, voxel size and trim edge x factor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    voxel_size: FloatProperty(name="Voxel Size", default=0.05)
+    distance: FloatProperty(name="Distance", default=0.7)
+    x: FloatProperty(name="X", default=0.25)
+
+    def execute(self, context):
+        tools = context.scene.quick_infill_tools_settings
+        tools.voxel_size = self.voxel_size
+        tools.distance = self.distance
+        tools.trim_edges_x = self.x
+        context.scene.quick_infill_settings.shared_voxel_size = self.voxel_size
+        context.scene.quick_infill_support_settings.voxel_size = self.voxel_size
         return {'FINISHED'}
 
 
@@ -317,17 +355,37 @@ class QUICKINFILL_PT_sidebar(Panel):
         # Support Tools section
         support_tools.draw_support_tools(col, context)
 
-        # Voxel Size Presets (minimal, not collapsible)
+        # Tool Options
         col.separator(factor=0.5)
-        col.label(text="Voxel Size Presets:")
+        col.label(text="Tool Options")
+        col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
         row = col.row(align=True)
-        for size in (0.025, 0.05, 0.1, 0.2, 0.4):
+        for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
             row.operator("quick_infill.voxel_preset", text=str(size)).size = size
+
+        col.separator(factor=0.5)
+        col.label(text="Presets")
+        preset_row = col.row(align=True)
+        stone = preset_row.operator("quick_infill.offset_preset", text="Stone")
+        stone.voxel_size = 0.075
+        stone.distance = 0.7
+        stone.x = 0.25
+
+        detail = preset_row.operator("quick_infill.offset_preset", text="Detail")
+        detail.voxel_size = 0.05
+        detail.distance = 0.3
+        detail.x = 0.4
+
+        fine = preset_row.operator("quick_infill.offset_preset", text="Fine")
+        fine.voxel_size = 0.025
+        fine.distance = 0.2
+        fine.x = 0.25
 
 
 classes = (
     QuickInfillSettings,
     QUICKINFILL_OT_voxel_preset,
+    QUICKINFILL_OT_offset_preset,
     QUICKINFILL_OT_test_cuda,
     QUICKINFILL_OT_preset_building_fast,
     QUICKINFILL_OT_preset_building_accurate,

@@ -7,7 +7,7 @@ import bpy
 from bpy.types import Operator
 from .meshlib_utils import get_meshlib
 from .offset_utils import cuda_offset, decimate_mesh, target_faces_for_density, should_auto_decimate_faces
-from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, blender_to_meshlib_via_stl, meshlib_to_blender_via_stl, select_results
+from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, select_results
 
 
 class _MeshCollapsedError(Exception):
@@ -332,47 +332,20 @@ class QUICKINFILL_OT_trim_edges(Operator):
                 return {'CANCELLED'}
 
             from .support_tools import intersect_meshes
-            from .blender_meshlib_utils import replace_mesh_keep_transforms
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            import os, tempfile
 
-            tmp_dir = tempfile.gettempdir()
-            import_scale = 0.1
-
-            # ── Phase 1: Export each Blender object to a meshlib mesh (Blender API, sequential) ──
-            meshlib_meshes = []      # (original_mesh, initial_faces, initial_verts) per obj
-            collapsed_on_load = []   # indices of objects that failed to load
-
-            view_layer = bpy.context.view_layer
-            prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
-            prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
-
-            for obj in selected_objs:
-                try:
-                    original_mesh = blender_to_meshlib_via_stl(obj)
-                    meshlib_meshes.append((
-                        original_mesh,
-                        original_mesh.topology.numValidFaces(),
-                        original_mesh.topology.numValidVerts(),
-                    ))
-                except Exception:
-                    meshlib_meshes.append(None)
-
-            # ── Phase 2: Process meshes in parallel (pure meshlib, no Blender API) ──
-            def _process_one(args):
-                i, entry = args
-                if entry is None:
-                    raise RuntimeError("failed to load mesh")
-                original_mesh, initial_faces, initial_verts = entry
-
-                working_mesh = mm.copyMesh(original_mesh)
-                working_mesh = cuda_offset(working_mesh, resolution, 2.0 * distance)
-                working_mesh = cuda_offset(working_mesh, resolution, -3.0 * distance)
+            # Trim edges = grow then shrink back further (rounds off thin edges),
+            # regrow slightly, decimate for density, then intersect with the
+            # original mesh to clip the result back to the original silhouette.
+            def trim_edges_op(mesh, res):
+                original_mesh = mm.copyMesh(mesh)
+                working_mesh = mm.copyMesh(mesh)
+                working_mesh = cuda_offset(working_mesh, res, 2.0 * distance)
+                working_mesh = cuda_offset(working_mesh, res, -3.0 * distance)
 
                 if working_mesh.topology.numValidFaces() == 0:
                     raise _MeshCollapsedError()
 
-                working_mesh = cuda_offset(working_mesh, resolution, (1.0 + trim_edges_x) * distance)
+                working_mesh = cuda_offset(working_mesh, res, (1.0 + trim_edges_x) * distance)
 
                 target_faces = target_faces_for_density(
                     working_mesh,
@@ -387,137 +360,66 @@ class QUICKINFILL_OT_trim_edges(Operator):
                     target_ratio = float(target_faces) / float(max(1, current_faces))
                     reduction_strength = max(0.0, 1.0 - target_ratio)
                     adaptive_max_error = max(
-                        float(resolution) * 10.0,
+                        float(res) * 10.0,
                         diag * (0.01 + 0.49 * reduction_strength),
                     )
                     working_mesh = decimate_mesh(working_mesh, target_face_count=target_faces, max_error=adaptive_max_error)
 
-                result_mesh = intersect_meshes(working_mesh, original_mesh, resolution)
+                return intersect_meshes(working_mesh, original_mesh, res)
 
-                if auto_decimate:
-                    final_faces_before = result_mesh.topology.numValidFaces()
-                    mode = settings.decimate_mode
-                    do_decimate, tgt = should_auto_decimate_faces(
-                        initial_faces,
-                        final_faces_before,
-                        voxel_size=resolution,
-                        mode=mode,
-                        ratio=settings.decimation_ratio,
+            # Use batch processing for all objects. Collapsed meshes are returned
+            # separately in the second element without aborting the batch.
+            if len(selected_objs) == 1:
+                try:
+                    result_obj, initial_verts, final_verts = process_mesh_operation(
+                        selected_objs[0], trim_edges_op, "_TrimEdges",
+                        auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
                     )
-                    if do_decimate:
-                        result_mesh = decimate_mesh(result_mesh, target_face_count=tgt, resolution=resolution)
+                    results = [(result_obj, initial_verts, final_verts)]
+                    collapsed = []
+                except _MeshCollapsedError:
+                    results = []
+                    collapsed = [(selected_objs[0], _MeshCollapsedError())]
+            else:
+                results, collapsed = batch_process_mesh_operation(
+                    selected_objs, trim_edges_op, "_TrimEdges",
+                    auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
+                )
 
-                return i, result_mesh, initial_verts, result_mesh.topology.numValidVerts()
-
-            n_workers = min(len(selected_objs), 4)
-            success_map = {}   # i → (result_mesh, initial_verts, final_verts)
-            collapsed_map = {} # i → exception
-
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                futures = {executor.submit(_process_one, (i, meshlib_meshes[i])): i
-                           for i in range(len(selected_objs))}
-                for future in as_completed(futures):
-                    i = futures[future]
-                    try:
-                        idx, result_mesh, initial_verts, final_verts = future.result()
-                        success_map[idx] = (result_mesh, initial_verts, final_verts)
-                    except Exception as exc:
-                        collapsed_map[i] = exc
-
-            # ── Phase 3: Save processed meshes to STL in parallel (file I/O) ──
-            surviving_indices = sorted(success_map.keys())
-            output_stl_paths = {}
-
-            for i in surviving_indices:
-                fd, stl_path = tempfile.mkstemp(prefix=f"qi_te_{selected_objs[i].name}_", suffix=".stl", dir=tmp_dir)
-                os.close(fd)
-                output_stl_paths[i] = stl_path
-
-            def _save_one(args):
-                i, stl_path = args
-                mesh = success_map[i][0]
-                try:
-                    mm.saveMesh(mesh, stl_path)
-                except Exception:
-                    mm.saveMeshAs(mesh, stl_path)
-
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                list(executor.map(_save_one, output_stl_paths.items()))
-
-            # ── Phase 4: Import results back to Blender (Blender API, sequential) ──
-            result_objs = {}
-            for i in surviving_indices:
-                stl_path = output_stl_paths[i]
-                prev_objs = set(bpy.data.objects)
-                if hasattr(bpy.ops.wm, "stl_import"):
-                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-                else:
-                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs] or list(bpy.context.selected_objects)
-                if new_objs:
-                    result_obj = new_objs[0]
-                    result_obj.name = selected_objs[i].name + "_TrimEdges"
-                    result_objs[i] = result_obj
-                try:
-                    os.remove(stl_path)
-                except Exception:
-                    pass
-
-            # ── Phase 5: Handle replace_original, deletions, and build final results ──
-            # Pre-capture names before any removal so stale StructRNA is never accessed.
-            collapsed_names = {i: selected_objs[i].name for i in collapsed_map}
+            # Delete any objects whose mesh fully collapsed
             removed_names = []
-            for i, obj_name in collapsed_names.items():
+            for obj, exc in collapsed:
+                obj_name = obj.name
                 removed_names.append(obj_name)
-                if obj_name in bpy.data.objects:
-                    obj_to_del = bpy.data.objects[obj_name]
-                    mesh_to_del = obj_to_del.data if obj_to_del.type == 'MESH' else None
-                    bpy.data.objects.remove(obj_to_del, do_unlink=True)
-                    # The object removal decrements the mesh user count; if it
-                    # reached 0 the mesh is now orphaned – remove it explicitly
-                    # so Blender does not have to serialize it during save.
-                    if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
+                # Save mesh reference before removal: bpy.data.objects.remove()
+                # decrements the mesh's user count but never removes the mesh
+                # itself, leaving it as an orphan that gets serialised on save.
+                mesh_to_del = obj.data if obj.type == 'MESH' else None
+                bpy.data.objects.remove(obj, do_unlink=True)
+                if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
+                    try:
                         bpy.data.meshes.remove(mesh_to_del)
-
-            results = []
-            for i in surviving_indices:
-                if i not in result_objs:
-                    continue
-                result_obj = result_objs[i]
-                src_obj = selected_objs[i]
-                _, initial_verts, final_verts = success_map[i]
-                if replace_original:
-                    result_obj = replace_mesh_keep_transforms(src_obj, result_obj)
-                results.append((result_obj, initial_verts, final_verts))
-
-            # Restore selection state (use names to avoid stale StructRNA references)
-            for obj in bpy.context.selected_objects:
-                obj.select_set(False)
-            for name in prev_selection_names:
-                if name in bpy.data.objects:
-                    bpy.data.objects[name].select_set(True)
-            if prev_active_name and prev_active_name in bpy.data.objects:
-                view_layer.objects.active = bpy.data.objects[prev_active_name]
+                    except Exception:
+                        pass
 
             if removed_names:
                 names_str = ", ".join(f"'{n}'" for n in removed_names)
                 self.report({'WARNING'}, f"Trim Edges: {len(removed_names)} object(s) fully removed (mesh collapsed during trim): {names_str}")
 
-            obj_count = len(results)
-            if obj_count == 1:
-                result_obj, _, _ = results[0]
-                if replace_original:
-                    self.report({'INFO'}, f"Trim Edges completed. Updated '{result_obj.name}'")
-                else:
-                    self.report({'INFO'}, f"Trim Edges completed. Created '{result_obj.name}'")
-            elif obj_count > 1:
-                if replace_original:
-                    self.report({'INFO'}, f"Trim Edges completed. Updated {obj_count} objects")
-                else:
-                    self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
-
             if results:
+                obj_count = len(results)
                 select_results([r[0] for r in results])
+                if obj_count == 1:
+                    result_obj, _, _ = results[0]
+                    if replace_original:
+                        self.report({'INFO'}, f"Trim Edges completed. Updated '{result_obj.name}'")
+                    else:
+                        self.report({'INFO'}, f"Trim Edges completed. Created '{result_obj.name}'")
+                else:
+                    if replace_original:
+                        self.report({'INFO'}, f"Trim Edges completed. Updated {obj_count} objects")
+                    else:
+                        self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
 
             # Force the depsgraph to fully evaluate the result mesh now, inside
             # the operator where the user expects a wait.  Without this, Blender
@@ -530,7 +432,8 @@ class QUICKINFILL_OT_trim_edges(Operator):
 
         except Exception as e:
             self.report({'ERROR'}, f"Trim Edges failed: {e}")
-            # print(f"[Quick Infill] Trim Edges error: {e}")
+            import traceback
+            traceback.print_exc()
             return {'CANCELLED'}
 
 

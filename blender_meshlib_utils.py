@@ -581,7 +581,6 @@ def process_object_with_island_split(blender_obj, operation_fn, output_suffix, a
         island_mesh.addMeshPart(mm.MeshPart(src_mesh, bitset))
 
         initial_faces = island_mesh.topology.numValidFaces()
-        total_initial += island_mesh.topology.numValidVerts()
 
         island_resolution, island_ratio, island_mode = resolution, ratio, mode
         if smart and blender_island_tags:
@@ -593,7 +592,15 @@ def process_object_with_island_split(blender_obj, operation_fn, output_suffix, a
                 island_resolution, island_ratio = RESOLUTION_PRESETS[matched_tag]
                 island_mode = "VOXEL_RATIO"
 
-        out_mesh = operation_fn(island_mesh, island_resolution)
+        try:
+            out_mesh = operation_fn(island_mesh, island_resolution)
+        except Exception:
+            # This island collapsed under the operation (e.g. Trim Edges/Trim
+            # Thin on a thin sliver); drop just this island instead of
+            # aborting the whole multi-island merge.
+            continue
+
+        total_initial += island_mesh.topology.numValidVerts()
 
         if auto_decimate:
             final_faces = out_mesh.topology.numValidFaces()
@@ -615,6 +622,9 @@ def process_object_with_island_split(blender_obj, operation_fn, output_suffix, a
 
         total_final += out_mesh.topology.numValidVerts()
         merged_mesh.addMesh(out_mesh)
+
+    if merged_mesh.topology.numValidFaces() == 0:
+        raise RuntimeError(f"All mesh islands collapsed for '{blender_obj.name}'")
 
     result_obj = meshlib_to_blender_via_stl(merged_mesh, obj_name + output_suffix, import_scale=import_scale)
 

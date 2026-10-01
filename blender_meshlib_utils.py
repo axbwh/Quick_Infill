@@ -275,7 +275,7 @@ def blender_to_meshlib(blender_obj):
     return ml_mesh
 
 
-def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None):
+def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None, apply_modifiers=True):
     """
     Export the given Blender object to a temporary STL and load it via meshlib.
     This avoids constructing huge Python-side vectors for very dense meshes.
@@ -312,7 +312,7 @@ def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None):
             export_selected_objects=True,
             use_batch=False,
             global_scale=STL_EXPORT_SCALE,
-            apply_modifiers=True,
+            apply_modifiers=apply_modifiers,
             evaluation_mode='DAG_EVAL_VIEWPORT',
         )
         if res != {'FINISHED'}:

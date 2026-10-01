@@ -208,14 +208,14 @@ class QuickInfillSettings(PropertyGroup):
         default="TARGET_VOXELS",
         update=reset_preset,
     )
-    show_settings: BoolProperty(
-        name="Show Settings",
-        description="Expand/collapse settings panel",
+    show_voxel_tools_menu: BoolProperty(
+        name="Show Voxel Tools",
+        description="Expand/collapse the Voxel Tools menu",
         default=True,
     )
-    show_presets: BoolProperty(
-        name="Show Presets",
-        description="Expand/collapse presets panel",
+    show_infill_tools_menu: BoolProperty(
+        name="Show Infill Tools",
+        description="Expand/collapse the Infill Tools menu",
         default=True,
     )
     # Preset tracking
@@ -511,157 +511,157 @@ class QUICKINFILL_PT_sidebar(Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
-        
-        # Scene Settings
+
         settings = getattr(context.scene, 'quick_infill_settings', None)
-        
-        # Create Cavity Infill button at top
-        ifRow = col.row(align=True)
-        ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
-        
-        col.separator(factor=1.0)
-        
-        # Presets section (collapsible)
-        presets_box = col.box()
-        presets_header = presets_box.row()
-        
-        # Collapsible header with arrow icon
-        show_presets = getattr(settings, 'show_presets', True)
-        icon = 'DOWNARROW_HLT' if show_presets else 'RIGHTARROW'
-        presets_header.prop(settings, "show_presets", text="Presets", icon=icon, emboss=False)
-        
-        # Show presets when expanded
-        if show_presets:
-            presets_col = presets_box.column(align=True)
-            active_preset = get_active_building_preset(settings)
 
-            # Building row
-            building_row = presets_col.row(align=True)
-            building_row.label(text="Building:")
-            fast_op = building_row.operator("quick_infill.preset_building_fast", text="Fast", depress=(active_preset == 'BUILDING_FAST'))
-            accurate_op = building_row.operator("quick_infill.preset_building_accurate", text="Accurate", depress=(active_preset == 'BUILDING_ACCURATE'))
-
-            # Mini row
-            mini_row = presets_col.row(align=True)
-            mini_row.label(text="Mini:")
-            holes_op = mini_row.operator("quick_infill.preset_mini_large_holes", text="Large Holes", depress=(active_preset == 'MINI_LARGE_HOLES'))
-            mini_acc_op = mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_preset == 'MINI_ACCURATE'))
         def prop_with_suffix(layout, data, attr, label="", suffix="mm"):
             split = layout.split(factor=0.9, align=True)
-            col = split.column(align=True)
-            col.use_property_split = False
-            col.use_property_decorate = False
-            col.prop(data, attr, text=label)
+            c = split.column(align=True)
+            c.use_property_split = False
+            c.use_property_decorate = False
+            c.prop(data, attr, text=label)
             split.label(text=suffix)
-        
-        # Scene Settings
-        settings = getattr(context.scene, 'quick_infill_settings', None)
-        def _prop(name: str, text: str | None = None):
-            try:
-                if text is None:
-                    col.prop(settings, name)
-                else:
-                    col.prop(settings, name, text=text)
-            except Exception:
-                col.label(text=f"{name} (unavailable)")
 
-        # Collapsible Settings section
-        box = col.box()
-        header = box.row()
-        
-        # Collapsible header with arrow icon
-        show_settings = getattr(settings, 'show_settings', True)
-        icon = 'DOWNARROW_HLT' if show_settings else 'RIGHTARROW'
-        header.prop(settings, "show_settings", text="Settings", icon=icon, emboss=False)
-        
-        # Show settings when expanded
-        if show_settings:
-            # Voxel mode selection with custom label/dropdown proportions
-            settings_col = box.column(align=True)
+        # =================================================================
+        # Voxel Tools (collapsible)
+        # =================================================================
+        voxel_box = col.box()
+        voxel_header = voxel_box.row()
+        show_voxel_tools = getattr(settings, 'show_voxel_tools_menu', True)
+        icon = 'DOWNARROW_HLT' if show_voxel_tools else 'RIGHTARROW'
+        voxel_header.prop(settings, "show_voxel_tools_menu", text="Voxel Tools", icon=icon, emboss=False)
+
+        if show_voxel_tools:
+            voxel_col = voxel_box.column(align=True)
+
+            # --- Tool Settings ---
+            voxel_col.label(text="Tool Settings")
+
+            support_settings = context.scene.quick_infill_support_settings
+            voxel_row = voxel_col.row(align=True)
+            voxel_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='SELECT_INTERSECT')
+            mod_icon = 'MODIFIER_ON' if support_settings.apply_modifiers_on_export else 'MODIFIER_OFF'
+            voxel_row.prop(support_settings, "apply_modifiers_on_export", text="", icon=mod_icon, toggle=True)
+
+            toggle_row = voxel_col.row(align=True)
+            toggle_row.prop(settings, "replace_original", text="Replace", toggle=True)
+            toggle_row.prop(settings, "process_islands", text="Islands", toggle=True)
+
+            voxel_col.separator(factor=1.0)
+            voxel_col.prop(settings, "shared_voxel_size", text="Voxel Size")
+            size_row = voxel_col.row(align=True)
+            for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
+                size_row.operator("quick_infill.voxel_preset", text=str(size)).size = size
+
+            voxel_col.separator(factor=1.0)
+            voxel_col.label(text="Auto Decimation")
+            decimate_row = voxel_col.row(align=True)
+            decimate_row.prop(settings, "decimate_mode", expand=True)
+            voxel_col.prop(settings, "decimation_ratio", text="Ratio")
+
+            voxel_col.separator(factor=1.0)
+            voxel_col.label(text="Presets:")
+            preset_row = voxel_col.row(align=True)
+            active_offset_preset = get_active_offset_preset(settings)
+            stone = preset_row.operator("quick_infill.offset_preset", text="Stone", depress=(active_offset_preset == 'STONE'))
+            stone.preset_name = 'STONE'
+            stone.voxel_size = 0.075
+            stone.distance = 0.7
+            stone.x = 0.25
+            stone.ratio = 0.0175
+
+            detail = preset_row.operator("quick_infill.offset_preset", text="Detail", depress=(active_offset_preset == 'DETAIL'))
+            detail.preset_name = 'DETAIL'
+            detail.voxel_size = 0.05
+            detail.distance = 0.3
+            detail.x = 0.4
+            detail.ratio = 0.03
+
+            fine = preset_row.operator("quick_infill.offset_preset", text="Fine", depress=(active_offset_preset == 'FINE'))
+            fine.preset_name = 'FINE'
+            fine.voxel_size = 0.03
+            fine.distance = 0.2
+            fine.x = 0.25
+            fine.ratio = 0.02
+
+            mini = preset_row.operator("quick_infill.offset_preset", text="Mini", depress=(active_offset_preset == 'MINI'))
+            mini.preset_name = 'MINI'
+            mini.voxel_size = 0.025
+            mini.distance = 0.2
+            mini.x = 0.25
+            mini.ratio = 0.04
+
+            tag_tools_row = voxel_col.row(align=True)
+            tag_tools_row.prop(settings, "smart_resolution", text="Smart Res", toggle=True)
+            tag_tools_row.operator("quick_infill.select_by_resolution_tag", text="", icon='VIEWZOOM')
+            tag_tools_row.operator("quick_infill.pick_resolution_tag", text="", icon='EYEDROPPER')
+
+            # --- Offset (collapsible) ---
+            voxel_col.separator(factor=1.0)
+            tools_panel.draw_offset_tools(voxel_col, context)
+
+            # --- Support (collapsible) ---
+            voxel_col.separator(factor=1.0)
+            support_tools.draw_support_tools(voxel_col, context)
+
+        # =================================================================
+        # Infill Tools (collapsible)
+        # =================================================================
+        infill_box = col.box()
+        infill_header = infill_box.row()
+        show_infill_tools = getattr(settings, 'show_infill_tools_menu', True)
+        icon = 'DOWNARROW_HLT' if show_infill_tools else 'RIGHTARROW'
+        infill_header.prop(settings, "show_infill_tools_menu", text="Infill Tools", icon=icon, emboss=False)
+
+        if show_infill_tools:
+            infill_col = infill_box.column(align=True)
+
+            # --- Create Cavity Infill button ---
+            ifRow = infill_col.row(align=True)
+            ifRow.operator("quick_infill.heal_cavity", text="Create Cavity Infill")
+
+            infill_col.separator(factor=1.0)
+
+            # --- Presets (static header) ---
+            infill_col.label(text="Presets:")
+
+            presets_col = infill_col.column(align=True)
+            active_building_preset = get_active_building_preset(settings)
+
+            building_row = presets_col.row(align=True)
+            building_row.label(text="Building:")
+            building_row.operator("quick_infill.preset_building_fast", text="Fast", depress=(active_building_preset == 'BUILDING_FAST'))
+            building_row.operator("quick_infill.preset_building_accurate", text="Accurate", depress=(active_building_preset == 'BUILDING_ACCURATE'))
+
+            mini_row = presets_col.row(align=True)
+            mini_row.label(text="Mini:")
+            mini_row.operator("quick_infill.preset_mini_large_holes", text="Large Holes", depress=(active_building_preset == 'MINI_LARGE_HOLES'))
+            mini_row.operator("quick_infill.preset_mini_accurate", text="Accurate", depress=(active_building_preset == 'MINI_ACCURATE'))
+
+            # --- Settings (static header) ---
+            infill_col.separator(factor=1.0)
+            infill_col.label(text="Settings:")
+
+            settings_col = infill_col.column(align=True)
             split = settings_col.split(factor=0.4, align=True)
             split.label(text="Voxel Mode")
             split.prop(settings, "voxel_mode", text="")
-            
-            # Method selection
+
             method_split = settings_col.split(factor=0.4, align=True)
             method_split.label(text="Method")
             method_split.prop(settings, "method", text="")
-            
-            # Target Resolution (shown in both modes)
+
+            settings_col.separator(factor=1.0)
             prop_with_suffix(settings_col, settings, "target_res", "Working Res", "M")
-            
-            # Show mode-specific settings
+
             mode = getattr(settings, 'voxel_mode', 'TARGET_VOXELS')
-            
             if mode == 'RESOLUTION':
                 prop_with_suffix(settings_col, settings, "resolution", "Resolution", "mm")
 
             prop_with_suffix(settings_col, settings, "grow", "Grow", "mm")
             settings_col.prop(settings, "shrink_mult")
+            settings_col.separator(factor=1.0)
             settings_col.prop(settings, "trim_thin")
-        
-        # Offset Tools section
-        tools_panel.draw_offset_tools(col, context)
-        
-        # Support Tools section
-        support_tools.draw_support_tools(col, context)
-
-        col.label(text="Tool Options")
-        voxel_row = col.row(align=True)
-        voxel_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='MOD_BOOLEAN')
-
-        toggle_row = col.row(align=True)
-        toggle_row.prop(context.scene.quick_infill_settings, "replace_original", text="Replace", toggle=True)
-        toggle_row.prop(context.scene.quick_infill_settings, "process_islands", text="Islands", toggle=True)
-
-        col.separator(factor=0.5)
-        col.prop(context.scene.quick_infill_settings, "shared_voxel_size", text="Voxel Size")
-        row = col.row(align=True)
-        for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
-            row.operator("quick_infill.voxel_preset", text=str(size)).size = size
-
-        col.separator(factor=0.5)
-        auto_decimation_box = col.box()
-        auto_decimation_box.label(text="Auto Decimation")
-        decimate_row = auto_decimation_box.row(align=True)
-        decimate_row.prop(context.scene.quick_infill_settings, "decimate_mode", expand=True)
-        auto_decimation_box.prop(context.scene.quick_infill_settings, "decimation_ratio", text="Ratio")
-
-        col.label(text="Presets")
-        preset_row = col.row(align=True)
-        active_preset = get_active_offset_preset(context.scene.quick_infill_settings)
-        stone = preset_row.operator("quick_infill.offset_preset", text="Stone", depress=(active_preset == 'STONE'))
-        stone.preset_name = 'STONE'
-        stone.voxel_size = 0.075
-        stone.distance = 0.7
-        stone.x = 0.25
-        stone.ratio = 0.0175
-
-        detail = preset_row.operator("quick_infill.offset_preset", text="Detail", depress=(active_preset == 'DETAIL'))
-        detail.preset_name = 'DETAIL'
-        detail.voxel_size = 0.05
-        detail.distance = 0.3
-        detail.x = 0.4
-        detail.ratio = 0.03
-
-        fine = preset_row.operator("quick_infill.offset_preset", text="Fine", depress=(active_preset == 'FINE'))
-        fine.preset_name = 'FINE'
-        fine.voxel_size = 0.03
-        fine.distance = 0.2
-        fine.x = 0.25
-        fine.ratio = 0.02
-
-        mini = preset_row.operator("quick_infill.offset_preset", text="Mini", depress=(active_preset == 'MINI'))
-        mini.preset_name = 'MINI'
-        mini.voxel_size = 0.025
-        mini.distance = 0.2
-        mini.x = 0.25
-        mini.ratio = 0.04
-
-        tag_tools_row = col.row(align=True)
-        tag_tools_row.prop(context.scene.quick_infill_settings, "smart_resolution", text="Smart Res", toggle=True)
-        tag_tools_row.operator("quick_infill.select_by_resolution_tag", text="", icon='VIEWZOOM')
-        tag_tools_row.operator("quick_infill.pick_resolution_tag", text="", icon='EYEDROPPER')
 
 
 classes = (

@@ -87,6 +87,13 @@ class QuickInfillToolsSettings(PropertyGroup):
         default=False,
         options={'HIDDEN'},
     )
+
+    apply_modifiers_on_export: bpy.props.BoolProperty(
+        name="Apply Modifiers",
+        description="Apply each object's modifiers (viewport result) when exporting meshes for processing. Off = ignore modifiers",
+        default=False,
+        options={'HIDDEN'},
+    )
     
     show_tools: bpy.props.BoolProperty(
         name="Show Tools",

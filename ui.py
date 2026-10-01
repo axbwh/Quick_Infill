@@ -95,6 +95,14 @@ def sync_shared_smart_resolution(self, context):
         context.scene.quick_infill_support_settings.smart_resolution = self.smart_resolution
 
 
+def sync_shared_apply_modifiers(self, context):
+    """Mirror the shared apply-modifiers-on-export toggle to tool settings."""
+    if hasattr(context.scene, 'quick_infill_tools_settings'):
+        context.scene.quick_infill_tools_settings.apply_modifiers_on_export = self.apply_modifiers_on_export
+    if hasattr(context.scene, 'quick_infill_support_settings'):
+        context.scene.quick_infill_support_settings.apply_modifiers_on_export = self.apply_modifiers_on_export
+
+
 class QuickInfillSettings(PropertyGroup):
     active_offset_preset: EnumProperty(
         name="Active Offset Preset",
@@ -138,6 +146,13 @@ class QuickInfillSettings(PropertyGroup):
         description="Use each island/object's existing resolution tag (if any) for its voxel size and decimation ratio, falling back to the current settings for untagged geometry",
         default=False,
         update=sync_shared_smart_resolution,
+    )
+
+    apply_modifiers_on_export: BoolProperty(
+        name="Apply Modifiers",
+        description="Apply each object's modifiers (viewport result) when exporting meshes for processing. Off = ignore modifiers",
+        default=False,
+        update=sync_shared_apply_modifiers,
     )
 
     decimate_mode: EnumProperty(
@@ -534,20 +549,21 @@ class QUICKINFILL_PT_sidebar(Panel):
         if show_voxel_tools:
             voxel_col = voxel_box.column(align=True)
 
-            # --- Tool Settings ---
-            voxel_col.label(text="Tool Settings")
+            tools_row = voxel_col.row(align=True)
+            tools_split = tools_row.split(factor=0.4, align=True)
 
-            support_settings = context.scene.quick_infill_support_settings
-            voxel_row = voxel_col.row(align=True)
-            voxel_row.operator("quick_infill.voxel_intersect", text="Voxel Intersect", icon='SELECT_INTERSECT')
-            mod_icon = 'MODIFIER_ON' if support_settings.apply_modifiers_on_export else 'MODIFIER_OFF'
-            voxel_row.prop(support_settings, "apply_modifiers_on_export", text="", icon=mod_icon, toggle=True)
+            toggle_group = tools_split.row(align=True)
+            toggle_group.prop(settings, "replace_original", text="", icon='PASTEDOWN', toggle=True)
+            toggle_group.prop(settings, "process_islands", text="", icon='GEOMETRY_SET', toggle=True)
+            mod_icon = 'MODIFIER_ON' if settings.apply_modifiers_on_export else 'MODIFIER_OFF'
+            toggle_group.prop(settings, "apply_modifiers_on_export", text="", icon=mod_icon, toggle=True)
 
-            toggle_row = voxel_col.row(align=True)
-            toggle_row.prop(settings, "replace_original", text="Replace", toggle=True)
-            toggle_row.prop(settings, "process_islands", text="Islands", toggle=True)
+            bool_group = tools_split.row(align=True)
+            bool_group.operator("quick_infill.voxel_intersect", text="", icon='SELECT_INTERSECT')
+            bool_group.operator("quick_infill.voxel_union", text="", icon='SELECT_EXTEND')
+            bool_group.operator("quick_infill.voxel_diff", text="", icon='SELECT_DIFFERENCE')
 
-            voxel_col.separator(factor=1.0)
+            voxel_col.separator(factor=2.0)
             voxel_col.prop(settings, "shared_voxel_size", text="Voxel Size")
             size_row = voxel_col.row(align=True)
             for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):

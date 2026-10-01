@@ -51,7 +51,8 @@ class QUICKINFILL_OT_heal_cavity(Operator):
 
             src_mesh_blender = selected_objs[0]
             # Convert to meshlib; fallback to STL route for very dense meshes
-            src_mesh = blender_to_meshlib_via_stl(src_mesh_blender)
+            apply_modifiers = bool(getattr(s, 'apply_modifiers_on_export', False))
+            src_mesh = blender_to_meshlib_via_stl(src_mesh_blender, apply_modifiers=apply_modifiers)
             INITIAL_VERTEX_COUNT = src_mesh.topology.numValidVerts()
             INITIAL_FACE_COUNT = src_mesh.topology.numValidFaces()
             print(f"Initial mesh: {INITIAL_VERTEX_COUNT} vertices, {INITIAL_FACE_COUNT} faces")

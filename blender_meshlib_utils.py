@@ -475,6 +475,7 @@ def _process_mesh_operation_single(blender_obj, operation_fn, output_suffix, aut
     mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
     ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
     smart = bool(getattr(settings, "smart_resolution", False)) if settings is not None else False
+    apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
 
     effective_resolution = resolution
     if smart:
@@ -484,7 +485,7 @@ def _process_mesh_operation_single(blender_obj, operation_fn, output_suffix, aut
             mode = "VOXEL_RATIO"
 
     # Convert to meshlib
-    src_mesh = blender_to_meshlib_via_stl(blender_obj)
+    src_mesh = blender_to_meshlib_via_stl(blender_obj, apply_modifiers=apply_modifiers)
     initial_face_count = src_mesh.topology.numValidFaces()
     initial_vertex_count = src_mesh.topology.numValidVerts()
 
@@ -551,9 +552,10 @@ def process_object_with_island_split(blender_obj, operation_fn, output_suffix, a
 
     obj_name = blender_obj.name
     smart = bool(getattr(settings, "smart_resolution", False)) if settings is not None else False
+    apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
     blender_island_tags = compute_blender_island_tags(blender_obj) if smart else []
 
-    src_mesh = blender_to_meshlib_via_stl(blender_obj)
+    src_mesh = blender_to_meshlib_via_stl(blender_obj, apply_modifiers=apply_modifiers)
 
     component_bitsets = mm.MeshComponents.getAllComponents(mm.MeshPart(src_mesh))
     if len(component_bitsets) <= 1:
@@ -846,6 +848,8 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
         initial_face_counts = []
         initial_vert_counts = []
         
+        apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
+
         for i, obj in enumerate(blender_objs):
             # Select only this object
             for o in bpy.context.selected_objects:
@@ -860,7 +864,7 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
                 export_selected_objects=True,
                 use_batch=False,
                 global_scale=STL_EXPORT_SCALE,
-                apply_modifiers=True,
+                apply_modifiers=apply_modifiers,
                 evaluation_mode='DAG_EVAL_VIEWPORT',
             )
             

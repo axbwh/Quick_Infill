@@ -440,6 +440,13 @@ def union_meshes(mesh_a, mesh_b, voxel_size):
     return mm.voxelBooleanUnite(mesh_a, mesh_b, voxel_size)
 
 
+def diff_meshes(mesh_a, mesh_b, voxel_size):
+    """Perform voxel-based boolean subtraction (mesh_a - mesh_b)."""
+    mm, _ = get_meshlib()
+
+    return mm.voxelBooleanSubtract(mesh_a, mesh_b, voxel_size)
+
+
 def fix_undercuts_single_mesh(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle):
     """
     Process undercut fixing for a single meshlib mesh.
@@ -752,91 +759,152 @@ class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
             return {'CANCELLED'}
 
 
+def _voxel_boolean_combine(context, combine_fn, op_label, suffix):
+    """Shared pipeline for Voxel Intersect/Union/Diff: starting from the
+    active object, combine each other selected mesh into it individually
+    using combine_fn(result_mesh, other_mesh, voxel_size).
+
+    Returns (result_obj, message) on success, or (None, error_message) on failure.
+    """
+    settings = context.scene.quick_infill_support_settings
+    voxel_size = settings.voxel_size
+    replace_original = settings.replace_original
+    apply_modifiers = settings.apply_modifiers_on_export
+
+    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+    if len(selected_meshes) < 2:
+        return None, f"Select at least 2 mesh objects to {op_label.lower()}."
+
+    # Use active object or first selected as starting point
+    active_obj = context.active_object if context.active_object in selected_meshes else selected_meshes[0]
+
+    result_mesh = blender_to_meshlib_via_stl(active_obj, apply_modifiers=apply_modifiers)
+    mesh_names = [active_obj.name]
+
+    # Iteratively combine with remaining meshes
+    for obj in selected_meshes:
+        if obj == active_obj:
+            continue
+
+        other_mesh = blender_to_meshlib_via_stl(obj, apply_modifiers=apply_modifiers)
+        result_mesh = combine_fn(result_mesh, other_mesh, voxel_size)
+        mesh_names.append(obj.name)
+
+    # Respect the shared auto-decimation option before exporting back to Blender.
+    if settings.decimate_mode != "OFF":
+        from .offset_utils import should_auto_decimate_faces, decimate_mesh
+        final_faces_before = result_mesh.topology.numValidFaces()
+        do_decimate, target_faces = should_auto_decimate_faces(
+            sum(obj.data.vertices.__len__() for obj in selected_meshes if obj.type == 'MESH' and obj.data is not None),
+            final_faces_before,
+            voxel_size=float(voxel_size),
+            mode=settings.decimate_mode,
+            ratio=settings.decimation_ratio,
+        )
+        if do_decimate:
+            result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=float(voxel_size))
+
+    if result_mesh.topology.numValidVerts() == 0:
+        return None, f"{op_label} resulted in empty mesh. Objects may not overlap."
+
+    final_verts = result_mesh.topology.numValidVerts()
+
+    new_name = active_obj.name + suffix
+    result_obj = meshlib_to_blender_via_stl(result_mesh, name=new_name)
+
+    # Handle transforms using the shared Replace toggle.
+    if replace_original:
+        from .blender_meshlib_utils import replace_mesh_keep_transforms
+        result_obj = replace_mesh_keep_transforms(active_obj, result_obj)
+
+        # Delete other selected meshes
+        for obj in selected_meshes:
+            if obj != active_obj:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+    print(f"[Quick Infill] {op_label}: {len(mesh_names)} objects → {final_verts} vertices")
+    return result_obj, f"{op_label} completed on {len(mesh_names)} objects. Result: '{result_obj.name}'"
+
+
 class QUICKINFILL_OT_voxel_intersect(Operator):
     """Intersect all selected mesh objects using voxel boolean"""
     bl_idname = "quick_infill.voxel_intersect"
     bl_label = "Voxel Intersect"
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     @classmethod
     def poll(cls, context):
-        # Need at least 2 selected mesh objects
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
         return len(selected_meshes) >= 2
-    
+
     def execute(self, context):
         try:
-            mm, _ = get_meshlib()
-            settings = context.scene.quick_infill_support_settings
-            voxel_size = settings.voxel_size
-            replace_original = settings.replace_original
-            
-            # Get all selected mesh objects
-            selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
-            if len(selected_meshes) < 2:
-                self.report({'ERROR'}, "Select at least 2 mesh objects to intersect.")
+            result_obj, message = _voxel_boolean_combine(context, intersect_meshes, "Voxel Intersect", "_Intersect")
+            if result_obj is None:
+                self.report({'ERROR'}, message)
                 return {'CANCELLED'}
-            
-            # Use active object or first selected as starting point
-            active_obj = context.active_object if context.active_object in selected_meshes else selected_meshes[0]
-            
-            # Convert first mesh to meshlib
-            apply_modifiers = settings.apply_modifiers_on_export
-            result_mesh = blender_to_meshlib_via_stl(active_obj, apply_modifiers=apply_modifiers)
-            mesh_names = [active_obj.name]
-            
-            # Iteratively intersect with remaining meshes
-            for obj in selected_meshes:
-                if obj == active_obj:
-                    continue
-                
-                other_mesh = blender_to_meshlib_via_stl(obj, apply_modifiers=apply_modifiers)
-                result_mesh = intersect_meshes(result_mesh, other_mesh, voxel_size)
-                mesh_names.append(obj.name)
-            
-            # Respect the shared auto-decimation option before exporting back to Blender.
-            if settings.decimate_mode != "OFF":
-                from .offset_utils import should_auto_decimate_faces, decimate_mesh
-                final_faces_before = result_mesh.topology.numValidFaces()
-                do_decimate, target_faces = should_auto_decimate_faces(
-                    sum(obj.data.vertices.__len__() for obj in selected_meshes if obj.type == 'MESH' and obj.data is not None),
-                    final_faces_before,
-                    voxel_size=float(voxel_size),
-                    mode=settings.decimate_mode,
-                    ratio=settings.decimation_ratio,
-                )
-                if do_decimate:
-                    result_mesh = decimate_mesh(result_mesh, target_face_count=target_faces, resolution=float(voxel_size))
-
-            # Check if result is valid
-            if result_mesh.topology.numValidVerts() == 0:
-                self.report({'ERROR'}, "Intersection resulted in empty mesh. Objects may not overlap.")
-                return {'CANCELLED'}
-            
-            final_verts = result_mesh.topology.numValidVerts()
-            
-            # Convert back to Blender
-            new_name = active_obj.name + "_Intersect"
-            result_obj = meshlib_to_blender_via_stl(result_mesh, name=new_name)
-            
-            # Handle transforms using the shared Replace toggle.
-            if replace_original:
-                from .blender_meshlib_utils import replace_mesh_keep_transforms
-                result_obj = replace_mesh_keep_transforms(active_obj, result_obj)
-                
-                # Delete other selected meshes
-                for obj in selected_meshes:
-                    if obj != active_obj:
-                        bpy.data.objects.remove(obj, do_unlink=True)
-            
-            print(f"[Quick Infill] Voxel Intersect: {len(mesh_names)} objects → {final_verts} vertices")
-            self.report({'INFO'}, f"Intersected {len(mesh_names)} objects. Result: '{result_obj.name}'")
+            self.report({'INFO'}, message)
             bpy.context.view_layer.update()
             return {'FINISHED'}
-            
         except Exception as e:
             self.report({'ERROR'}, f"Voxel Intersect failed: {e}")
             print(f"[Quick Infill] Voxel Intersect error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+
+class QUICKINFILL_OT_voxel_union(Operator):
+    """Union all selected mesh objects using voxel boolean"""
+    bl_idname = "quick_infill.voxel_union"
+    bl_label = "Voxel Union"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        return len(selected_meshes) >= 2
+
+    def execute(self, context):
+        try:
+            result_obj, message = _voxel_boolean_combine(context, union_meshes, "Voxel Union", "_Union")
+            if result_obj is None:
+                self.report({'ERROR'}, message)
+                return {'CANCELLED'}
+            self.report({'INFO'}, message)
+            bpy.context.view_layer.update()
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Voxel Union failed: {e}")
+            print(f"[Quick Infill] Voxel Union error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+
+class QUICKINFILL_OT_voxel_diff(Operator):
+    """Subtract every other selected mesh object from the active object, one at a time, using voxel boolean"""
+    bl_idname = "quick_infill.voxel_diff"
+    bl_label = "Voxel Diff"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        return len(selected_meshes) >= 2
+
+    def execute(self, context):
+        try:
+            result_obj, message = _voxel_boolean_combine(context, diff_meshes, "Voxel Diff", "_Diff")
+            if result_obj is None:
+                self.report({'ERROR'}, message)
+                return {'CANCELLED'}
+            self.report({'INFO'}, message)
+            bpy.context.view_layer.update()
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Voxel Diff failed: {e}")
+            print(f"[Quick Infill] Voxel Diff error: {e}")
             import traceback
             traceback.print_exc()
             return {'CANCELLED'}
@@ -1028,6 +1096,8 @@ classes = (
     QUICKINFILL_OT_fix_undercuts,
     QUICKINFILL_OT_fix_undercuts_from_view,
     QUICKINFILL_OT_voxel_intersect,
+    QUICKINFILL_OT_voxel_union,
+    QUICKINFILL_OT_voxel_diff,
     QUICKINFILL_OT_shrink_from_view,
 )
 

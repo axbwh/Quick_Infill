@@ -564,18 +564,6 @@ class QUICKINFILL_PT_sidebar(Panel):
             bool_group.operator("quick_infill.voxel_diff", text="", icon='SELECT_DIFFERENCE')
 
             voxel_col.separator(factor=2.0)
-            voxel_col.prop(settings, "shared_voxel_size", text="Voxel Size")
-            size_row = voxel_col.row(align=True)
-            for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
-                size_row.operator("quick_infill.voxel_preset", text=str(size)).size = size
-
-            voxel_col.separator(factor=1.0)
-            voxel_col.label(text="Auto Decimation")
-            decimate_row = voxel_col.row(align=True)
-            decimate_row.prop(settings, "decimate_mode", expand=True)
-            voxel_col.prop(settings, "decimation_ratio", text="Ratio")
-
-            voxel_col.separator(factor=1.0)
             voxel_col.label(text="Presets:")
             preset_row = voxel_col.row(align=True)
             active_offset_preset = get_active_offset_preset(settings)
@@ -606,6 +594,18 @@ class QUICKINFILL_PT_sidebar(Panel):
             mini.distance = 0.2
             mini.x = 0.25
             mini.ratio = 0.04
+
+            voxel_col.separator(factor=1.0)
+            voxel_col.prop(settings, "shared_voxel_size", text="Voxel Size")
+            size_row = voxel_col.row(align=True)
+            for size in (0.025, 0.05, 0.1, 0.2, 0.3, 0.4):
+                size_row.operator("quick_infill.voxel_preset", text=str(size)).size = size
+
+            voxel_col.separator(factor=1.0)
+            voxel_col.label(text="Auto Decimation")
+            decimate_row = voxel_col.row(align=True)
+            decimate_row.prop(settings, "decimate_mode", expand=True)
+            voxel_col.prop(settings, "decimation_ratio", text="Ratio")
 
             tag_tools_row = voxel_col.row(align=True)
             tag_tools_row.prop(settings, "smart_resolution", text="Smart Res", toggle=True)

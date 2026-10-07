@@ -6,6 +6,7 @@ from .blender_meshlib_utils import (
     blender_to_meshlib_via_stl,
     meshlib_to_blender,
     meshlib_to_blender_via_stl,
+    move_object_to_collections,
 )
 
 class QUICKINFILL_OT_heal_cavity(Operator):
@@ -95,15 +96,9 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                 out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
             
             # Decimate output mesh if face count increased significantly
-            from .offset_utils import decimate_mesh, should_auto_decimate_faces
+            from .offset_utils import decimate_mesh, should_auto_decimate_cavity_faces
             final_face_count = out_mesh.topology.numValidFaces()
-            do_decimate, target_faces = should_auto_decimate_faces(
-                INITIAL_FACE_COUNT,
-                final_face_count,
-                voxel_size=vox,
-                mode="VOXEL_RATIO",
-                ratio=getattr(s, 'decimation_ratio', None),
-            )
+            do_decimate, target_faces = should_auto_decimate_cavity_faces(INITIAL_FACE_COUNT, final_face_count)
             if do_decimate:
                 out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=vox)
                 new_final_count = out_mesh.topology.numValidFaces()
@@ -111,7 +106,8 @@ class QUICKINFILL_OT_heal_cavity(Operator):
                 self.report({'INFO'}, f"Decimated result: {final_face_count} → {new_final_count} faces")
         
             infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
-            
+            move_object_to_collections(infill_obj, list(src_mesh_blender.users_collection) or [bpy.context.scene.collection])
+
             self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
             return {'FINISHED'}
 

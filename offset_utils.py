@@ -78,6 +78,17 @@ def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size:
         return True, target_faces
     return False, final_faces
 
+
+def should_auto_decimate_cavity_faces(initial_faces: int, final_faces: int) -> tuple:
+    """
+    Heal Cavity's own auto-decimate rule, kept independent of the shared
+    Tools/Support decimate_mode system: if the infill result grew past the
+    source face count, decimate back down to that original count.
+    """
+    if final_faces > initial_faces:
+        return True, initial_faces
+    return False, final_faces
+
 def cuda_offset(mesh, resolution: float, distance: float):
 	"""
 	CUDA-based general offset on a mesh.

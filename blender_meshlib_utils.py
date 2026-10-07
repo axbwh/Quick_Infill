@@ -232,6 +232,49 @@ def _nearest_island_tag(centroid_world, island_tags):
     return tag
 
 
+# Hidden staging collection for intermediate STL imports. Landing new objects
+# here (instead of the user's real collections) avoids repeatedly dirtying
+# any Geometry Nodes modifier elsewhere in the scene that scans those
+# collections - otherwise it gets re-evaluated on every object processed in
+# a batch, which can bring large batches to a crawl.
+_SCRATCH_COLLECTION_NAME = "Quick Infill (Working)"
+
+
+def _find_layer_collection(layer_coll, name):
+    """Recursively find the LayerCollection wrapping the collection named `name`."""
+    if layer_coll.collection.name == name:
+        return layer_coll
+    for child in layer_coll.children:
+        found = _find_layer_collection(child, name)
+        if found is not None:
+            return found
+    return None
+
+
+def _get_scratch_layer_collection():
+    """Return the (creating if needed) excluded staging LayerCollection."""
+    scene = bpy.context.scene
+    coll = bpy.data.collections.get(_SCRATCH_COLLECTION_NAME)
+    if coll is None:
+        coll = bpy.data.collections.new(_SCRATCH_COLLECTION_NAME)
+    if coll.name not in scene.collection.children:
+        scene.collection.children.link(coll)
+
+    layer_coll = _find_layer_collection(bpy.context.view_layer.layer_collection, coll.name)
+    if layer_coll is not None:
+        layer_coll.exclude = True
+    return layer_coll
+
+
+def move_object_to_collections(obj, target_collections):
+    """Unlink obj from every collection it's currently in and link it into
+    each collection in target_collections instead."""
+    for coll in list(obj.users_collection):
+        coll.objects.unlink(obj)
+    for coll in target_collections:
+        coll.objects.link(obj)
+
+
 def blender_to_meshlib(blender_obj):
     """
     Convert a Blender mesh object to a meshlib Mesh using MeshBuilder.
@@ -340,6 +383,10 @@ def meshlib_to_blender_via_stl(meshlib_mesh, name: str = "Converted Mesh", impor
     """
     Save a meshlib mesh to a temporary STL and import it back into Blender at a given scale.
     Returns the imported Blender object.
+
+    The object lands in a hidden staging collection (see _get_scratch_layer_collection),
+    not the user's real collections. Callers that keep the result (replace_original=False)
+    must move it into its final collection(s) via move_object_to_collections().
     """
     import os
     import tempfile
@@ -370,22 +417,33 @@ def meshlib_to_blender_via_stl(meshlib_mesh, name: str = "Converted Mesh", impor
     # Track current objects to detect newly imported one
     prev_objs = set(bpy.data.objects)
 
-    # Import STL
-    imported = False
-    # Prefer wm.stl_import if available
-    if hasattr(bpy.ops.wm, "stl_import"):
-        try:
-            res = bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-            imported = (res == {'FINISHED'})
-        except Exception:
-            imported = False
-    # Fallback to legacy importer
-    if not imported and hasattr(bpy.ops, "import_mesh") and hasattr(bpy.ops.import_mesh, "stl"):
-        try:
-            res = bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-            imported = (res == {'FINISHED'})
-        except Exception:
-            imported = False
+    # Redirect the import into the hidden staging collection so it never
+    # dirties the user's real collections during the import.
+    view_layer = bpy.context.view_layer
+    prev_active_layer_collection = view_layer.active_layer_collection
+    scratch_layer_collection = _get_scratch_layer_collection()
+    if scratch_layer_collection is not None:
+        view_layer.active_layer_collection = scratch_layer_collection
+
+    try:
+        imported = False
+        # Prefer wm.stl_import if available
+        if hasattr(bpy.ops.wm, "stl_import"):
+            try:
+                res = bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                imported = (res == {'FINISHED'})
+            except Exception:
+                imported = False
+        # Fallback to legacy importer
+        if not imported and hasattr(bpy.ops, "import_mesh") and hasattr(bpy.ops.import_mesh, "stl"):
+            try:
+                res = bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                imported = (res == {'FINISHED'})
+            except Exception:
+                imported = False
+    finally:
+        view_layer.active_layer_collection = prev_active_layer_collection
+
     if not imported:
         raise RuntimeError("STL import failed")
 
@@ -514,9 +572,13 @@ def _process_mesh_operation_single(blender_obj, operation_fn, output_suffix, aut
     face_tags = [tag_index] * len(result_obj.data.polygons)
     write_mesh_resolution_tags(result_obj.data, face_tags, remesh_voxel_size=effective_resolution)
 
-    # If replace_original is enabled, swap mesh data and delete the temp object
+    # If replace_original is enabled, swap mesh data and delete the temp object.
+    # Otherwise, move the kept result out of the hidden staging collection
+    # and into the source object's collection(s).
     if replace_original:
         result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
+    else:
+        move_object_to_collections(result_obj, list(blender_obj.users_collection) or [bpy.context.scene.collection])
     set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
 
     return result_obj, initial_vertex_count, final_vertex_count
@@ -635,6 +697,8 @@ def process_object_with_island_split(blender_obj, operation_fn, output_suffix, a
 
     if replace_original:
         result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
+    else:
+        move_object_to_collections(result_obj, list(blender_obj.users_collection) or [bpy.context.scene.collection])
     set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
 
     return result_obj, total_initial, total_final
@@ -947,33 +1011,43 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
             list(executor.map(_save_one, zip(processed_meshes, output_stl_paths)))
 
-        # Phase 4: Import surviving results back to Blender
+        # Phase 4: Import surviving results back to Blender. Redirected into the
+        # hidden staging collection for the whole loop so repeated imports don't
+        # dirty the user's real collections (see meshlib_to_blender_via_stl).
         result_objs = []
-        for j, stl_path in enumerate(output_stl_paths):
-            src_idx = surviving_indices[j]
-            prev_objs = set(bpy.data.objects)
+        view_layer = bpy.context.view_layer
+        prev_active_layer_collection = view_layer.active_layer_collection
+        scratch_layer_collection = _get_scratch_layer_collection()
+        if scratch_layer_collection is not None:
+            view_layer.active_layer_collection = scratch_layer_collection
+        try:
+            for j, stl_path in enumerate(output_stl_paths):
+                src_idx = surviving_indices[j]
+                prev_objs = set(bpy.data.objects)
 
-            # Import STL
-            if hasattr(bpy.ops.wm, "stl_import"):
-                bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-            else:
-                bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                # Import STL
+                if hasattr(bpy.ops.wm, "stl_import"):
+                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
+                else:
+                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
 
-            # Find the newly imported object
-            new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
-            if not new_objs:
-                new_objs = list(bpy.context.selected_objects)
+                # Find the newly imported object
+                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
+                if not new_objs:
+                    new_objs = list(bpy.context.selected_objects)
 
-            if new_objs:
-                result_obj = new_objs[0]
-                result_obj.name = blender_objs[src_idx].name + output_suffix
-                result_objs.append(result_obj)
+                if new_objs:
+                    result_obj = new_objs[0]
+                    result_obj.name = blender_objs[src_idx].name + output_suffix
+                    result_objs.append(result_obj)
 
-            # Clean up output STL
-            try:
-                os.remove(stl_path)
-            except Exception:
-                pass
+                # Clean up output STL
+                try:
+                    os.remove(stl_path)
+                except Exception:
+                    pass
+        finally:
+            view_layer.active_layer_collection = prev_active_layer_collection
 
         # Phase 5: Handle replace_original and build final results (survivors only)
         for j, result_obj in enumerate(result_objs):
@@ -988,6 +1062,8 @@ def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto
 
             if replace_original:
                 result_obj = replace_mesh_keep_transforms(original_obj, result_obj)
+            else:
+                move_object_to_collections(result_obj, list(original_obj.users_collection) or [bpy.context.scene.collection])
             set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
 
             results.append((result_obj, initial_vert_counts[src_idx], final_verts))

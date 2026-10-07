@@ -821,6 +821,9 @@ def _voxel_boolean_combine(context, combine_fn, op_label, suffix):
         for obj in selected_meshes:
             if obj != active_obj:
                 bpy.data.objects.remove(obj, do_unlink=True)
+    else:
+        from .blender_meshlib_utils import move_object_to_collections
+        move_object_to_collections(result_obj, list(active_obj.users_collection) or [bpy.context.scene.collection])
 
     print(f"[Quick Infill] {op_label}: {len(mesh_names)} objects → {final_verts} vertices")
     return result_obj, f"{op_label} completed on {len(mesh_names)} objects. Result: '{result_obj.name}'"

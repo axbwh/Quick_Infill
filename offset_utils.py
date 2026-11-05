@@ -1,38 +1,66 @@
 """
-Reusable mesh offset utilities for Quick Infill.
+Presets and reusable meshlib operations for Quick Infill.
+
+All sizes here are in meshlib space: Blender geometry is scaled by
+STL_EXPORT_SCALE (10x) on the way into meshlib (see pipeline.py), so a voxel
+size of 0.075 here is 0.0075 Blender units.
 """
 
 from typing import Optional
-# Auto-decimate: decimate back to initial if mesh grew at all
-# This prevents both progressive detail loss AND progressive growth
+import numpy as np
 
-# Canonical resolution presets shared by the UI and the processing pipeline.
-# Order defines the tag index stored in the per-face "qi_res_tag" attribute.
-# COARSE is appended last (not reordered to the front) so existing stored
-# indices for Stone/Detail/Fine/Mini stay valid.
-RESOLUTION_PRESETS = {
-    'STONE': (0.075, 0.0175),
-    'DETAIL': (0.05, 0.03),
-    'FINE': (0.03, 0.02),
-    'MINI': (0.025, 0.04),
-    'COARSE': (0.2, 0.01),
+from .meshlib_utils import get_meshlib, get_mrmeshnumpy, CUDA_LOCK
+
+# ---------------------------------------------------------------------------
+# Presets (single source of truth; the UI reads these)
+# ---------------------------------------------------------------------------
+
+# Voxel tool presets: voxel size, offset distance, Trim Edges X, decimation ratio.
+OFFSET_PRESETS = {
+    'STONE': {"voxel": 0.075, "distance": 0.7, "x": 0.25, "ratio": 0.0175},
+    'DETAIL': {"voxel": 0.05, "distance": 0.3, "x": 0.4, "ratio": 0.03},
+    'FINE': {"voxel": 0.03, "distance": 0.2, "x": 0.25, "ratio": 0.02},
+    'MINI': {"voxel": 0.025, "distance": 0.2, "x": 0.25, "ratio": 0.04},
 }
+
+# Resolution tags: (voxel size, decimation ratio). Order defines the tag index
+# stored in the per-face "qi_res_tag" attribute; COARSE is last so existing
+# stored indices for Stone/Detail/Fine/Mini stay valid.
+RESOLUTION_PRESETS = {k: (v["voxel"], v["ratio"]) for k, v in OFFSET_PRESETS.items()}
+RESOLUTION_PRESETS['COARSE'] = (0.2, 0.01)
 RESOLUTION_TAG_ORDER = list(RESOLUTION_PRESETS.keys())
 
-# Voxel sizes above this are always bucketed as Coarse rather than matched by
-# nearest distance, since Stone is otherwise the closest (and much finer) tag.
+# Voxel sizes above this are always bucketed as Coarse.
 COARSE_RESOLUTION_THRESHOLD = 0.1
+
+# Cavity Infill presets (its own resolution / grow / shrink settings).
+INFILL_PRESETS = {
+    'BUILDING_FAST': {"voxel_mode": 'TARGET_VOXELS', "target_res": 0.5, "resolution": 0.1, "grow": 0.75,
+                      "shrink_mult": 2.0, "method": 'NAIVE', "trim_thin": True},
+    'BUILDING_ACCURATE': {"voxel_mode": 'TARGET_VOXELS', "target_res": 3.0, "resolution": 0.1, "grow": 1.0,
+                          "shrink_mult": 1.2, "method": 'ACCURATE', "trim_thin": True},
+    'MINI_LARGE_HOLES': {"voxel_mode": 'RESOLUTION', "target_res": 1.0, "resolution": 0.1, "grow": 1.0,
+                         "shrink_mult": 1.5, "method": 'ACCURATE', "trim_thin": True},
+    'MINI_ACCURATE': {"voxel_mode": 'RESOLUTION', "target_res": 2.0, "resolution": 0.075, "grow": 0.35,
+                      "shrink_mult": 1.2, "method": 'ACCURATE', "trim_thin": True},
+}
+
+ANGLE_PRESETS = (10.0, 15.0, 30.0, 45.0, 60.0, 90.0)
+
+
+class MeshCollapsedError(Exception):
+    """An operation left no geometry (e.g. Trim Thin on a part thinner than a voxel).
+
+    Only this exception means "collapsed"; any other exception is a real error
+    and must never cause the source object to be deleted.
+    """
 
 
 def nearest_resolution_tag(voxel_size: float) -> str:
-    """Bucket an arbitrary voxel size into the closest known resolution tag.
+    """Bucket a voxel size into the closest known resolution tag.
 
-    Anything above COARSE_RESOLUTION_THRESHOLD is always tagged Coarse; the
-    rest are matched to the closest of Stone/Detail/Fine/Mini by voxel size.
-
-    Blender's FloatProperty stores values as 32-bit floats, so a UI value of
-    exactly 0.1 can read back in Python as ~0.100000001. A small epsilon keeps
-    that float32 round-off from tipping 0.1 itself into Coarse.
+    Anything above COARSE_RESOLUTION_THRESHOLD is Coarse. A small epsilon
+    keeps float32 round-off (0.1 read back as 0.100000001) out of Coarse.
     """
     voxel_size = float(voxel_size)
     if voxel_size > COARSE_RESOLUTION_THRESHOLD + 1e-6:
@@ -42,36 +70,23 @@ def nearest_resolution_tag(voxel_size: float) -> str:
 
 
 def voxel_size_to_decimation_ratio(voxel_size: float) -> float:
-    """Map the current voxel size preset to a decimation ratio.
-
-    The requested defaults are:
-        0.025 -> 0.0100
-        0.075 -> 0.0150
-    and the relationship continues linearly from there, so larger voxel sizes
-    keep a larger ratio and therefore decimate more aggressively.
-    """
-    voxel_size = float(voxel_size)
-    ratio = voxel_size / 5.0
-    return max(0.01, min(0.2, ratio))
+    """Fallback ratio from voxel size (0.025 -> 0.01 ... clamped 0.01-0.2)."""
+    return max(0.01, min(0.2, float(voxel_size) / 5.0))
 
 
-def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size: Optional[float] = None, mode: str = "VOXEL_RATIO", ratio: Optional[float] = None) -> tuple:
-    """
-    Determine if auto-decimation should be applied and calculate target face count.
+def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size: Optional[float] = None,
+                               mode: str = "VOXEL_RATIO", ratio: Optional[float] = None) -> tuple:
+    """Return (decimate?, target_faces) for the shared decimate modes.
 
-    Mode "OFF" disables it. Mode "ORIGINAL" decimates back to the original
-    face count. Mode "VOXEL_RATIO" decimates based on the current ratio value,
-    which defaults to the voxel size preset mapping unless the caller provides an
-    explicit ratio override.
+    OFF: never. ORIGINAL: back to the original face count if it grew.
+    VOXEL_RATIO: keep `ratio` of the final faces (falls back to a voxel-size mapping).
     """
     if mode == "OFF":
         return False, final_faces
-
     if mode == "ORIGINAL":
         if final_faces > initial_faces:
             return True, initial_faces
         return False, final_faces
-
     target_ratio = ratio if ratio is not None else (voxel_size_to_decimation_ratio(voxel_size) if voxel_size is not None else 0.015)
     target_faces = max(1, int(final_faces * float(target_ratio)))
     if target_faces < final_faces:
@@ -80,199 +95,142 @@ def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size:
 
 
 def should_auto_decimate_cavity_faces(initial_faces: int, final_faces: int) -> tuple:
-    """
-    Heal Cavity's own auto-decimate rule, kept independent of the shared
-    Tools/Support decimate_mode system: if the infill result grew past the
-    source face count, decimate back down to that original count.
-    """
+    """Cavity Infill's own rule: decimate back to the source face count if it grew."""
     if final_faces > initial_faces:
         return True, initial_faces
     return False, final_faces
 
+
+# ---------------------------------------------------------------------------
+# Mesh helpers
+# ---------------------------------------------------------------------------
+
+def face_count(mesh) -> int:
+    return mesh.topology.numValidFaces()
+
+
+def bbox_of(mesh):
+    """(min xyz, max xyz) numpy arrays. Much faster than computeBoundingBox() on big meshes."""
+    mn = get_mrmeshnumpy()
+    v = mn.getNumpyVerts(mesh)
+    if len(v) == 0:
+        z = np.zeros(3)
+        return z, z
+    return v.min(axis=0), v.max(axis=0)
+
+
+def ensure_not_collapsed(mesh):
+    if face_count(mesh) == 0:
+        raise MeshCollapsedError()
+    return mesh
+
+
 def cuda_offset(mesh, resolution: float, distance: float):
-	"""
-	CUDA-based general offset on a mesh.
-	- resolution: voxel size used for offset grid
-	- distance: positive grows, negative shrinks
-	"""
-	from .meshlib_utils import get_meshlib
-	mm, mc = get_meshlib()
-	
-	p = mm.GeneralOffsetParameters()
-	p.voxelSize = float(resolution)
-	p.signDetectionMode = mm.SignDetectionMode.HoleWindingRule
-	p.fwn = mc.FastWindingNumber(mesh)
-	return mm.generalOffsetMesh(mp=mesh, offset=float(distance), params=p)
+    """CUDA winding-number offset. Positive distance grows, negative shrinks, 0 re-voxelises.
+
+    Serialised with CUDA_LOCK so only one CUDA job touches the GPU at a time.
+    """
+    mm, mc = get_meshlib()
+    p = mm.GeneralOffsetParameters()
+    p.voxelSize = float(resolution)
+    p.signDetectionMode = mm.SignDetectionMode.HoleWindingRule
+    with CUDA_LOCK:
+        p.fwn = mc.FastWindingNumber(mesh)
+        return mm.generalOffsetMesh(mp=mesh, offset=float(distance), params=p)
 
 
-def weighted_dist_shell(
-	mesh_to_offset,
-	reference_mesh,
-	voxel_size: float,
-	shrink_mult: float,
-	max_vertices: Optional[int] = None,
-	target_resolution: Optional[float] = None,
-):
-	"""
-	Creates a variable-width shell based on distance to reference_mesh.
-	Thicker where farther from reference, used to reduce occlusion when booleaned.
-	
-	Args:
-		shrink_mult: Multiplier for shell thickness based on distance
-		max_vertices: Maximum vertex count before decimation (default: 100M for safety)
-	
-	Automatically decimates mesh if too dense to prevent "vector too long" errors.
-	"""
-	from .meshlib_utils import get_meshlib
-	mm, _ = get_meshlib()
-	
-	# Check if mesh is too dense for vector operations
-	# Use provided limit or fallback to conservative default
-	MAX_VERTICES = max_vertices if max_vertices is not None else 1_000_000
-	
-	working_mesh = mesh_to_offset
-	working_ref = reference_mesh
-	
-	if mesh_to_offset.points.size() > MAX_VERTICES:
-		# Calculate reduction ratio to get under the limit
-		target_vertices = MAX_VERTICES // 2  # Use half the limit for safety
-		reduction_ratio = target_vertices / mesh_to_offset.points.size()
-		working_mesh = decimate_mesh(mesh_to_offset, reduction_ratio=reduction_ratio)
-		print(f"[Quick Infill] Decimated mesh from {mesh_to_offset.points.size()} to {working_mesh.points.size()} vertices")
-		
-    	
-	if reference_mesh.points.size() > MAX_VERTICES:
-		# Also decimate reference mesh if needed
-		target_vertices = MAX_VERTICES // 2
-		reduction_ratio = target_vertices / reference_mesh.points.size()
-		working_ref = decimate_mesh(reference_mesh, reduction_ratio=reduction_ratio)
-		print(f"[Quick Infill] Decimated reference mesh from {reference_mesh.points.size()} to {working_ref.points.size()} vertices")
-	
-	sd = mm.findSignedDistances(working_ref, working_mesh)
-	W = [abs(d) * float(shrink_mult) for d in sd]
+def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mult: float,
+                        max_vertices: Optional[int] = None, target_resolution: Optional[float] = None):
+    """Variable-width shell, thicker where farther from reference_mesh (Cavity Infill, Accurate)."""
+    mm, _ = get_meshlib()
+    MAX_VERTICES = max_vertices if max_vertices is not None else 1_000_000
 
-	n = working_mesh.points.size()
-	scalars = mm.VertScalars(n)
-	for i in range(n):
-		scalars.vec[i] = W[i]
+    working_mesh = mesh_to_offset
+    working_ref = reference_mesh
+    if mesh_to_offset.points.size() > MAX_VERTICES:
+        ratio = (MAX_VERTICES // 2) / mesh_to_offset.points.size()
+        working_mesh = decimate_mesh(mesh_to_offset, reduction_ratio=ratio)
+    if reference_mesh.points.size() > MAX_VERTICES:
+        ratio = (MAX_VERTICES // 2) / reference_mesh.points.size()
+        working_ref = decimate_mesh(reference_mesh, reduction_ratio=ratio)
 
-	# Calculate adaptive voxel size based on target resolution to prevent memory explosion
-	max_weight = max(scalars.vec) if scalars.vec else 1.0
-	
-	# Use target resolution to determine safe voxel size for weighted shell operation
-	if target_resolution is not None and max_vertices is not None:
-		# Use meshlib's built-in voxel size suggestion with target resolution
-		target_voxel_count = min(int(max_vertices), int(target_resolution))
+    sd = mm.findSignedDistances(working_ref, working_mesh)
+    # Vectorised (was two Python loops over every vertex)
+    weights = np.abs(np.fromiter((float(d) for d in sd), dtype=np.float64)) * float(shrink_mult)
 
+    n = working_mesh.points.size()
+    scalars = mm.VertScalars(n)
+    vec = scalars.vec
+    for i in range(n):  # VertScalars has no buffer interface; one assignment loop remains
+        vec[i] = float(weights[i])
+    max_weight = float(weights.max()) if len(weights) else 1.0
 
-		suggested_voxel_size = mm.suggestVoxelSize(mm.MeshPart(working_mesh), target_voxel_count)
-		adaptive_voxel_size = max(float(voxel_size), suggested_voxel_size)
-		
-		print(f"[Quick Infill] WeightedShell voxel adaptation: {voxel_size:.4f} → {adaptive_voxel_size:.4f} (target_res: {target_resolution}, weight: {max_weight:.2f})")
-	else:
-		# Fallback to original voxel size if target resolution not available
-		adaptive_voxel_size = float(voxel_size)
+    if target_resolution is not None and max_vertices is not None:
+        target_voxel_count = min(int(max_vertices), int(target_resolution))
+        suggested = mm.suggestVoxelSize(mm.MeshPart(working_mesh), target_voxel_count)
+        adaptive_voxel_size = max(float(voxel_size), suggested)
+    else:
+        adaptive_voxel_size = float(voxel_size)
 
-	params = mm.WeightedShell.ParametersMetric()
-	params.voxelSize = float(adaptive_voxel_size)
-	params.offset = float(adaptive_voxel_size)
-	params.dist.maxWeight = max_weight
-
-	return mm.WeightedShell.meshShell(working_mesh, scalars, params)
+    params = mm.WeightedShell.ParametersMetric()
+    params.voxelSize = float(adaptive_voxel_size)
+    params.offset = float(adaptive_voxel_size)
+    params.dist.maxWeight = max_weight
+    return mm.WeightedShell.meshShell(working_mesh, scalars, params)
 
 
 def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float:
-	"""
-	Suggest voxel size from mesh and clamp by the minimum resolution provided.
-	"""
-	from .meshlib_utils import get_meshlib
-	mm, _ = get_meshlib()
-	
-	suggested = mm.suggestVoxelSize(mm.MeshPart(mesh), float(target_voxels))
-	return max(float(suggested), float(min_resolution))
+    """Suggested voxel size for a target voxel count, never finer than min_resolution."""
+    mm, _ = get_meshlib()
+    suggested = mm.suggestVoxelSize(mm.MeshPart(mesh), float(target_voxels))
+    return max(float(suggested), float(min_resolution))
 
 
-def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None, max_error: Optional[float] = None, resolution: Optional[float] = None):
-	"""
-	Decimate mesh to reduce face count using mrmeshpy decimation.
-	
-	Args:
-		mesh: Input mesh to decimate
-		target_face_count: Target number of faces
-		reduction_ratio: Ratio of faces to keep (0.0-1.0, e.g., 0.5 = keep 50% of faces)
-		max_error: Maximum geometric deviation allowed (in mesh units). 
-		resolution: Voxel/remesh resolution - if provided, maxError defaults to 0.5 * resolution
-	
-	Returns:
-		Decimated mesh (modified in-place)
-	"""
-	from .meshlib_utils import get_meshlib
-	mm, _ = get_meshlib()
-	
-	current_faces = mesh.topology.numValidFaces()
-	
-	if target_face_count is None and reduction_ratio is None:
-		reduction_ratio = 0.5  # Default to 50% reduction
-	
-	settings = mm.DecimateSettings()
-	
-	# Calculate target face count
-	if target_face_count is not None:
-		target = int(target_face_count)
-	elif reduction_ratio is not None:
-		target = max(1, int(current_faces * float(reduction_ratio)))
-	else:
-		target = current_faces
-	
-	# MeshLib decimation uses maxDeletedFaces (limit on faces to delete)
-	# Calculate how many faces need to be deleted to reach target
-	faces_to_delete = max(0, current_faces - target)
-	settings.maxDeletedFaces = faces_to_delete
-	
-	# Set maxError to preserve detail - limits geometric deviation
-	# Note: MeshLib mesh is scaled 10x from Blender, so resolution must be scaled too
-	if max_error is not None:
-		settings.maxError = float(max_error)
-	elif resolution is not None:
-		# Resolution is in Blender units, scale to match MeshLib (10x)
-		# Allow error equal to voxel size since voxel ops already quantize to this
-		settings.maxError = float(resolution) * 10.0
-	else:
-		# Fallback: estimate from bounding box (0.5% of diagonal)
-		bbox = mesh.computeBoundingBox()
-		diagonal = (bbox.max - bbox.min).length()
-		settings.maxError = diagonal * 0.005
-	
-	# Use parallel processing for better performance
-	settings.packMesh = True
-	
-	# Apply decimation
-	result = mm.decimateMesh(mesh, settings)
-	
-	final_faces = mesh.topology.numValidFaces()
-	print(f"[Quick Infill] Decimation: {current_faces} → {final_faces} faces (maxError: {settings.maxError:.4f}, {result.vertsDeleted} verts removed)")
-	
-	return mesh
+# Above this many faces, decimate in parallel parts (about 4x faster on a 16-core CPU).
+PARALLEL_DECIMATE_FACES = 200_000
+
+
+def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None,
+                  max_error: Optional[float] = None, resolution: Optional[float] = None):
+    """Decimate in place (and return) with meshlib.
+
+    resolution: voxel size in meshlib units. maxError defaults to 10x the
+    voxel size - the value the tools have always used, kept so results don't
+    change. (An old comment claimed resolution was in Blender units; it is not.)
+    """
+    mm, _ = get_meshlib()
+    current_faces = face_count(mesh)
+    if target_face_count is None and reduction_ratio is None:
+        reduction_ratio = 0.5
+
+    if target_face_count is not None:
+        target = int(target_face_count)
+    else:
+        target = max(1, int(current_faces * float(reduction_ratio)))
+
+    settings = mm.DecimateSettings()
+    settings.maxDeletedFaces = max(0, current_faces - target)
+    if max_error is not None:
+        settings.maxError = float(max_error)
+    elif resolution is not None:
+        settings.maxError = float(resolution) * 10.0
+    else:
+        lo, hi = bbox_of(mesh)
+        settings.maxError = float(np.linalg.norm(hi - lo)) * 0.005
+    settings.packMesh = True
+    if current_faces > PARALLEL_DECIMATE_FACES:
+        settings.subdivideParts = 16
+
+    mm.decimateMesh(mesh, settings)
+    return mesh
 
 
 def target_faces_for_density(mesh, faces_per_sq_unit: float, min_faces: int = 200, max_faces: Optional[int] = None) -> int:
-	"""
-	Estimate target face count from mesh size for approximately consistent face density.
-
-	Uses bounding-box surface area as a robust size proxy, then scales by
-	faces_per_sq_unit to get a size-aware decimation target.
-	"""
-	bbox = mesh.computeBoundingBox()
-	dx = abs(bbox.max.x - bbox.min.x)
-	dy = abs(bbox.max.y - bbox.min.y)
-	dz = abs(bbox.max.z - bbox.min.z)
-
-	# Bounding-box surface area proxy.
-	surface_area = max(1e-6, 2.0 * (dx * dy + dy * dz + dz * dx))
-	target_faces = int(max(float(min_faces), surface_area * float(faces_per_sq_unit)))
-
-	if max_faces is not None:
-		target_faces = min(target_faces, int(max_faces))
-
-	return target_faces
-
+    """Target face count from bounding-box surface area, for roughly consistent density."""
+    lo, hi = bbox_of(mesh)
+    dx, dy, dz = (hi - lo).tolist()
+    surface_area = max(1e-6, 2.0 * (dx * dy + dy * dz + dz * dx))
+    target_faces = int(max(float(min_faces), surface_area * float(faces_per_sq_unit)))
+    if max_faces is not None:
+        target_faces = min(target_faces, int(max_faces))
+    return target_faces

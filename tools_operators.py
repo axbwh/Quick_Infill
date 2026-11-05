@@ -1,440 +1,167 @@
 """
-Tool operators for Quick Infill addon.
-Provides Grow, Shrink, Remesh, Trim Thin, and Trim Edges operations.
+Offset tool operators: Grow, Shrink, Remesh, Trim Thin, Trim Edges.
+
+They share one base class (_OffsetToolBase). Each tool only defines how to build
+its meshlib operation; selection, settings, batching, islands, decimation,
+reporting and collapse handling live in the base class and the pipeline.
 """
 
 import bpy
 from bpy.types import Operator
+
 from .meshlib_utils import get_meshlib
-from .offset_utils import cuda_offset, decimate_mesh, target_faces_for_density, should_auto_decimate_faces
-from .blender_meshlib_utils import process_mesh_operation, batch_process_mesh_operation, select_results
+from .offset_utils import (
+    cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
+)
+from .blender_meshlib_utils import process_objects, select_results, remove_objects
+import numpy as np
 
 
-class _MeshCollapsedError(Exception):
-    """Raised when a mesh offset collapses the mesh to no remaining geometry."""
-    pass
+def selected_meshes(context):
+    return [o for o in context.selected_objects if o.type == 'MESH']
 
 
-class QUICKINFILL_OT_grow(Operator):
+def report_process(op, pr, verb, label):
+    """Shared INFO / WARNING / ERROR reporting for a ProcessResult."""
+    n = len(pr.results)
+    if n == 1:
+        r = pr.results[0][0]
+        op.report({'INFO'}, f"{label} completed. {verb} '{r.name}'")
+    elif n > 1:
+        op.report({'INFO'}, f"{label} completed. {verb} {n} objects")
+    if pr.dropped_islands:
+        op.report({'WARNING'}, f"{label}: {pr.dropped_islands} island(s) collapsed or failed and were left out")
+    if pr.errors:
+        op.report({'ERROR'}, f"{label} failed on {len(pr.errors)} object(s), left unchanged: {pr.error_summary()}")
+
+
+class _OffsetToolBase:
+    bl_options = {'REGISTER', 'UNDO'}
+    suffix = ""
+    label = ""
+    # Trim tools delete objects whose geometry fully collapses; other tools leave them alone.
+    delete_collapsed = False
+    collapse_hint = "geometry collapsed"
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def make_operation(self, s):
+        """Return fn(meshlib_mesh, voxel_size) -> meshlib_mesh."""
+        raise NotImplementedError
+
+    def execute(self, context):
+        s = context.scene.quick_infill_settings
+        objs = selected_meshes(context)
+        if not objs:
+            self.report({'ERROR'}, "No mesh selected.")
+            return {'CANCELLED'}
+        try:
+            pr = process_objects(
+                objs, self.make_operation(s), self.suffix,
+                resolution=float(s.shared_voxel_size),
+                auto_decimate=s.decimate_mode != "OFF",
+                replace_original=s.replace_original,
+                settings=s,
+            )
+        except Exception as e:
+            self.report({'ERROR'}, f"{self.label} failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+        if pr.collapsed:
+            names = ", ".join(f"'{o.name}'" for o, _ in pr.collapsed)
+            if self.delete_collapsed:
+                remove_objects([o for o, _ in pr.collapsed])
+                self.report({'WARNING'}, f"{self.label}: {len(pr.collapsed)} object(s) fully removed ({self.collapse_hint}): {names}")
+            else:
+                self.report({'WARNING'}, f"{self.label}: {len(pr.collapsed)} object(s) collapsed and were left unchanged: {names}")
+
+        select_results([r[0] for r in pr.results])
+        report_process(self, pr, "Updated" if s.replace_original else "Created", self.label)
+        return {'FINISHED'} if pr.results or pr.collapsed else {'CANCELLED'}
+
+
+class QUICKINFILL_OT_grow(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.grow"
     bl_label = "Grow"
     bl_description = "Grow selected mesh(es) by the distance value. With multiple selections, processes each object individually"
-    bl_options = {'REGISTER', 'UNDO'}
+    suffix, label = "_Grown", "Grow"
 
-    def execute(self, context):
-        try:
-            settings = context.scene.quick_infill_tools_settings
-            distance = float(settings.distance)
-            resolution = float(settings.voxel_size)
-            auto_decimate = settings.decimate_mode != "OFF"
-            replace_original = settings.replace_original
-
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            # Grow = positive offset
-            def grow_op(mesh, res):
-                return cuda_offset(mesh, res, distance)
-            
-            # Use batch processing for multiple objects, single processing for one
-            if len(selected_objs) == 1:
-                result_obj, initial_verts, final_verts = process_mesh_operation(
-                    selected_objs[0], grow_op, "_Grown", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                # print(f"[Quick Infill] Grow: {initial_verts} → {final_verts} vertices, offset +{distance}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Grow completed. Updated '{result_obj.name}'")
-                else:
-                    self.report({'INFO'}, f"Grow completed. Created '{result_obj.name}'")
-            else:
-                # Batch process all selected objects
-                results, _ = batch_process_mesh_operation(
-                    selected_objs, grow_op, "_Grown", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                
-                total_initial = sum(r[1] for r in results)
-                total_final = sum(r[2] for r in results)
-                obj_count = len(results)
-                
-                # print(f"[Quick Infill] Grow (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset +{distance}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Grow completed. Updated {obj_count} objects")
-                else:
-                    self.report({'INFO'}, f"Grow completed. Created {obj_count} new objects")
-
-            # Force the depsgraph to fully evaluate the result mesh now, inside
-            # the operator where the user expects a wait.  Without this, Blender
-            # defers the evaluation (split-normal computation, BVH construction,
-            # etc.) until the next time it is needed – which is the file save –
-            # causing the save to appear frozen.
-            bpy.context.view_layer.update()
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Grow failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+    def make_operation(self, s):
+        d = float(s.distance)
+        return lambda mesh, res: cuda_offset(mesh, res, d)
 
 
-class QUICKINFILL_OT_shrink(Operator):
+class QUICKINFILL_OT_shrink(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.shrink"
     bl_label = "Shrink"
     bl_description = "Shrink selected mesh(es) by the distance value. With multiple selections, processes each object individually"
-    bl_options = {'REGISTER', 'UNDO'}
+    suffix, label = "_Shrunk", "Shrink"
 
-    def execute(self, context):
-        try:
-            settings = context.scene.quick_infill_tools_settings
-            distance = float(settings.distance)
-            resolution = float(settings.voxel_size)
-            auto_decimate = settings.decimate_mode != "OFF"
-            replace_original = settings.replace_original
-
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            # Shrink = negative offset
-            def shrink_op(mesh, res):
-                return cuda_offset(mesh, res, -distance)
-            
-            # Use batch processing for multiple objects, single processing for one
-            if len(selected_objs) == 1:
-                result_obj, initial_verts, final_verts = process_mesh_operation(
-                    selected_objs[0], shrink_op, "_Shrunk", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                # print(f"[Quick Infill] Shrink: {initial_verts} → {final_verts} vertices, offset -{distance}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Shrink completed. Updated '{result_obj.name}'")
-                else:
-                    self.report({'INFO'}, f"Shrink completed. Created '{result_obj.name}'")
-            else:
-                # Batch process all selected objects
-                results, _ = batch_process_mesh_operation(
-                    selected_objs, shrink_op, "_Shrunk", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                
-                total_initial = sum(r[1] for r in results)
-                total_final = sum(r[2] for r in results)
-                obj_count = len(results)
-                
-                # print(f"[Quick Infill] Shrink (batch): {obj_count} objects, {total_initial} → {total_final} total vertices, offset -{distance}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Shrink completed. Updated {obj_count} objects")
-                else:
-                    self.report({'INFO'}, f"Shrink completed. Created {obj_count} new objects")
-
-            # Force the depsgraph to fully evaluate the result mesh now, inside
-            # the operator where the user expects a wait.  Without this, Blender
-            # defers the evaluation (split-normal computation, BVH construction,
-            # etc.) until the next time it is needed – which is the file save –
-            # causing the save to appear frozen.
-            bpy.context.view_layer.update()
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Shrink failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+    def make_operation(self, s):
+        d = float(s.distance)
+        return lambda mesh, res: cuda_offset(mesh, res, -d)
 
 
-class QUICKINFILL_OT_remesh(Operator):
+class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.remesh"
     bl_label = "Remesh"
     bl_description = "Remesh selected mesh(es) at the resolution value. With multiple selections, processes each object individually"
-    bl_options = {'REGISTER', 'UNDO'}
+    suffix, label = "_Remeshed", "Remesh"
 
-    def execute(self, context):
-        try:
-            settings = context.scene.quick_infill_tools_settings
-            resolution = float(settings.voxel_size)
-            auto_decimate = settings.decimate_mode != "OFF"
-            replace_original = settings.replace_original
-
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            # Remesh = offset with 0 distance (re-voxelizes)
-            def remesh_op(mesh, res):
-                return cuda_offset(mesh, res, 0.0)
-            
-            # Use batch processing for multiple objects, single processing for one
-            if len(selected_objs) == 1:
-                result_obj, initial_verts, final_verts = process_mesh_operation(
-                    selected_objs[0], remesh_op, "_Remeshed", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                # print(f"[Quick Infill] Remesh: {initial_verts} → {final_verts} vertices at {resolution}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Remesh completed. Updated '{result_obj.name}'")
-                else:
-                    self.report({'INFO'}, f"Remesh completed. Created '{result_obj.name}'")
-            else:
-                # Batch process all selected objects
-                results, _ = batch_process_mesh_operation(
-                    selected_objs, remesh_op, "_Remeshed", auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-                
-                total_initial = sum(r[1] for r in results)
-                total_final = sum(r[2] for r in results)
-                obj_count = len(results)
-                
-                # print(f"[Quick Infill] Remesh (batch): {obj_count} objects, {total_initial} → {total_final} total vertices at {resolution}mm")
-                if replace_original:
-                    self.report({'INFO'}, f"Remesh completed. Updated {obj_count} objects")
-                else:
-                    self.report({'INFO'}, f"Remesh completed. Created {obj_count} new objects")
-
-            # Force the depsgraph to fully evaluate the result mesh now, inside
-            # the operator where the user expects a wait.  Without this, Blender
-            # defers the evaluation (split-normal computation, BVH construction,
-            # etc.) until the next time it is needed – which is the file save –
-            # causing the save to appear frozen.
-            bpy.context.view_layer.update()
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Remesh failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+    def make_operation(self, s):
+        return lambda mesh, res: cuda_offset(mesh, res, 0.0)
 
 
-class QUICKINFILL_OT_trim_thin(Operator):
+class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_thin"
     bl_label = "Trim Thin"
     bl_description = "Remove thin sections from selected mesh(es). With multiple selections, processes each object individually"
-    bl_options = {'REGISTER', 'UNDO'}
+    suffix, label = "_TrimThin", "Trim Thin"
+    delete_collapsed = True
+    collapse_hint = "too thin for current resolution"
 
-    def execute(self, context):
-        try:
-            settings = context.scene.quick_infill_tools_settings
-            resolution = float(settings.voxel_size)
-            auto_decimate = settings.decimate_mode != "OFF"
-            replace_original = settings.replace_original
-
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            # Trim thin = shrink then grow by resolution (removes thin features).
-            # If the shrink collapses the mesh to nothing, raise _MeshCollapsedError
-            # so batch_process_mesh_operation can skip it and return it as collapsed.
-            def trim_thin_op(mesh, res):
-                shrunk = cuda_offset(mesh, res, -res)
-                if shrunk.topology.numValidFaces() == 0:
-                    raise _MeshCollapsedError()
-                return cuda_offset(shrunk, res, res)
-
-            # Use batch processing for all objects. Collapsed meshes are returned
-            # separately in the second element without aborting the batch.
-            if len(selected_objs) == 1:
-                try:
-                    result_obj, initial_verts, final_verts = process_mesh_operation(
-                        selected_objs[0], trim_thin_op, "_TrimThin",
-                        auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                    )
-                    results = [(result_obj, initial_verts, final_verts)]
-                    collapsed = []
-                except _MeshCollapsedError:
-                    results = []
-                    collapsed = [(selected_objs[0], _MeshCollapsedError())]
-            else:
-                results, collapsed = batch_process_mesh_operation(
-                    selected_objs, trim_thin_op, "_TrimThin",
-                    auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-
-            # Delete any objects whose mesh fully collapsed
-            removed_names = []
-            for obj, exc in collapsed:
-                obj_name = obj.name
-                removed_names.append(obj_name)
-                # Save mesh reference before removal: bpy.data.objects.remove()
-                # decrements the mesh's user count but never removes the mesh
-                # itself, leaving it as an orphan that gets serialised on save.
-                mesh_to_del = obj.data if obj.type == 'MESH' else None
-                bpy.data.objects.remove(obj, do_unlink=True)
-                if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
-                    try:
-                        bpy.data.meshes.remove(mesh_to_del)
-                    except Exception:
-                        pass
-
-            if removed_names:
-                names_str = ", ".join(f"'{n}'" for n in removed_names)
-                self.report({'WARNING'}, f"Trim Thin: {len(removed_names)} object(s) fully removed (too thin for current resolution): {names_str}")
-
-            if results:
-                total_initial = sum(r[1] for r in results)
-                total_final = sum(r[2] for r in results)
-                obj_count = len(results)
-                # print(f"[Quick Infill] Trim Thin: {obj_count} objects, {total_initial} → {total_final} vertices at {resolution}mm")
-                select_results([r[0] for r in results])
-                if obj_count == 1:
-                    result_obj, _, _ = results[0]
-                    if replace_original:
-                        self.report({'INFO'}, f"Trim Thin completed. Updated '{result_obj.name}'")
-                    else:
-                        self.report({'INFO'}, f"Trim Thin completed. Created '{result_obj.name}'")
-                else:
-                    if replace_original:
-                        self.report({'INFO'}, f"Trim Thin completed. Updated {obj_count} objects")
-                    else:
-                        self.report({'INFO'}, f"Trim Thin completed. Created {obj_count} new objects")
-
-            # Force the depsgraph to fully evaluate the result mesh now, inside
-            # the operator where the user expects a wait.  Without this, Blender
-            # defers the evaluation (split-normal computation, BVH construction,
-            # etc.) until the next time it is needed – which is the file save –
-            # causing the save to appear frozen.
-            bpy.context.view_layer.update()
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Trim Thin failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+    def make_operation(self, s):
+        def trim_thin(mesh, res):
+            shrunk = ensure_not_collapsed(cuda_offset(mesh, res, -res))
+            return cuda_offset(shrunk, res, res)
+        return trim_thin
 
 
-class QUICKINFILL_OT_trim_edges(Operator):
+class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
     bl_label = "Trim Edges"
     bl_description = "Trim edges by offset sequence and intersect with original mesh. With multiple selections, processes each object individually"
-    bl_options = {'REGISTER', 'UNDO'}
+    suffix, label = "_TrimEdges", "Trim Edges"
+    delete_collapsed = True
+    collapse_hint = "mesh collapsed during trim"
 
-    def execute(self, context):
-        try:
-            mm, _ = get_meshlib()
-            settings = context.scene.quick_infill_tools_settings
-            distance = float(settings.distance)
-            resolution = float(settings.voxel_size)
-            trim_edges_x = float(settings.trim_edges_x)
-            trim_edges_density = float(settings.trim_edges_density)
-            auto_decimate = settings.decimate_mode != "OFF"
-            replace_original = settings.replace_original
+    def make_operation(self, s):
+        from .support_tools import intersect_meshes
+        distance = float(s.distance)
+        x = float(s.trim_edges_x)
+        density = float(s.trim_edges_density)
 
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            from .support_tools import intersect_meshes
-
-            # Trim edges = grow then shrink back further (rounds off thin edges),
-            # regrow slightly, decimate for density, then intersect with the
-            # original mesh to clip the result back to the original silhouette.
-            def trim_edges_op(mesh, res):
-                original_mesh = mm.copyMesh(mesh)
-                working_mesh = mm.copyMesh(mesh)
-                working_mesh = cuda_offset(working_mesh, res, 2.0 * distance)
-                working_mesh = cuda_offset(working_mesh, res, -3.0 * distance)
-
-                if working_mesh.topology.numValidFaces() == 0:
-                    raise _MeshCollapsedError()
-
-                working_mesh = cuda_offset(working_mesh, res, (1.0 + trim_edges_x) * distance)
-
-                target_faces = target_faces_for_density(
-                    working_mesh,
-                    faces_per_sq_unit=trim_edges_density,
-                    min_faces=20,
-                    max_faces=working_mesh.topology.numValidFaces(),
-                )
-                current_faces = working_mesh.topology.numValidFaces()
-                if target_faces < current_faces:
-                    bbox = working_mesh.computeBoundingBox()
-                    diag = (bbox.max - bbox.min).length()
-                    target_ratio = float(target_faces) / float(max(1, current_faces))
-                    reduction_strength = max(0.0, 1.0 - target_ratio)
-                    adaptive_max_error = max(
-                        float(res) * 10.0,
-                        diag * (0.01 + 0.49 * reduction_strength),
-                    )
-                    working_mesh = decimate_mesh(working_mesh, target_face_count=target_faces, max_error=adaptive_max_error)
-
-                return intersect_meshes(working_mesh, original_mesh, res)
-
-            # Use batch processing for all objects. Collapsed meshes are returned
-            # separately in the second element without aborting the batch.
-            if len(selected_objs) == 1:
-                try:
-                    result_obj, initial_verts, final_verts = process_mesh_operation(
-                        selected_objs[0], trim_edges_op, "_TrimEdges",
-                        auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                    )
-                    results = [(result_obj, initial_verts, final_verts)]
-                    collapsed = []
-                except _MeshCollapsedError:
-                    results = []
-                    collapsed = [(selected_objs[0], _MeshCollapsedError())]
-            else:
-                results, collapsed = batch_process_mesh_operation(
-                    selected_objs, trim_edges_op, "_TrimEdges",
-                    auto_decimate=auto_decimate, replace_original=replace_original, resolution=resolution
-                )
-
-            # Delete any objects whose mesh fully collapsed
-            removed_names = []
-            for obj, exc in collapsed:
-                obj_name = obj.name
-                removed_names.append(obj_name)
-                # Save mesh reference before removal: bpy.data.objects.remove()
-                # decrements the mesh's user count but never removes the mesh
-                # itself, leaving it as an orphan that gets serialised on save.
-                mesh_to_del = obj.data if obj.type == 'MESH' else None
-                bpy.data.objects.remove(obj, do_unlink=True)
-                if mesh_to_del and mesh_to_del.users == 0 and not mesh_to_del.use_fake_user:
-                    try:
-                        bpy.data.meshes.remove(mesh_to_del)
-                    except Exception:
-                        pass
-
-            if removed_names:
-                names_str = ", ".join(f"'{n}'" for n in removed_names)
-                self.report({'WARNING'}, f"Trim Edges: {len(removed_names)} object(s) fully removed (mesh collapsed during trim): {names_str}")
-
-            if results:
-                obj_count = len(results)
-                select_results([r[0] for r in results])
-                if obj_count == 1:
-                    result_obj, _, _ = results[0]
-                    if replace_original:
-                        self.report({'INFO'}, f"Trim Edges completed. Updated '{result_obj.name}'")
-                    else:
-                        self.report({'INFO'}, f"Trim Edges completed. Created '{result_obj.name}'")
-                else:
-                    if replace_original:
-                        self.report({'INFO'}, f"Trim Edges completed. Updated {obj_count} objects")
-                    else:
-                        self.report({'INFO'}, f"Trim Edges completed. Created {obj_count} new objects")
-
-            # Force the depsgraph to fully evaluate the result mesh now, inside
-            # the operator where the user expects a wait.  Without this, Blender
-            # defers the evaluation (split-normal computation, BVH construction,
-            # etc.) until the next time it is needed – which is the file save –
-            # causing the save to appear frozen.
-            bpy.context.view_layer.update()
-
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Trim Edges failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+        # Grow 2d, shrink 3d (rounds off thin edges), regrow (1+x)d, decimate to the
+        # density target, then intersect with the original to clip back to its silhouette.
+        # The input mesh is never modified by these steps, so no copies are needed.
+        def trim_edges(mesh, res):
+            w = cuda_offset(mesh, res, 2.0 * distance)
+            w = ensure_not_collapsed(cuda_offset(w, res, -3.0 * distance))
+            w = cuda_offset(w, res, (1.0 + x) * distance)
+            current = face_count(w)
+            target = target_faces_for_density(w, faces_per_sq_unit=density, min_faces=20, max_faces=current)
+            if target < current:
+                lo, hi = bbox_of(w)
+                diag = float(np.linalg.norm(hi - lo))
+                reduction = max(0.0, 1.0 - float(target) / float(max(1, current)))
+                max_err = max(float(res) * 10.0, diag * (0.01 + 0.49 * reduction))
+                w = decimate_mesh(w, target_face_count=target, max_error=max_err)
+            return intersect_meshes(w, mesh, res)
+        return trim_edges
 
 
 classes = (

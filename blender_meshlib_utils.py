@@ -22,7 +22,7 @@ import numpy as np
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy, JobCancelled, check_cancelled
 from .offset_utils import (
     RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag,
-    decimate_mesh, should_auto_decimate_faces, face_count, MeshCollapsedError,
+    decimate_mesh, should_auto_decimate_faces, face_count, MeshCollapsedError, PARALLEL_DECIMATE_FACES,
 )
 
 # Scale applied to Blender coordinates when entering meshlib (and undone on the way back).
@@ -559,50 +559,139 @@ def process_objects(objects, operation_fn, output_suffix, **kwargs):
 # ---------------------------------------------------------------------------
 # Run-time estimate (asked before starting very long jobs)
 # ---------------------------------------------------------------------------
+#
+# How it works: a trial offset at a 4x coarser voxel (a few ms) measures how big
+# the real result will be (result faces = 16 x trial faces, accurate to ~1% on
+# 6,240 timed runs). The work is then priced with coefficients fitted on 168
+# real operator runs on Infill_Test.blend (Grow/Remesh/Trim Thin/Trim Edges on
+# the four test objects at all presets with Islands on and off, plus batches of
+# 12 and 48 wall pieces), RTX 5090 / Ryzen 9950X3D, Nov 2026. On those runs 99%
+# of predictions were within 2x of the real time. Held-out check on 53 different runs
+# (other wall pieces, Smart Res, Fix Undercuts): 79% within 1.25x, 91% within
+# 1.5x, all within 2x (worst 0.51x: Smart + Islands on a sculpt with mixed tags).
+# Fix Undercuts terms come from 1,088 per-direction timings (median 1.03x).
+# The estimate then keeps learning: see EstimateLearner below.
 
-# Measured on an RTX 5090 / Ryzen 9950X3D (Nov 2026):
-#   CUDA offset          ~4.5 ms per million voxels, + ~20 ms per call
-#   result size          ~0.1 x (million voxels)^(2/3) million triangles
-#                        (surface of the voxel grid; checked on spheres and on
-#                        the Mini test sculpt: predicted 0.9M, actual 0.96M)
-#   decimating result    ~1-5 s per million result triangles (simple .. detailed)
-#   undercut fix (CPU)   ~0.05-0.25 s per million voxels per direction
-# The middle values below put Infill_Test within about 2x: Mini Fix Undercuts
-# x8 predicted 43 s (actual 45 s), Mini Grow 3 s (actual 5.6 s); simple wall
-# pieces are overestimated (12 pieces: 12 s predicted, 2 s actual). It only
-# decides when to ask first, so the huge jobs (10x and more) are what matter.
-SEC_PER_MVOX_OFFSET = 0.0045
-SEC_PER_OFFSET_CALL = 0.02
-MFACES_PER_MVOX_2_3 = 0.1
-SEC_PER_MFACE_DECIMATE = 3.0
-SEC_PER_MFACE_NO_DECIMATE = 0.5
-SEC_PER_MVOX_UNDERCUT = 0.18
-
-
-def object_voxel_stats(obj, voxel, grow=0.0):
-    """(million voxels in the working grid, million result triangles) of obj, in meshlib units."""
-    me = obj.data
-    n = len(me.vertices)
-    if n == 0 or not voxel:
-        return 0.0, 0.0
-    co = np.empty(n * 3, dtype=np.float32)
-    me.vertices.foreach_get("co", co)
-    co = co.reshape(-1, 3).astype(np.float64)
-    mw = np.array(obj.matrix_world, dtype=np.float64)
-    co = (co @ mw[:3, :3].T + mw[:3, 3]) * STL_EXPORT_SCALE
-    ext = co.max(axis=0) - co.min(axis=0) + 2.0 * abs(grow) + 4.0 * voxel
-    mvox = float(np.prod(np.ceil(ext / voxel))) / 1e6
-    return mvox, MFACES_PER_MVOX_2_3 * mvox ** (2.0 / 3.0)
+COEF = {
+    "mvox": 0.0096,        # s per million voxels, per offset
+    "in_faces": 0.412,     # s per million input faces, per offset
+    "dec_single": 0.384,   # s per million result faces decimated on one thread (< 200k faces)
+    "bool_faces": 0.2036,  # s per million result faces, per voxel boolean
+    "bool_call": 0.0025,   # s per voxel boolean
+    "result": 0.1529,      # s per million result faces (decimation, write-back, tags)
+    "job": 0.12,           # s per job (operator overhead, scene update)
+    "object": 0.03,        # s per object
+    "island": 0.0158,      # s per island when Islands is on
+    "uc_mvox": 0.0124,     # Fix Undercuts: s per million voxels, per direction
+    "uc_in_faces": 0.41,   # Fix Undercuts: s per million input faces, per direction
+    "uc_call": 0.024,      # Fix Undercuts: s per direction
+}
+PROBE_FACTOR = 4.0          # trial voxel = 4x coarser -> 64x fewer voxels
+PROBE_MAX_MVOX = 20.0       # keep the trial itself fast on huge grids
 
 
-def estimate_seconds(objects, voxel, *, offsets=1, grow=0.0, decimate=True, undercut_dirs=0):
-    """Rough run time (seconds) for a voxel job on `objects`."""
-    total = 0.0
+def _grid_mvox(lo, hi, voxel, grow):
+    ext = (np.asarray(hi) - np.asarray(lo)) + 2.0 * abs(grow) + 4.0 * voxel
+    return float(np.prod(np.ceil(np.maximum(ext, voxel) / voxel))) / 1e6
+
+
+class ToolCost:
+    """How much work a tool does per processed part (object or island)."""
+
+    def __init__(self, offsets=1, decimates=1, booleans=0, undercut_dirs=0, scale=1.0):
+        self.offsets = offsets
+        self.decimates = decimates
+        self.booleans = booleans
+        self.undercut_dirs = undercut_dirs
+        self.scale = scale  # fitted correction for work the terms don't capture
+
+
+GROW_LIKE = ToolCost()
+
+
+def object_parts(obj, voxel, grow=0.0, *, islands=False, apply_modifiers=False):
+    """[(million voxels, million input faces, million result faces)] per processed part."""
+    from .offset_utils import cuda_offset
+    mm, _ = get_meshlib()
+    src = blender_to_meshlib(obj, apply_modifiers)
+    box = src.computeBoundingBox()
+    mvox = _grid_mvox([box.min.x, box.min.y, box.min.z], [box.max.x, box.max.y, box.max.z], voxel, grow)
+    factor = PROBE_FACTOR * max(1.0, (mvox / PROBE_FACTOR ** 3 / PROBE_MAX_MVOX) ** (1.0 / 3.0))
+    probe = cuda_offset(src, voxel * factor, grow)
+    mfaces = face_count(probe) * factor * factor / 1e6
+    in_faces = face_count(src) / 1e6
+
+    comps = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
+    if len(comps) <= 1:
+        return [(mvox, in_faces, mfaces)]
+    total_in = max(1, face_count(src))
+    parts = []
+    for bs in comps:
+        b = src.computeBoundingBox(bs)
+        share = bs.count() / total_in
+        parts.append((_grid_mvox([b.min.x, b.min.y, b.min.z], [b.max.x, b.max.y, b.max.z], voxel, grow),
+                      in_faces * share, mfaces * share))
+    return parts
+
+
+def parts_seconds(parts, cost, decimate=True):
+    k = COEF
+    t = k["object"]
+    if len(parts) > 1:
+        t += k["island"] * len(parts)
+    for pv, pin, pf in parts:
+        t += cost.offsets * (k["mvox"] * pv + k["in_faces"] * pin)
+        t += cost.undercut_dirs * (k["uc_mvox"] * pv + k["uc_in_faces"] * pin + k["uc_call"])
+        t += cost.booleans * (k["bool_faces"] * pf + k["bool_call"])
+        if decimate and pf * 1e6 <= PARALLEL_DECIMATE_FACES:
+            t += cost.decimates * k["dec_single"] * pf
+        t += k["result"] * pf
+    return t * cost.scale
+
+
+def predict_object(obj, voxel, grow=0.0, *, islands=False, decimate=True, apply_modifiers=False, cost=GROW_LIKE):
+    return parts_seconds(object_parts(obj, voxel, grow, islands=islands, apply_modifiers=apply_modifiers), cost, decimate)
+
+
+def estimate_seconds(objects, voxel, *, grow=0.0, decimate=True, islands=False, cost=GROW_LIKE, apply_modifiers=False,
+                     smart=False):
+    """Predicted seconds for a job on `objects` (before learning; see EstimateLearner).
+
+    With Smart on, each object is priced at its own tagged voxel size, as the job will run it.
+    """
+    total = COEF["job"] * cost.scale
     for obj in objects:
-        if obj.type != 'MESH':
+        if obj.type != 'MESH' or len(obj.data.polygons) == 0:
             continue
-        mvox, mfaces = object_voxel_stats(obj, voxel, grow)
-        total += offsets * (SEC_PER_MVOX_OFFSET * mvox + SEC_PER_OFFSET_CALL)
-        total += mfaces * (SEC_PER_MFACE_DECIMATE if decimate else SEC_PER_MFACE_NO_DECIMATE)
-        total += undercut_dirs * SEC_PER_MVOX_UNDERCUT * mvox
+        v = voxel
+        if smart:
+            tag = read_object_resolution_tag(obj)
+            if tag:
+                v = RESOLUTION_PRESETS[tag][0]
+        total += predict_object(obj, v, grow, islands=islands, decimate=decimate, cost=cost,
+                                apply_modifiers=apply_modifiers)
     return total
+
+
+class EstimateLearner:
+    """Corrects estimates with this machine's real timings, per tool.
+
+    After each job that was estimated, actual/predicted is remembered (last 12
+    per tool, this Blender session); later estimates are multiplied by the
+    median of those ratios, clamped to 1/3x..3x.
+    """
+    _ratios = {}
+
+    @classmethod
+    def correct(cls, tool, seconds):
+        r = cls._ratios.get(tool)
+        if not r:
+            return seconds
+        return seconds * float(np.clip(np.median(r), 1 / 3, 3.0))
+
+    @classmethod
+    def record(cls, tool, predicted, actual):
+        if predicted > 0.05 and actual > 0.05:
+            r = cls._ratios.setdefault(tool, [])
+            r.append(actual / predicted)
+            del r[:-12]

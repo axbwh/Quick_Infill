@@ -13,7 +13,7 @@ from .offset_utils import (
     should_auto_decimate_cavity_faces, face_count,
 )
 from .blender_meshlib_utils import (
-    blender_to_meshlib, meshlib_to_blender_mesh, link_new_object, select_results, estimate_seconds, object_voxel_stats,
+    blender_to_meshlib, meshlib_to_blender_mesh, link_new_object, select_results, estimate_seconds, ToolCost,
 )
 from .meshlib_utils import JobCancelled
 from .job_runner import ModalJobMixin, JobSpec
@@ -77,20 +77,21 @@ class QUICKINFILL_OT_heal_cavity(ModalJobMixin, Operator):
         return objs
 
     def job_estimate(self, context):
+        mm, _ = get_meshlib()
         s = context.scene.quick_infill_settings
+        # Naive: grow + shrink; Accurate: grow + shrink + weighted shell + boolean; Trim Thin: 2 more offsets.
+        offsets = (2 if s.method == 'NAIVE' else 3) + (2 if s.trim_thin else 0)
+        # scale: fitted on 16 real runs (the weighted shell's cost isn't in the shared terms)
+        cost = ToolCost(offsets=offsets, decimates=1, booleans=0 if s.method == 'NAIVE' else 1,
+                        scale=0.53 if s.method == 'NAIVE' else 4.08)
         total = 0.0
         for obj in self._objects(context):
             vox = float(s.resolution)
             if s.voxel_mode == 'TARGET_VOXELS':
-                mvox, _ = object_voxel_stats(obj, vox, s.grow)
-                # suggestVoxelSize targets ~target_res voxels, never finer than Resolution
-                target = max(1e-6, float(s.target_res))
-                if mvox > target:
-                    vox *= (mvox / target) ** (1.0 / 3.0)
-            total += estimate_seconds([obj], vox, offsets=2 if s.method == 'NAIVE' else 4,
-                                      grow=float(s.grow), decimate=True)
+                src = blender_to_meshlib(obj, s.apply_modifiers_on_export)
+                vox = max(float(mm.suggestVoxelSize(mm.MeshPart(src), float(s.target_res) * 1e6)), vox)
+            total += estimate_seconds([obj], vox, grow=float(s.grow), cost=cost, apply_modifiers=s.apply_modifiers_on_export)
         return total
-
     def job_setup(self, context):
         s = context.scene.quick_infill_settings
         objs = self._objects(context)

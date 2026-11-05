@@ -13,7 +13,7 @@ from .meshlib_utils import get_meshlib
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
 )
-from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds
+from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds, ToolCost
 from .job_runner import ModalJobMixin, JobSpec
 import numpy as np
 
@@ -53,8 +53,8 @@ class _OffsetToolBase(ModalJobMixin):
     # Trim tools delete objects whose geometry fully collapses; other tools leave them alone.
     delete_collapsed = False
     collapse_hint = "geometry collapsed"
-    # For the run-time estimate: offsets per object and the largest grow distance (x Distance).
-    est_offsets = 1
+    # For the run-time estimate: work per object and the grow distance used (x Distance).
+    est_cost = ToolCost(offsets=1, decimates=1)
     est_grow = 1.0
 
     @classmethod
@@ -67,8 +67,10 @@ class _OffsetToolBase(ModalJobMixin):
 
     def job_estimate(self, context):
         s = context.scene.quick_infill_settings
-        return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), offsets=self.est_offsets,
-                                grow=self.est_grow * float(s.distance), decimate=s.decimate_mode != "OFF")
+        return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), cost=self.est_cost,
+                                grow=self.est_grow * float(s.distance), decimate=s.decimate_mode != "OFF",
+                                islands=s.process_islands, apply_modifiers=s.apply_modifiers_on_export,
+                                smart=s.smart_resolution)
 
     def job_setup(self, context):
         s = context.scene.quick_infill_settings
@@ -133,7 +135,7 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     bl_label = "Trim Thin"
     bl_description = "Remove thin sections from selected mesh(es). With multiple selections, processes each object individually"
     suffix, label = "_TrimThin", "Trim Thin"
-    est_offsets, est_grow = 2, 0.0
+    est_cost, est_grow = ToolCost(offsets=2, decimates=1), 0.0
     delete_collapsed = True
     collapse_hint = "too thin for current resolution"
 
@@ -149,7 +151,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_label = "Trim Edges"
     bl_description = "Trim edges by offset sequence and intersect with original mesh. With multiple selections, processes each object individually"
     suffix, label = "_TrimEdges", "Trim Edges"
-    est_offsets, est_grow = 4, 2.0
+    est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
 

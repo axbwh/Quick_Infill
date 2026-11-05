@@ -14,7 +14,7 @@ from bpy.props import FloatProperty
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy, progress_callback, check_cancelled, reraise_if_cancelled
 from .offset_utils import ANGLE_PRESETS, should_auto_decimate_faces, decimate_mesh, face_count
 from .blender_meshlib_utils import (
-    process_objects, estimate_seconds, blender_to_meshlib, meshlib_to_blender_mesh, select_results, swap_mesh_keep_transforms,
+    process_objects, estimate_seconds, ToolCost, blender_to_meshlib, meshlib_to_blender_mesh, select_results, swap_mesh_keep_transforms,
     link_new_object, free_unused_meshes, remove_objects,
 )
 from .tools_operators import selected_meshes, report_process, pipeline_spec
@@ -245,9 +245,13 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
 
 def _fix_undercuts_estimate(context):
     s = context.scene.quick_infill_settings
-    n_dirs = len(get_selected_directions(s)) or 1
-    return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), offsets=0,
-                            decimate=s.decimate_mode != "OFF", undercut_dirs=n_dirs)
+    dirs = get_selected_directions(s) or [Z_UP]
+    n = 1 if (abs(float(s.undercut_angle)) == 0 or dirs == [Z_UP]) else len(dirs)
+    # scale 1.7: held-out check (13 runs) came out at 0.45-0.86x without it, median 0.58x
+    cost = ToolCost(offsets=0, decimates=1, booleans=max(0, n - 1), undercut_dirs=n, scale=1.7)
+    return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), cost=cost,
+                            decimate=s.decimate_mode != "OFF", islands=s.process_islands,
+                            apply_modifiers=s.apply_modifiers_on_export, smart=s.smart_resolution)
 
 
 class QUICKINFILL_OT_fix_undercuts(ModalJobMixin, Operator):

@@ -16,7 +16,10 @@ works anyway; a thread would add risk without making Blender responsive.
 
 import bpy
 
+import time
+
 from .meshlib_utils import JobControl, JobCancelled, set_active_job
+from .blender_meshlib_utils import EstimateLearner
 
 
 class JobSpec:
@@ -53,12 +56,13 @@ class ModalJobMixin:
 
     def invoke(self, context, event):
         limit = float(getattr(context.scene.quick_infill_settings, "ask_above_seconds", 0.0))
+        self._predicted = 0.0
         if limit > 0:
             try:
-                est = float(self.job_estimate(context))
+                self._predicted = float(self.job_estimate(context))
             except Exception as e:  # an estimate must never block the tool
                 print(f"[Quick Infill] estimate failed: {e}")
-                est = 0.0
+            est = EstimateLearner.correct(self.bl_idname, self._predicted)
             if est > limit:
                 return context.window_manager.invoke_confirm(
                     self, event,
@@ -83,6 +87,7 @@ class ModalJobMixin:
             traceback.print_exc()
             return {'CANCELLED'}
 
+        t0 = time.perf_counter()
         interactive = not bpy.app.background and context.window is not None
         wm = context.window_manager
         control = JobControl(spec.items,
@@ -109,7 +114,12 @@ class ModalJobMixin:
                 wm.progress_end()
 
         try:
-            return spec.finish()
+            result = spec.finish()
+            # Learn from the real time (only when the job was estimated first).
+            predicted = getattr(self, "_predicted", 0.0)
+            if predicted:
+                EstimateLearner.record(self.bl_idname, predicted, time.perf_counter() - t0)
+            return result
         except Exception as e:
             self.report({'ERROR'}, f"{self.bl_label} failed: {e}")
             import traceback

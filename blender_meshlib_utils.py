@@ -250,6 +250,11 @@ def meshlib_to_blender_mesh(ml_mesh, name):
     me.polygons.add(len(faces))
     me.polygons.foreach_set("loop_start", np.arange(0, faces.size, 3, dtype=np.int32))
     me.update(calc_edges=True)
+    # Always shade flat (meshes built this way would otherwise come in smooth-shaded).
+    if hasattr(me, "shade_flat"):
+        me.shade_flat()
+    else:
+        me.polygons.foreach_set("use_smooth", np.zeros(len(faces), dtype=bool))
     return me
 
 

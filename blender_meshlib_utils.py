@@ -311,8 +311,11 @@ def remove_objects(objs):
 
 def select_results(result_objs):
     """Select the given objects and make the first one active."""
-    for obj in bpy.context.selected_objects:
-        obj.select_set(False)
+    # Walk the view layer rather than context.selected_objects: that list can
+    # still hold objects this operator just deleted (e.g. voxel boolean Replace).
+    for obj in bpy.context.view_layer.objects:
+        if obj.select_get():
+            obj.select_set(False)
     alive = [o for o in result_objs if o is not None and o.name in bpy.data.objects]
     for obj in alive:
         try:

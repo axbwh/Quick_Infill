@@ -18,15 +18,10 @@ _modules = (settings, tools_operators, support_tools, heal_cavity, ui)
 
 
 def register():
+    # meshlib is imported on the first tool use, not here, so Blender starts
+    # (and quits) exactly as before for sessions that never use Quick Infill.
     for m in _modules:
         m.register()
-    # Import meshlib now (not on the first button press) so the first tool
-    # run doesn't pay the import cost. A missing install must not block
-    # registration, so failures are only printed.
-    try:
-        get_meshlib()
-    except ImportError as e:
-        print(f"[Quick Infill] {e}")
 
 
 def unregister():

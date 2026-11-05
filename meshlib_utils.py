@@ -19,7 +19,7 @@ CUDA_LOCK = threading.Lock()
 
 
 def get_meshlib():
-    """Return (mrmeshpy, mrcudapy), importing them once."""
+    """Return (mrmeshpy, mrcudapy), importing them once (on first use, not at startup)."""
     global _modules
     if _modules is None:
         try:
@@ -30,8 +30,27 @@ def get_meshlib():
                 f"Quick Infill: failed to load meshlib - {e}\n"
                 "Reinstall the add-on via Edit > Preferences > Get Extensions > Install from Disk"
             )
+        _prevent_quit_hang(mm)
         _modules = (mm, mc)
     return _modules
+
+
+def _prevent_quit_hang(mm):
+    """Stop Blender from hanging when it quits after meshlib was loaded.
+
+    meshlib installs an exception handler that prints a stack trace using the
+    Windows debug engine (dbgeng). When Blender quits, a harmless exception
+    inside a thread that is shutting down reaches that handler while Windows
+    holds its DLL loader lock; dbgeng then initialises for the first time,
+    needs that same lock, and the process deadlocks (Blender never closes).
+    Initialising dbgeng once now, outside the lock, avoids it: in testing,
+    quitting hung in 2 of 4 normal and 4 of 5 background runs without this,
+    and in 0 of 14 runs with it. Costs about 0.6 s, once per session.
+    """
+    try:
+        mm.getCurrentStacktrace()
+    except Exception:
+        pass
 
 
 def get_mrmeshnumpy():

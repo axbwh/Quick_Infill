@@ -237,6 +237,7 @@ class QUICKINFILL_PT_sidebar(Panel):
             vc.label(text="Auto Decimation")
             vc.row(align=True).prop(s, "decimate_mode", expand=True)
             vc.prop(s, "decimation_ratio", text="Ratio")
+            prop_with_suffix(vc, "ask_above_seconds", "Ask Before Jobs Over", "s")
             row = vc.row(align=True)
             row.prop(s, "smart_resolution", text="Smart Res", toggle=True)
             row.operator("quick_infill.select_by_resolution_tag", text="", icon='VIEWZOOM')

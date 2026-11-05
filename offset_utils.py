@@ -9,7 +9,9 @@ size of 0.075 here is 0.0075 Blender units.
 from typing import Optional
 import numpy as np
 
-from .meshlib_utils import get_meshlib, get_mrmeshnumpy, CUDA_LOCK
+from .meshlib_utils import (
+    get_meshlib, get_mrmeshnumpy, CUDA_LOCK, progress_callback, check_cancelled, reraise_if_cancelled,
+)
 
 # ---------------------------------------------------------------------------
 # Presets (single source of truth; the UI reads these)
@@ -131,12 +133,20 @@ def cuda_offset(mesh, resolution: float, distance: float):
     Serialised with CUDA_LOCK so only one CUDA job touches the GPU at a time.
     """
     mm, mc = get_meshlib()
+    check_cancelled()
     p = mm.GeneralOffsetParameters()
     p.voxelSize = float(resolution)
     p.signDetectionMode = mm.SignDetectionMode.HoleWindingRule
+    cb = progress_callback()
+    if cb is not None:
+        p.callBack = cb
     with CUDA_LOCK:
-        p.fwn = mc.FastWindingNumber(mesh)
-        return mm.generalOffsetMesh(mp=mesh, offset=float(distance), params=p)
+        try:
+            p.fwn = mc.FastWindingNumber(mesh)
+            return mm.generalOffsetMesh(mp=mesh, offset=float(distance), params=p)
+        except Exception as e:
+            reraise_if_cancelled(e)
+            raise
 
 
 def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mult: float,
@@ -221,7 +231,9 @@ def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio
     if current_faces > PARALLEL_DECIMATE_FACES:
         settings.subdivideParts = 16
 
+    check_cancelled()
     mm.decimateMesh(mesh, settings)
+    check_cancelled()  # a cancelled decimation stops early without raising
     return mesh
 
 

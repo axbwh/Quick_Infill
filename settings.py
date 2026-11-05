@@ -94,6 +94,12 @@ class QuickInfillSettings(PropertyGroup):
         description="Use each object's modifier result (viewport) as the input. Off = ignore modifiers",
         default=False,
     )
+    ask_above_seconds: FloatProperty(
+        name="Ask Above",
+        description="Before starting a job estimated to take longer than this, ask first (0 = never ask). "
+                    "Running jobs can always be stopped with Esc",
+        default=30.0, min=0.0, soft_max=600.0, step=500, precision=0,
+    )
     # Kept for files saved by older versions; the highlighted preset is computed when drawn.
     active_offset_preset: EnumProperty(
         name="Active Offset Preset",

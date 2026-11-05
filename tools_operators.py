@@ -13,7 +13,8 @@ from .meshlib_utils import get_meshlib
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
 )
-from .blender_meshlib_utils import process_objects, select_results, remove_objects
+from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds
+from .job_runner import ModalJobMixin, JobSpec
 import numpy as np
 
 
@@ -35,13 +36,26 @@ def report_process(op, pr, verb, label):
         op.report({'ERROR'}, f"{label} failed on {len(pr.errors)} object(s), left unchanged: {pr.error_summary()}")
 
 
-class _OffsetToolBase:
+def pipeline_spec(objs, operation, suffix, s, finish, **kwargs):
+    """JobSpec running `operation` on `objs` through the shared pipeline;
+    finish(ProcessResult) -> operator result set."""
+    run = PipelineRun(objs, operation, suffix,
+                      resolution=kwargs.pop("resolution", float(s.shared_voxel_size)),
+                      auto_decimate=kwargs.pop("auto_decimate", s.decimate_mode != "OFF"),
+                      replace_original=s.replace_original, settings=s, **kwargs)
+    return JobSpec(prepare=run.prepare, compute=run.compute, finish=lambda: finish(run.finish()), items=len(objs))
+
+
+class _OffsetToolBase(ModalJobMixin):
     bl_options = {'REGISTER', 'UNDO'}
     suffix = ""
     label = ""
     # Trim tools delete objects whose geometry fully collapses; other tools leave them alone.
     delete_collapsed = False
     collapse_hint = "geometry collapsed"
+    # For the run-time estimate: offsets per object and the largest grow distance (x Distance).
+    est_offsets = 1
+    est_grow = 1.0
 
     @classmethod
     def poll(cls, context):
@@ -51,26 +65,22 @@ class _OffsetToolBase:
         """Return fn(meshlib_mesh, voxel_size) -> meshlib_mesh."""
         raise NotImplementedError
 
-    def execute(self, context):
+    def job_estimate(self, context):
+        s = context.scene.quick_infill_settings
+        return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), offsets=self.est_offsets,
+                                grow=self.est_grow * float(s.distance), decimate=s.decimate_mode != "OFF")
+
+    def job_setup(self, context):
         s = context.scene.quick_infill_settings
         objs = selected_meshes(context)
         if not objs:
             self.report({'ERROR'}, "No mesh selected.")
-            return {'CANCELLED'}
-        try:
-            pr = process_objects(
-                objs, self.make_operation(s), self.suffix,
-                resolution=float(s.shared_voxel_size),
-                auto_decimate=s.decimate_mode != "OFF",
-                replace_original=s.replace_original,
-                settings=s,
-            )
-        except Exception as e:
-            self.report({'ERROR'}, f"{self.label} failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+            return None
+        # bpy.context (not the captured one): finish may run later, from the modal handler.
+        return pipeline_spec(objs, self.make_operation(s), self.suffix, s, lambda pr: self.job_finish(bpy.context, pr))
 
+    def job_finish(self, context, pr):
+        s = context.scene.quick_infill_settings
         if pr.collapsed:
             names = ", ".join(f"'{o.name}'" for o, _ in pr.collapsed)
             if self.delete_collapsed:
@@ -100,6 +110,7 @@ class QUICKINFILL_OT_shrink(_OffsetToolBase, Operator):
     bl_label = "Shrink"
     bl_description = "Shrink selected mesh(es) by the distance value. With multiple selections, processes each object individually"
     suffix, label = "_Shrunk", "Shrink"
+    est_grow = 0.0
 
     def make_operation(self, s):
         d = float(s.distance)
@@ -111,6 +122,7 @@ class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
     bl_label = "Remesh"
     bl_description = "Remesh selected mesh(es) at the resolution value. With multiple selections, processes each object individually"
     suffix, label = "_Remeshed", "Remesh"
+    est_grow = 0.0
 
     def make_operation(self, s):
         return lambda mesh, res: cuda_offset(mesh, res, 0.0)
@@ -121,6 +133,7 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     bl_label = "Trim Thin"
     bl_description = "Remove thin sections from selected mesh(es). With multiple selections, processes each object individually"
     suffix, label = "_TrimThin", "Trim Thin"
+    est_offsets, est_grow = 2, 0.0
     delete_collapsed = True
     collapse_hint = "too thin for current resolution"
 
@@ -136,6 +149,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_label = "Trim Edges"
     bl_description = "Trim edges by offset sequence and intersect with original mesh. With multiple selections, processes each object individually"
     suffix, label = "_TrimEdges", "Trim Edges"
+    est_offsets, est_grow = 4, 2.0
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
 

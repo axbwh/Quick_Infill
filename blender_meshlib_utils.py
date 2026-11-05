@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import bpy
 import numpy as np
 
-from .meshlib_utils import get_meshlib, get_mrmeshnumpy
+from .meshlib_utils import get_meshlib, get_mrmeshnumpy, JobCancelled, check_cancelled
 from .offset_utils import (
     RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag,
     decimate_mesh, should_auto_decimate_faces, face_count, MeshCollapsedError,
@@ -400,10 +400,13 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
             if tag:
                 res, ratio = RESOLUTION_PRESETS[tag]
                 mode = "VOXEL_RATIO"
+        check_cancelled()
         try:
             out = operation_fn(island, res)
             if face_count(out) == 0:
                 raise MeshCollapsedError()
+        except JobCancelled:
+            raise
         except Exception:
             # An island that collapses (or that meshlib can't process) is dropped
             # from the merged result; the rest of the object is still processed.
@@ -422,10 +425,126 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
     job.voxels_used = voxels
 
 
-def process_objects(objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
-                    replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
-                    parallel=True):
-    """Run operation_fn(meshlib_mesh, voxel_size) -> meshlib_mesh on each object.
+class PipelineRun:
+    """One run of the pipeline, split into three steps so the meshlib part can
+    run on a background thread while Blender stays responsive:
+
+        prepare()  main thread  - read the Blender meshes
+        compute()  any thread   - meshlib only, cancellable
+        finish()   main thread  - write the results back into Blender
+    """
+
+    def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
+                 replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
+                 parallel=True):
+        s = settings or bpy.context.scene.quick_infill_settings
+        self.objects = list(objects)
+        self.operation_fn = operation_fn
+        self.suffix = output_suffix
+        self.resolution = resolution
+        self.auto_decimate = auto_decimate
+        self.replace = replace_original
+        self.settings = s
+        self.islands = s.process_islands if islands is None else islands
+        self.smart = s.smart_resolution if smart is None else smart
+        self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
+        self.parallel = parallel
+        self.jobs = []
+        self.pr = ProcessResult()
+        self.cancelled = False
+
+    # 1. main thread
+    def prepare(self):
+        depsgraph = bpy.context.evaluated_depsgraph_get() if self.apply_modifiers else None
+        for obj in self.objects:
+            job = _Job()
+            job.obj, job.name, job.dropped, job.error, job.out = obj, obj.name, 0, None, None
+            try:
+                job.src, job.face_map = blender_to_meshlib(obj, self.apply_modifiers, depsgraph, with_face_map=True)
+            except MeshCollapsedError as e:
+                self.pr.collapsed.append((obj, e))
+                continue
+            except Exception as e:
+                self.pr.errors.append((obj, e))
+                continue
+            job.res, job.ratio, job.mode = _effective_settings(obj, self.settings, self.resolution, self.smart)
+            job.face_tags = None
+            if self.islands and self.smart and job.face_map is not None:
+                poly_tags = read_face_tags(obj.data) if not self.apply_modifiers else None
+                if poly_tags is not None and poly_tags.size and job.face_map.max(initial=-1) < poly_tags.size:
+                    job.face_tags = poly_tags[job.face_map]
+            job.initial_verts = job.src.topology.numValidVerts()
+            self.jobs.append(job)
+        return self
+
+    # 2. any thread (no bpy)
+    def compute(self, control=None):
+        def work(job):
+            try:
+                if control is not None:
+                    control.check()
+                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart)
+            except Exception as e:  # recorded per job, handled on the main thread
+                job.error = e
+            finally:
+                if control is not None:
+                    control.item_done()
+
+        if self.parallel and len(self.jobs) > 1:
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(self.jobs))) as ex:
+                list(ex.map(work, self.jobs))
+        else:
+            for job in self.jobs:
+                work(job)
+        self.cancelled = any(isinstance(j.error, JobCancelled) for j in self.jobs) or \
+            (control is not None and control.cancelled)
+        return self
+
+    # 3. main thread
+    def finish(self):
+        """Write results back. After a cancel nothing is changed in the scene."""
+        pr = self.pr
+        if self.cancelled:
+            return pr
+        old_meshes = []
+        for job in self.jobs:
+            pr.dropped_islands += job.dropped
+            try:
+                job.obj.name  # the object may have been deleted while the job ran
+            except ReferenceError:
+                continue
+            if isinstance(job.error, MeshCollapsedError):
+                pr.collapsed.append((job.obj, job.error))
+                continue
+            if job.error is not None:
+                pr.errors.append((job.obj, job.error))
+                continue
+            try:
+                new_mesh = meshlib_to_blender_mesh(job.out, job.name + self.suffix)
+            except MeshCollapsedError as e:
+                pr.collapsed.append((job.obj, e))
+                continue
+            voxel = min(job.voxels_used) if job.voxels_used else self.resolution
+            write_mesh_resolution_tags(new_mesh, job.out_tags, remesh_voxel_size=voxel)
+            if self.replace:
+                old_meshes.append(swap_mesh_keep_transforms(job.obj, new_mesh))
+                result = job.obj
+            else:
+                result = link_new_object(job.name + self.suffix, new_mesh,
+                                         list(job.obj.users_collection) or [bpy.context.scene.collection])
+            set_object_resolution_label(result, _dominant_tag_label(job.out_tags))
+            pr.results.append((result, job.initial_verts, job.out.topology.numValidVerts()))
+
+        # One depsgraph update for the whole run, then free the replaced meshes.
+        if old_meshes:
+            free_unused_meshes(old_meshes)
+        else:
+            bpy.context.view_layer.update()
+        return pr
+
+
+def process_objects(objects, operation_fn, output_suffix, **kwargs):
+    """Run operation_fn(meshlib_mesh, voxel_size) -> meshlib_mesh on each object, synchronously.
 
     - Islands: each loose part processed separately, then merged into one object.
     - Smart: per object (or per island) voxel size + ratio from the resolution tag.
@@ -434,78 +553,56 @@ def process_objects(objects, operation_fn, output_suffix, *, resolution, auto_de
     Objects are processed in parallel (meshlib releases the GIL); CUDA steps are
     serialised inside cuda_offset. Returns a ProcessResult.
     """
-    s = settings or bpy.context.scene.quick_infill_settings
-    islands = s.process_islands if islands is None else islands
-    smart = s.smart_resolution if smart is None else smart
-    apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
-    pr = ProcessResult()
+    return PipelineRun(objects, operation_fn, output_suffix, **kwargs).prepare().compute().finish()
 
-    # 1. Gather inputs (main thread: bpy access)
-    jobs = []
-    depsgraph = bpy.context.evaluated_depsgraph_get() if apply_modifiers else None
+
+# ---------------------------------------------------------------------------
+# Run-time estimate (asked before starting very long jobs)
+# ---------------------------------------------------------------------------
+
+# Measured on an RTX 5090 / Ryzen 9950X3D (Nov 2026):
+#   CUDA offset          ~4.5 ms per million voxels, + ~20 ms per call
+#   result size          ~0.1 x (million voxels)^(2/3) million triangles
+#                        (surface of the voxel grid; checked on spheres and on
+#                        the Mini test sculpt: predicted 0.9M, actual 0.96M)
+#   decimating result    ~1-5 s per million result triangles (simple .. detailed)
+#   undercut fix (CPU)   ~0.05-0.25 s per million voxels per direction
+# The middle values below put Infill_Test within about 2x: Mini Fix Undercuts
+# x8 predicted 43 s (actual 45 s), Mini Grow 3 s (actual 5.6 s); simple wall
+# pieces are overestimated (12 pieces: 12 s predicted, 2 s actual). It only
+# decides when to ask first, so the huge jobs (10x and more) are what matter.
+SEC_PER_MVOX_OFFSET = 0.0045
+SEC_PER_OFFSET_CALL = 0.02
+MFACES_PER_MVOX_2_3 = 0.1
+SEC_PER_MFACE_DECIMATE = 3.0
+SEC_PER_MFACE_NO_DECIMATE = 0.5
+SEC_PER_MVOX_UNDERCUT = 0.18
+
+
+def object_voxel_stats(obj, voxel, grow=0.0):
+    """(million voxels in the working grid, million result triangles) of obj, in meshlib units."""
+    me = obj.data
+    n = len(me.vertices)
+    if n == 0 or not voxel:
+        return 0.0, 0.0
+    co = np.empty(n * 3, dtype=np.float32)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3).astype(np.float64)
+    mw = np.array(obj.matrix_world, dtype=np.float64)
+    co = (co @ mw[:3, :3].T + mw[:3, 3]) * STL_EXPORT_SCALE
+    ext = co.max(axis=0) - co.min(axis=0) + 2.0 * abs(grow) + 4.0 * voxel
+    mvox = float(np.prod(np.ceil(ext / voxel))) / 1e6
+    return mvox, MFACES_PER_MVOX_2_3 * mvox ** (2.0 / 3.0)
+
+
+def estimate_seconds(objects, voxel, *, offsets=1, grow=0.0, decimate=True, undercut_dirs=0):
+    """Rough run time (seconds) for a voxel job on `objects`."""
+    total = 0.0
     for obj in objects:
-        job = _Job()
-        job.obj, job.name, job.dropped, job.error, job.out = obj, obj.name, 0, None, None
-        try:
-            job.src, job.face_map = blender_to_meshlib(obj, apply_modifiers, depsgraph, with_face_map=True)
-        except MeshCollapsedError as e:
-            pr.collapsed.append((obj, e))
+        if obj.type != 'MESH':
             continue
-        except Exception as e:
-            pr.errors.append((obj, e))
-            continue
-        job.res, job.ratio, job.mode = _effective_settings(obj, s, resolution, smart)
-        job.face_tags = None
-        if islands and smart and job.face_map is not None:
-            poly_tags = read_face_tags(obj.data) if not apply_modifiers else None
-            if poly_tags is not None and poly_tags.size and job.face_map.max(initial=-1) < poly_tags.size:
-                job.face_tags = poly_tags[job.face_map]
-        job.initial_verts = job.src.topology.numValidVerts()
-        jobs.append(job)
-
-    # 2. Compute (worker threads: meshlib only)
-    def work(job):
-        try:
-            _compute(job, operation_fn, auto_decimate, islands, smart)
-        except Exception as e:  # recorded per job, handled on the main thread
-            job.error = e
-
-    if parallel and len(jobs) > 1:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(jobs))) as ex:
-            list(ex.map(work, jobs))
-    else:
-        for job in jobs:
-            work(job)
-
-    # 3. Write results back (main thread, original order)
-    old_meshes = []
-    for job in jobs:
-        pr.dropped_islands += job.dropped
-        if isinstance(job.error, MeshCollapsedError):
-            pr.collapsed.append((job.obj, job.error))
-            continue
-        if job.error is not None:
-            pr.errors.append((job.obj, job.error))
-            continue
-        try:
-            new_mesh = meshlib_to_blender_mesh(job.out, job.name + output_suffix)
-        except MeshCollapsedError as e:
-            pr.collapsed.append((job.obj, e))
-            continue
-        voxel = min(job.voxels_used) if job.voxels_used else resolution
-        write_mesh_resolution_tags(new_mesh, job.out_tags, remesh_voxel_size=voxel)
-        if replace_original:
-            old_meshes.append(swap_mesh_keep_transforms(job.obj, new_mesh))
-            result = job.obj
-        else:
-            result = link_new_object(job.name + output_suffix, new_mesh,
-                                     list(job.obj.users_collection) or [bpy.context.scene.collection])
-        set_object_resolution_label(result, _dominant_tag_label(job.out_tags))
-        pr.results.append((result, job.initial_verts, job.out.topology.numValidVerts()))
-
-    # One depsgraph update for the whole run, then free the replaced meshes.
-    if old_meshes:
-        free_unused_meshes(old_meshes)
-    else:
-        bpy.context.view_layer.update()
-    return pr
+        mvox, mfaces = object_voxel_stats(obj, voxel, grow)
+        total += offsets * (SEC_PER_MVOX_OFFSET * mvox + SEC_PER_OFFSET_CALL)
+        total += mfaces * (SEC_PER_MFACE_DECIMATE if decimate else SEC_PER_MFACE_NO_DECIMATE)
+        total += undercut_dirs * SEC_PER_MVOX_UNDERCUT * mvox
+    return total

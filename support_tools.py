@@ -11,13 +11,14 @@ import numpy as np
 from bpy.types import Operator
 from bpy.props import FloatProperty
 
-from .meshlib_utils import get_meshlib, get_mrmeshnumpy
+from .meshlib_utils import get_meshlib, get_mrmeshnumpy, progress_callback, check_cancelled, reraise_if_cancelled
 from .offset_utils import ANGLE_PRESETS, should_auto_decimate_faces, decimate_mesh, face_count
 from .blender_meshlib_utils import (
-    process_objects, blender_to_meshlib, meshlib_to_blender_mesh, select_results, swap_mesh_keep_transforms,
+    process_objects, estimate_seconds, blender_to_meshlib, meshlib_to_blender_mesh, select_results, swap_mesh_keep_transforms,
     link_new_object, free_unused_meshes, remove_objects,
 )
-from .tools_operators import selected_meshes, report_process
+from .tools_operators import selected_meshes, report_process, pipeline_spec
+from .job_runner import ModalJobMixin
 from .settings import get_active_angle_preset
 
 DIAG = 0.7071067811865476  # sqrt(2)/2
@@ -114,11 +115,20 @@ def fix_undercuts_for_direction(mesh, up_vector, voxel_size, shrink_amount=0.0, 
     params = mm.FixUndercuts.FixParams()
     params.findParameters.upDirection = up_vector
     params.voxelSize = voxel_size
+    cb = progress_callback()
+    if cb is not None:
+        params.cb = cb
+    check_cancelled()
     undercuts = mm.FaceBitSet()
     mm.FixUndercuts.find(mesh, params.findParameters, undercuts)
     count = undercuts.count()
     if count > 0:
-        mm.FixUndercuts.fix(mesh, params)
+        try:
+            mm.FixUndercuts.fix(mesh, params)
+        except Exception as e:
+            reraise_if_cancelled(e)
+            raise
+        check_cancelled()
     if shrink_amount > 0:
         mesh = shrink_top_faces_along_normals(mesh, up_vector, shrink_amount, shrink_angle)
     return mesh, count
@@ -166,6 +176,7 @@ def fix_undercuts_multi(mesh, directions, angle, voxel_size, shrink_amount, shri
         m, c = fix_undercuts_for_direction(mm.copyMesh(mesh), _vec3(up_fn(direction, abs_angle)), voxel_size,
                                            shrink_amount, shrink_angle)
         total += c
+        check_cancelled()
         result = m if result is None else combine(result, m, voxel_size)
 
     if apply_z_after:
@@ -197,12 +208,12 @@ def _view_rotation(context):
     return None
 
 
-def _run_fix_undercuts(op, context, view_rotation=None):
+def _fix_undercuts_spec(op, context, view_rotation=None):
     s = context.scene.quick_infill_settings
     objs = selected_meshes(context)
     if not objs:
         op.report({'ERROR'}, "No mesh selected.")
-        return {'CANCELLED'}
+        return None
     directions = get_selected_directions(s) or [Z_UP]
     shrink_amount = float(s.shrink_amount) if s.auto_shrink else 0.0
     shrink_angle = float(s.shrink_angle_threshold)
@@ -215,57 +226,58 @@ def _run_fix_undercuts(op, context, view_rotation=None):
         counts.append(c)
         return m
 
-    pr = process_objects(objs, operation, "_NoUndercuts", resolution=float(s.shared_voxel_size),
-                         auto_decimate=s.decimate_mode != "OFF", replace_original=s.replace_original, settings=s)
-    where = "view direction(s)" if view_rotation is not None else "direction(s)"
-    if pr.results:
-        if sum(counts) == 0:
-            op.report({'INFO'}, f"No undercuts found on {len(pr.results)} mesh(es).")
-        else:
-            op.report({'INFO'}, f"Fixed undercuts on {len(pr.results)} object(s) from {len(directions)} {where}")
-    if pr.collapsed:
-        op.report({'WARNING'}, f"Fix Undercuts: {len(pr.collapsed)} object(s) produced no geometry and were left unchanged")
-    if pr.errors:
-        op.report({'ERROR'}, f"Fix Undercuts failed on {len(pr.errors)} object(s): {pr.error_summary()}")
-    select_results([r[0] for r in pr.results])
-    return {'FINISHED'} if pr.results else {'CANCELLED'}
+    def finish(pr):
+        where = "view direction(s)" if view_rotation is not None else "direction(s)"
+        if pr.results:
+            if sum(counts) == 0:
+                op.report({'INFO'}, f"No undercuts found on {len(pr.results)} mesh(es).")
+            else:
+                op.report({'INFO'}, f"Fixed undercuts on {len(pr.results)} object(s) from {len(directions)} {where}")
+        if pr.collapsed:
+            op.report({'WARNING'}, f"Fix Undercuts: {len(pr.collapsed)} object(s) produced no geometry and were left unchanged")
+        if pr.errors:
+            op.report({'ERROR'}, f"Fix Undercuts failed on {len(pr.errors)} object(s): {pr.error_summary()}")
+        select_results([r[0] for r in pr.results])
+        return {'FINISHED'} if pr.results else {'CANCELLED'}
+
+    return pipeline_spec(objs, operation, "_NoUndercuts", s, finish)
 
 
-class QUICKINFILL_OT_fix_undercuts(Operator):
+def _fix_undercuts_estimate(context):
+    s = context.scene.quick_infill_settings
+    n_dirs = len(get_selected_directions(s)) or 1
+    return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), offsets=0,
+                            decimate=s.decimate_mode != "OFF", undercut_dirs=n_dirs)
+
+
+class QUICKINFILL_OT_fix_undercuts(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts"
     bl_label = "Fix Undercuts"
     bl_description = "Fix undercuts on selected mesh(es) for better printability. With multiple selections, processes each object individually"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        try:
-            return _run_fix_undercuts(self, context)
-        except Exception as e:
-            self.report({'ERROR'}, f"Fix Undercuts failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
+    def job_estimate(self, context):
+        return _fix_undercuts_estimate(context)
+
+    def job_setup(self, context):
+        return _fix_undercuts_spec(self, context)
 
 
-class QUICKINFILL_OT_fix_undercuts_from_view(Operator):
+class QUICKINFILL_OT_fix_undercuts_from_view(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts_from_view"
     bl_label = "From View"
     bl_description = "Fix undercuts using the viewport direction. With multiple selections, processes each object individually"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
+    def job_estimate(self, context):
+        return _fix_undercuts_estimate(context)
+
+    def job_setup(self, context):
         rot = _view_rotation(context)
         if rot is None:
             self.report({'ERROR'}, "No 3D viewport found.")
-            return {'CANCELLED'}
-        try:
-            return _run_fix_undercuts(self, context, rot)
-        except Exception as e:
-            self.report({'ERROR'}, f"Fix Undercuts (View) failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'CANCELLED'}
-
+            return None
+        return _fix_undercuts_spec(self, context, rot)
 
 class QUICKINFILL_OT_shrink_from_view(Operator):
     """Shrink top-facing faces based on the current viewport direction"""

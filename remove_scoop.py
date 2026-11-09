@@ -3,7 +3,10 @@ Remove Scoop: cut the printing support scoop (the 45-60 degree wedge that Fix
 Undercuts builds under a stone) off the bottom of each island, flat, so the
 stone gets a flat contact face and can be used either way up.
 
-The cut height uses the same contact-area rule as the SystemHEX stone packer's
+Default cut height (method View, Alex 2026-11-09): look down at the stone at 35 degrees from
+its four sides; the scoop hides under the face, and the lowest face each view sees is where the
+stone really bears (same outline the stone packer packs with). Method Contact, the older rule:
+the cut height uses the same contact-area rule as the SystemHEX stone packer's
 flat cuts (stone_pack/core.py, _end_profiles / cut_depth): slice the mesh with
 a flat plane at depth d up from the bottom, measure the outline area of the
 section and compare it with the stone's full footprint (length x depth of its
@@ -122,6 +125,68 @@ def contact_cut_height(v, edges, target):
     return float(heights[i])
 
 
+VIEW_BAND = 0.3       # BU: a hit counts as that side's face within this depth of the side
+VIEW_RES = 0.02       # BU between ray columns
+
+
+def view_cut_height(v, faces, angle=35.0, share=0.5):
+    """Height above the island's lowest point where the scoop ends, seen the way Alex reads it:
+    look down at the stone at `angle` degrees from each of its four sides (front, back, left,
+    right of its smallest bounding rectangle). The scoop hides under the face, so the lowest
+    face each view sees is where the stone really bears. The cut goes at the `share` quantile of
+    those bottom points (0.5 = median), so the scoop is gone on every side.
+    v: (n, 3) world vertices of one island; faces: list of vertex-index tuples."""
+    import math
+    from mathutils.bvhtree import BVHTree
+    z = v[:, 2]
+    zmin = float(z.min())
+    H = float(np.ptp(z))
+    if H <= 1e-6:
+        return 0.0
+    h = _hull2d(v[:, :2])
+    best = None
+    for i in range(len(h)):                               # smallest bounding rectangle axes
+        e = h[(i + 1) % len(h)] - h[i]
+        n = float(np.linalg.norm(e))
+        if n < 1e-9:
+            continue
+        u = e / n
+        w = np.array([-u[1], u[0]])
+        a = float(np.ptp(h @ u) * np.ptp(h @ w))
+        if best is None or a < best[0]:
+            best = (a, u, w)
+    if best is None:
+        return 0.0
+    _a, u, w = best
+    bvh = BVHTree.FromPolygons([tuple(x) for x in v], [tuple(int(i) for i in f) for f in faces])
+    ang = math.radians(angle)
+    lows = []
+    for axis, along in ((w, u), (-w, u), (u, w), (-u, w)):
+        # view from the side facing -axis, looking along +axis and down
+        proj = v[:, :2] @ axis
+        start = float(proj.min())
+        al = v[:, :2] @ along
+        lo, hi = float(al.min()), float(al.max())
+        d = Vector((axis[0] * math.cos(ang), axis[1] * math.cos(ang), -math.sin(ang)))
+        nz = int(math.ceil(H / VIEW_RES)) + 12
+        for t in np.arange(lo + VIEW_RES / 2, hi, VIEW_RES):
+            for k in range(nz):
+                z0 = zmin + (k + 0.5) * VIEW_RES
+                xy = along * t + axis * (start - 2.0 * math.cos(ang))
+                o = Vector((xy[0], xy[1], z0 + 2.0 * math.sin(ang)))
+                hit, nrm, _i, _d = bvh.ray_cast(o, d, 6.0)
+                if hit is None:
+                    continue
+                if (hit.x * axis[0] + hit.y * axis[1]) - start > VIEW_BAND or nrm.z < -0.5:
+                    continue
+                lows.append(hit.z - zmin)
+                break                    # rays sweep upwards: the first side hit is the lowest seen
+    if not lows:
+        return 0.0
+    cut = float(np.quantile(np.array(lows), share))
+    return min(cut, MAX_CUT, MAX_CUT_SHARE * H)
+
+
 def _islands(bm):
     """Vertex lists of each connected part."""
     bm.verts.index_update()
@@ -144,7 +209,7 @@ def _islands(bm):
     return out
 
 
-def remove_scoop_bmesh(bm, matrix_world, target=0.9, offset=0.0):
+def remove_scoop_bmesh(bm, matrix_world, target=0.9, offset=0.0, method='VIEW', angle=35.0, share=0.5):
     """Cut the scoop off every island of bm (local coordinates) in place and tag
     the cap faces with the boolean face attribute CUT_ATTR.
     target: contact share 0.5-1.0. offset: world units added to the cut height.
@@ -162,7 +227,11 @@ def remove_scoop_bmesh(bm, matrix_world, target=0.9, offset=0.0):
                           for e in {e for vv in part for e in vv.link_edges}], dtype=np.int64)
         if len(edges) < 3:
             continue
-        h = contact_cut_height(wv, edges, target) + offset
+        if method == 'VIEW':
+            fl = [tuple(idx[x] for x in f.verts) for f in {f for vv in part for f in vv.link_faces}]
+            h = view_cut_height(wv, fl, angle, share) + offset
+        else:
+            h = contact_cut_height(wv, edges, target) + offset
         zmin, zmax = float(wv[:, 2].min()), float(wv[:, 2].max())
         if h <= 0.0 or zmin + h >= zmax:
             continue
@@ -263,7 +332,8 @@ def remove_scoop_objects(context, objs, s):
             target_obj.matrix_world = obj.matrix_world.copy()
         bm = bmesh.new()
         bm.from_mesh(me)
-        islands += remove_scoop_bmesh(bm, obj.matrix_world, target, offset)
+        islands += remove_scoop_bmesh(bm, obj.matrix_world, target, offset, s.scoop_method,
+                                      float(s.scoop_angle), float(s.scoop_share) / 100.0)
         bm.to_mesh(me)
         bm.free()
         me.update()
@@ -279,7 +349,8 @@ class QUICKINFILL_OT_remove_scoop(Operator):
     bl_idname = "quick_infill.remove_scoop"
     bl_label = "Remove Scoop"
     bl_description = ("Cut the support scoop off the bottom of each stone (each island of the selected meshes) "
-                      "flat, where the cut reaches the Contact share of the stone's footprint, keeping every "
+                      "flat, where the scoop ends seen from 35 degrees above each side (or at the Contact share "
+                      "of the footprint), keeping every "
                       "face above it untouched. Optionally adds Stone Damage on the cut face and runs Trim Edges")
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -309,7 +380,12 @@ class QUICKINFILL_OT_remove_scoop(Operator):
 def draw_remove_scoop(col, s):
     col.separator()
     col.label(text="Remove Scoop:")
-    col.prop(s, "scoop_contact", text="Contact", slider=True)
+    col.row(align=True).prop(s, "scoop_method", expand=True)
+    if s.scoop_method == 'VIEW':
+        col.prop(s, "scoop_angle", text="View Angle")
+        col.prop(s, "scoop_share", text="Bottom Line", slider=True)
+    else:
+        col.prop(s, "scoop_contact", text="Contact", slider=True)
     col.prop(s, "scoop_offset", text="Offset (mm)")
     row = col.row(align=True)
     row.prop(s, "scoop_damage", text="Damage Cut", toggle=True)

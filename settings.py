@@ -151,6 +151,20 @@ class QuickInfillSettings(PropertyGroup):
     )
 
     # ----- Remove Scoop (support tools) -----
+    scoop_method: EnumProperty(
+        name="Method",
+        items=(('VIEW', "View", "Cut where the scoop ends, seen looking down at each side of the stone at the View Angle"),
+               ('CONTACT', "Contact", "Cut where a flat cut covers the Contact share of the stone's footprint")),
+        default='VIEW',
+    )
+    scoop_angle: FloatProperty(
+        name="View Angle", description="Look down at each side of the stone at this angle: the scoop hides under the face",
+        default=35.0, min=20.0, max=60.0, precision=0, subtype='NONE',
+    )
+    scoop_share: FloatProperty(
+        name="Bottom Line", description="Cut at this share of the bottom points the four views see (50% = median, higher cuts more)",
+        default=50.0, min=0.0, max=100.0, precision=0, subtype='PERCENTAGE',
+    )
     scoop_contact: FloatProperty(
         name="Contact", description="Cut the scoop where the flat cut covers this share of the stone's footprint "
                                     "(same contact-area rule as the stone packer's flat cuts)",

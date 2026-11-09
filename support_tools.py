@@ -453,6 +453,8 @@ def draw_support_tools(layout, context):
     prop_with_suffix("shrink_angle_threshold", "Shrink Angle", "°")
     col.separator()
     col.operator("quick_infill.shrink_from_view", text="Shrink from View", icon='FULLSCREEN_EXIT')
+    from .remove_scoop import draw_remove_scoop
+    draw_remove_scoop(col, s)
 
 
 classes = (

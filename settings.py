@@ -150,6 +150,24 @@ class QuickInfillSettings(PropertyGroup):
         default=70.0, min=5.0, max=90.0, precision=1,
     )
 
+    # ----- Remove Scoop (support tools) -----
+    scoop_contact: FloatProperty(
+        name="Contact", description="Cut the scoop where the flat cut covers this share of the stone's footprint "
+                                    "(same contact-area rule as the stone packer's flat cuts)",
+        default=90.0, min=50.0, max=100.0, precision=0, subtype='PERCENTAGE',
+    )
+    scoop_offset: FloatProperty(
+        name="Scoop Offset", description="Move the Remove Scoop cut up (+) or down (-) from the found height, in mm",
+        default=0.0, min=-5.0, max=5.0, precision=2,
+    )
+    scoop_damage: BoolProperty(
+        name="Damage Cut", description="Run Stone Damage on the new flat face only (needs the Stone_Damage node group in the file)",
+        default=True,
+    )
+    scoop_trim: BoolProperty(
+        name="Trim Edges", description="Run Trim Edges after the cut (and damage)", default=True,
+    )
+
     # ----- Cavity Infill (its own resolution / grow / shrink, NOT shared) -----
     resolution: FloatProperty(name="Resolution", description="Infill voxel size", default=0.1, min=0.05, max=1.0, precision=3)
     grow: FloatProperty(name="Grow", description="+grow / -shrink distance", default=1.0, min=0.1, max=2.0, precision=3)

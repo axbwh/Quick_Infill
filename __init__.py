@@ -11,10 +11,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-from . import settings, tools_operators, support_tools, heal_cavity, ui
+from . import settings, tools_operators, support_tools, remove_scoop, heal_cavity, ui
 from .meshlib_utils import get_meshlib  # noqa: F401  (kept for external callers)
 
-_modules = (settings, tools_operators, support_tools, heal_cavity, ui)
+_modules = (settings, tools_operators, support_tools, remove_scoop, heal_cavity, ui)
 
 
 def register():

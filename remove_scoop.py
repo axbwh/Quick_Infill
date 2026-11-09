@@ -129,7 +129,7 @@ VIEW_BAND = 0.3       # BU: a hit counts as that side's face within this depth o
 VIEW_RES = 0.02       # BU between ray columns
 
 
-def view_cut_height(v, faces, angle=35.0, share=0.5):
+def view_cut_height(v, faces, angle=30.0, share=0.5):
     """Height above the island's lowest point where the scoop ends, seen the way Alex reads it:
     look down at the stone at `angle` degrees from each of its four sides (front, back, left,
     right of its smallest bounding rectangle). The scoop hides under the face, so the lowest
@@ -204,7 +204,7 @@ def _rect_axes(xy):
     return (best[1], best[2]) if best else (np.array([1.0, 0.0]), np.array([0.0, 1.0]))
 
 
-def fill_scoop_object(obj, angle=35.0, low_share=0.5, smooth=True):
+def fill_scoop_object(obj, angle=30.0, low_share=0.5, smooth=False):
     """Alex 2026-11-09: not a flat cut. Look down at each island from its four sides at `angle`
     (meshlib FixUndercuts.find with the up direction tilted towards that side, the same test
     Fix Undercuts uses); faces none of the four views can see, in the lower `low_share` of the
@@ -317,7 +317,7 @@ def _islands(bm):
     return out
 
 
-def remove_scoop_bmesh(bm, matrix_world, target=0.9, offset=0.0, method='VIEW', angle=35.0, share=0.5):
+def remove_scoop_bmesh(bm, matrix_world, target=0.9, offset=0.0, method='VIEW', angle=30.0, share=0.5):
     """Cut the scoop off every island of bm (local coordinates) in place and tag
     the cap faces with the boolean face attribute CUT_ATTR.
     target: contact share 0.5-1.0. offset: world units added to the cut height.
@@ -439,13 +439,14 @@ def remove_scoop_objects(context, objs, s):
             target_obj = link_new_object(obj.name + "_NoScoop", me, list(obj.users_collection) or [context.scene.collection])
             target_obj.matrix_world = obj.matrix_world.copy()
         if s.scoop_method == 'FILL':
-            islands += 1 if fill_scoop_object(target_obj, float(s.scoop_angle)) else 0
+            # View Angle is in support-angle terms (90 = straight at the side): tilt down from it
+            islands += 1 if fill_scoop_object(target_obj, 90.0 - float(s.scoop_angle)) else 0
             results.append(target_obj)
             continue
         bm = bmesh.new()
         bm.from_mesh(me)
         islands += remove_scoop_bmesh(bm, obj.matrix_world, target, offset, s.scoop_method,
-                                      float(s.scoop_angle), float(s.scoop_share) / 100.0)
+                                      90.0 - float(s.scoop_angle), float(s.scoop_share) / 100.0)
         bm.to_mesh(me)
         bm.free()
         me.update()

@@ -160,8 +160,9 @@ class QuickInfillSettings(PropertyGroup):
         default='FILL',
     )
     scoop_angle: FloatProperty(
-        name="View Angle", description="Look down at each side of the stone at this angle: the scoop hides under the face",
-        default=35.0, min=20.0, max=60.0, precision=0, subtype='NONE',
+        name="View Angle", description="Angle the four side views look at the stone from, like the support angle: "
+                                        "90 = straight at the side, 0 = from the top. The scoop hides under the face",
+        default=60.0, min=20.0, max=80.0, precision=0, subtype='NONE',
     )
     scoop_share: FloatProperty(
         name="Bottom Line", description="Cut at this share of the bottom points the four views see (50% = median, higher cuts more)",

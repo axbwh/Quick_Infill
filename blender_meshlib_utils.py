@@ -1,17 +1,37 @@
-import bpy
-import mathutils
-from .offset_utils import RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag
+"""
+Blender <-> meshlib pipeline for Quick Infill.
 
-# Scale factor used for the Blender <-> meshlib STL round-trip (export uses this
-# as global_scale, import uses its reciprocal). Kept as one constant so island
-# centroid math (world space) and the STL export call always agree.
+Geometry moves between Blender and meshlib IN MEMORY (numpy arrays), not
+through temporary STL files: no disk I/O, no import/export operators, no
+selection juggling, and no temporary objects linked into the scene (which used
+to dirty Geometry Nodes setups that scan the user's collections).
+
+Coordinates are scaled by STL_EXPORT_SCALE on the way in and back out, exactly
+as the old STL round trip did, so every voxel size and distance in the add-on
+keeps its meaning.
+
+One pipeline (process_objects) serves single objects, multi-object batches and
+per-island processing.
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+
+import bpy
+import numpy as np
+
+from .meshlib_utils import get_meshlib, get_mrmeshnumpy, JobCancelled, check_cancelled
+from .offset_utils import (
+    RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag,
+    decimate_mesh, should_auto_decimate_faces, face_count, MeshCollapsedError, PARALLEL_DECIMATE_FACES,
+)
+
+# Scale applied to Blender coordinates when entering meshlib (and undone on the way back).
 STL_EXPORT_SCALE = 10.0
 
-# Name of the per-face integer attribute + object custom property used to tag
-# mesh geometry with the Stone/Detail/Fine/Mini resolution it was processed at.
+# Per-face integer attribute + object custom property tagging the resolution
+# (Stone/Detail/Fine/Mini/Coarse) a mesh was processed at.
 RES_TAG_ATTR = "qi_res_tag"
-
-# Name of the visual color attribute mirroring the tag, for viewport shading.
+# Colour attribute mirroring the tag, for viewport shading.
 RES_COLOR_ATTR = "qi_res_color"
 RES_TAG_COLORS = {
     'STONE': (0.55, 0.35, 0.2, 1.0),
@@ -22,9 +42,14 @@ RES_TAG_COLORS = {
 }
 RES_UNTAGGED_COLOR = (0.5, 0.5, 0.5, 1.0)
 
+MAX_WORKERS = 4
+
+
+# ---------------------------------------------------------------------------
+# Resolution tags
+# ---------------------------------------------------------------------------
 
 def _tag_to_index(tag_name):
-    """Map a resolution tag name to its stable storage index, or -1 if unknown."""
     try:
         return RESOLUTION_TAG_ORDER.index(tag_name)
     except (ValueError, TypeError):
@@ -32,53 +57,69 @@ def _tag_to_index(tag_name):
 
 
 def _index_to_tag(index):
-    """Map a stored resolution tag index back to its name, or None if invalid."""
     if index is None or index < 0 or index >= len(RESOLUTION_TAG_ORDER):
         return None
-    return RESOLUTION_TAG_ORDER[index]
+    return RESOLUTION_TAG_ORDER[int(index)]
 
 
-def _dominant_tag_label(face_tag_indices):
-    """Return a single tag name if all faces share one tag, "MIXED" if they
-    differ, or None if none of the faces carry a valid tag."""
-    valid = [t for t in face_tag_indices if t is not None and t >= 0]
-    if not valid:
+def _majority(values):
+    """Most common value in an int array (ties -> smallest), or None if empty."""
+    values = np.asarray(values)
+    if values.size == 0:
         return None
-    unique = set(valid)
-    if len(unique) == 1:
-        return _index_to_tag(next(iter(unique)))
+    shifted = values.astype(np.int64) + 1  # -1 (untagged) -> 0
+    shifted = np.clip(shifted, 0, None)
+    return int(np.bincount(shifted).argmax()) - 1
+
+
+def _dominant_tag_label(face_tags):
+    """One tag name if all faces share it, "MIXED" if they differ, None if untagged."""
+    face_tags = np.asarray(face_tags)
+    valid = face_tags[face_tags >= 0]
+    if valid.size == 0:
+        return None
+    unique = np.unique(valid)
+    if unique.size == 1:
+        return _index_to_tag(int(unique[0]))
     return "MIXED"
 
 
-def _dominant_face_tag(mesh):
-    """Return the majority resolution tag from a mesh's per-face qi_res_tag
-    attribute, or None if the mesh has no such attribute.
-
-    This is the ground truth for a mesh's current geometry: Blender's native
-    join/separate operators correctly split/merge per-face attribute data
-    along with the polygons, but only copy the object-level custom property
-    from a single source object, which goes stale the moment islands with
-    different tags are combined or split outside our own pipeline.
-    """
+def read_face_tags(mesh):
+    """Per-face qi_res_tag values as an int array, or None if the mesh has no tags."""
     if mesh is None:
         return None
     attr = mesh.attributes.get(RES_TAG_ATTR)
-    if attr is None or len(attr.data) == 0:
+    if attr is None or attr.domain != 'FACE' or len(attr.data) == 0:
         return None
-    counts = {}
-    for item in attr.data:
-        counts[item.value] = counts.get(item.value, 0) + 1
-    best_index = max(counts, key=counts.get)
-    return _index_to_tag(best_index)
+    out = np.empty(len(attr.data), dtype=np.int32)
+    attr.data.foreach_get("value", out)
+    return out
+
+
+def _dominant_face_tag(mesh):
+    tags = read_face_tags(mesh)
+    if tags is None:
+        return None
+    return _index_to_tag(_majority(tags))
+
+
+def _approximate_tag_from_remesh_voxel_size(mesh):
+    """Guess a tag from mesh.remesh_voxel_size (Blender units), trusted within 0.1 of a preset."""
+    if mesh is None:
+        return None
+    blender_voxel_size = getattr(mesh, "remesh_voxel_size", 0.0)
+    if not blender_voxel_size:
+        return None
+    voxel_size = blender_voxel_size * STL_EXPORT_SCALE
+    tag = nearest_resolution_tag(voxel_size)
+    if abs(voxel_size - RESOLUTION_PRESETS[tag][0]) <= 0.1:
+        return tag
+    return None
 
 
 def read_object_resolution_tag(obj):
-    """Read the whole-object resolution tag for Smart resolution lookups.
-
-    Prefers the mesh's own per-face attribute (accurate even after a native
-    Blender join/separate reshuffles geometry), falls back to the object-level
-    custom property, then to an approximation from remesh_voxel_size.
-    """
+    """Whole-object tag for Smart resolution: per-face attribute, then the object
+    property, then a guess from remesh_voxel_size."""
     if obj is None:
         return None
     if obj.type == 'MESH':
@@ -93,70 +134,37 @@ def read_object_resolution_tag(obj):
     return None
 
 
-def _approximate_tag_from_remesh_voxel_size(mesh):
-    """Guess a resolution tag from mesh.remesh_voxel_size when no explicit
-    qi_res_tag is present. Only trusted within 0.1 of a known preset's voxel
-    size; otherwise returns None so the caller falls back to current settings.
-
-    mesh.remesh_voxel_size is in Blender's own local units, while the presets
-    and the rest of the pipeline operate in meshlib/STL space (scaled up by
-    STL_EXPORT_SCALE), so the read value must be converted before comparing.
-    """
-    if mesh is None:
-        return None
-    blender_voxel_size = getattr(mesh, "remesh_voxel_size", 0.0)
-    if not blender_voxel_size:
-        return None
-    voxel_size = blender_voxel_size * STL_EXPORT_SCALE
-    tag = nearest_resolution_tag(voxel_size)
-    preset_voxel_size = RESOLUTION_PRESETS[tag][0]
-    if abs(voxel_size - preset_voxel_size) <= 0.1:
-        return tag
-    return None
-
-
 def write_mesh_resolution_tags(mesh, face_tag_indices, remesh_voxel_size=None):
-    """Write the per-face qi_res_tag attribute, a matching color attribute for
-    viewport visualization, and remesh_voxel_size onto a mesh datablock, so
-    Blender's own voxel remesh in Sculpt Mode stays consistent with the
-    resolution Quick Infill last processed it at.
-
-    remesh_voxel_size is given in meshlib/STL space (scaled by STL_EXPORT_SCALE);
-    it is converted down to Blender's own local units before being stored.
-    """
+    """Write qi_res_tag (per face), the matching colour attribute (per corner) and
+    remesh_voxel_size (converted to Blender units) onto a mesh. Vectorised."""
     if mesh is None or len(mesh.polygons) == 0:
         return
-    polycount = len(mesh.polygons)
-    attr = mesh.attributes.get(RES_TAG_ATTR)
-    if attr is None:
-        attr = mesh.attributes.new(name=RES_TAG_ATTR, type='INT', domain='FACE')
-    if len(face_tag_indices) == polycount:
-        for i, item in enumerate(attr.data):
-            item.value = face_tag_indices[i]
-        _write_resolution_colors(mesh, face_tag_indices)
+    tags = np.asarray(face_tag_indices, dtype=np.int32)
+    if tags.size == len(mesh.polygons):
+        attr = mesh.attributes.get(RES_TAG_ATTR)
+        if attr is None:
+            attr = mesh.attributes.new(name=RES_TAG_ATTR, type='INT', domain='FACE')
+        attr.data.foreach_set("value", tags)
+
+        palette = np.array([RES_TAG_COLORS.get(t, RES_UNTAGGED_COLOR) for t in RESOLUTION_TAG_ORDER] + [RES_UNTAGGED_COLOR],
+                           dtype=np.float32)
+        idx = np.where((tags >= 0) & (tags < len(RESOLUTION_TAG_ORDER)), tags, len(RESOLUTION_TAG_ORDER))
+        loop_totals = np.empty(len(mesh.polygons), dtype=np.int32)
+        mesh.polygons.foreach_get("loop_total", loop_totals)
+        corner_colors = palette[np.repeat(idx, loop_totals)]
+        color_attr = mesh.color_attributes.get(RES_COLOR_ATTR)
+        if color_attr is None:
+            color_attr = mesh.color_attributes.new(name=RES_COLOR_ATTR, type='BYTE_COLOR', domain='CORNER')
+        color_attr.data.foreach_set("color", corner_colors.ravel())
+        try:
+            mesh.color_attributes.active_color = color_attr
+        except (AttributeError, TypeError):
+            pass
     if remesh_voxel_size is not None:
         mesh.remesh_voxel_size = float(remesh_voxel_size) / STL_EXPORT_SCALE
 
 
-def _write_resolution_colors(mesh, face_tag_indices):
-    """Mirror the per-face resolution tag onto a CORNER color attribute so it
-    can be visualized directly in the viewport (Color Attribute shading)."""
-    color_attr = mesh.color_attributes.get(RES_COLOR_ATTR)
-    if color_attr is None:
-        color_attr = mesh.color_attributes.new(name=RES_COLOR_ATTR, type='BYTE_COLOR', domain='CORNER')
-    for poly in mesh.polygons:
-        tag = _index_to_tag(face_tag_indices[poly.index])
-        color = RES_TAG_COLORS.get(tag, RES_UNTAGGED_COLOR)
-        for loop_index in poly.loop_indices:
-            color_attr.data[loop_index].color = color
-    try:
-        mesh.color_attributes.active_color = color_attr
-    except (AttributeError, TypeError):
-        pass
-
-
 def set_object_resolution_label(obj, label):
-    """Set (or clear) the object-level resolution tag custom property."""
     if obj is None:
         return
     if label:
@@ -165,917 +173,530 @@ def set_object_resolution_label(obj, label):
         del obj[RES_TAG_ATTR]
 
 
-def compute_blender_island_tags(blender_obj):
-    """Read-only: find each loose part's world-space centroid and dominant
-    resolution tag directly from the Blender mesh via bmesh connectivity, with
-    no object creation. Returns a list of (centroid_world, tag_name_or_None).
+# ---------------------------------------------------------------------------
+# Blender <-> meshlib (in memory)
+# ---------------------------------------------------------------------------
+
+def _triangles(me):
+    """(tri vertex indices (n,3) int32, tri -> polygon index (n,) int32)."""
+    if hasattr(me, "calc_loop_triangles"):
+        me.calc_loop_triangles()
+    n = len(me.loop_triangles)
+    tris = np.empty(n * 3, dtype=np.int32)
+    me.loop_triangles.foreach_get("vertices", tris)
+    polys = np.empty(n, dtype=np.int32)
+    me.loop_triangles.foreach_get("polygon_index", polys)
+    return tris.reshape(-1, 3), polys
+
+
+def blender_to_meshlib(obj, apply_modifiers=False, depsgraph=None, with_face_map=False):
+    """World-space (x STL_EXPORT_SCALE) meshlib mesh of a Blender mesh object.
+
+    with_face_map=True also returns, per meshlib face, the Blender polygon it
+    came from (or None if meshlib reordered faces).
     """
-    import bmesh
-    mesh = blender_obj.data
-    if mesh is None or len(mesh.polygons) == 0:
-        return []
+    mn = get_mrmeshnumpy()
+    if obj.type != 'MESH':
+        raise ValueError(f"'{obj.name}' is not a mesh.")
 
-    attr = mesh.attributes.get(RES_TAG_ATTR)
-    face_tags = [item.value for item in attr.data] if attr is not None else None
-    fallback_tag = _approximate_tag_from_remesh_voxel_size(mesh)
+    eval_obj = None
+    if apply_modifiers:
+        depsgraph = depsgraph or bpy.context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        me = eval_obj.to_mesh()
+    else:
+        me = obj.data
+    try:
+        verts = np.empty(len(me.vertices) * 3, dtype=np.float32)
+        me.vertices.foreach_get("co", verts)
+        verts = verts.reshape(-1, 3).astype(np.float64)
+        mw = np.array(obj.matrix_world, dtype=np.float64)
+        verts = (verts @ mw[:3, :3].T + mw[:3, 3]) * STL_EXPORT_SCALE
+        tris, tri_polys = _triangles(me)
+    finally:
+        if eval_obj is not None:
+            eval_obj.to_mesh_clear()
 
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bm.faces.ensure_lookup_table()
-
-    visited = set()
-    islands = []
-    for seed in bm.faces:
-        if seed.index in visited:
-            continue
-        stack = [seed]
-        visited.add(seed.index)
-        island_faces = []
-        while stack:
-            f = stack.pop()
-            island_faces.append(f)
-            for e in f.edges:
-                for lf in e.link_faces:
-                    if lf.index not in visited:
-                        visited.add(lf.index)
-                        stack.append(lf)
-
-        centroid_local = mathutils.Vector((0.0, 0.0, 0.0))
-        for f in island_faces:
-            centroid_local += f.calc_center_median()
-        centroid_local /= len(island_faces)
-        centroid_world = blender_obj.matrix_world @ centroid_local
-
-        tag = None
-        if face_tags is not None:
-            counts = {}
-            for f in island_faces:
-                v = face_tags[f.index]
-                counts[v] = counts.get(v, 0) + 1
-            best_index = max(counts, key=counts.get)
-            tag = _index_to_tag(best_index)
-        if tag is None:
-            tag = fallback_tag
-
-        islands.append((centroid_world, tag))
-
-    bm.free()
-    return islands
+    if len(tris) == 0:
+        raise MeshCollapsedError()
+    mesh = mn.meshFromFacesVerts(tris, verts.astype(np.float32))
+    if not with_face_map:
+        return mesh
+    face_map = tri_polys if face_count(mesh) == len(tri_polys) else None
+    return mesh, face_map
 
 
-def _nearest_island_tag(centroid_world, island_tags):
-    """Match a meshlib island centroid (world space) to the closest known
-    Blender-side island and return its resolution tag, or None if unmatched."""
-    if not island_tags:
-        return None
-    _, tag = min(island_tags, key=lambda pair: (pair[0] - centroid_world).length_squared)
-    return tag
+# Kept for callers of the old name
+def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None, apply_modifiers=True):
+    return blender_to_meshlib(blender_obj, apply_modifiers=apply_modifiers)
 
 
-# Hidden staging collection for intermediate STL imports. Landing new objects
-# here (instead of the user's real collections) avoids repeatedly dirtying
-# any Geometry Nodes modifier elsewhere in the scene that scans those
-# collections - otherwise it gets re-evaluated on every object processed in
-# a batch, which can bring large batches to a crawl.
-_SCRATCH_COLLECTION_NAME = "Quick Infill (Working)"
+def meshlib_to_blender_mesh(ml_mesh, name):
+    """New bpy Mesh (world space, Blender units) from a meshlib mesh."""
+    mn = get_mrmeshnumpy()
+    topo = ml_mesh.topology
+    if hasattr(ml_mesh, "pack") and topo.numValidFaces() != topo.faceSize():
+        ml_mesh.pack()
+    verts = (mn.getNumpyVerts(ml_mesh) / STL_EXPORT_SCALE).astype(np.float32)
+    faces = mn.getNumpyFaces(ml_mesh.topology).astype(np.int32)
+    if faces.size == 0:
+        raise MeshCollapsedError()
+
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(len(verts))
+    me.vertices.foreach_set("co", verts.ravel())
+    me.loops.add(faces.size)
+    me.loops.foreach_set("vertex_index", faces.ravel())
+    me.polygons.add(len(faces))
+    me.polygons.foreach_set("loop_start", np.arange(0, faces.size, 3, dtype=np.int32))
+    me.update(calc_edges=True)
+    # Always shade flat (meshes built this way would otherwise come in smooth-shaded).
+    if hasattr(me, "shade_flat"):
+        me.shade_flat()
+    else:
+        me.polygons.foreach_set("use_smooth", np.zeros(len(faces), dtype=bool))
+    return me
 
 
-def _find_layer_collection(layer_coll, name):
-    """Recursively find the LayerCollection wrapping the collection named `name`."""
-    if layer_coll.collection.name == name:
-        return layer_coll
-    for child in layer_coll.children:
-        found = _find_layer_collection(child, name)
-        if found is not None:
-            return found
-    return None
-
-
-def _get_scratch_layer_collection():
-    """Return the (creating if needed) excluded staging LayerCollection."""
-    scene = bpy.context.scene
-    coll = bpy.data.collections.get(_SCRATCH_COLLECTION_NAME)
-    if coll is None:
-        coll = bpy.data.collections.new(_SCRATCH_COLLECTION_NAME)
-    if coll.name not in scene.collection.children:
-        scene.collection.children.link(coll)
-
-    layer_coll = _find_layer_collection(bpy.context.view_layer.layer_collection, coll.name)
-    if layer_coll is not None:
-        layer_coll.exclude = True
-    return layer_coll
+def link_new_object(name, mesh, collections):
+    obj = bpy.data.objects.new(name, mesh)
+    for coll in collections:
+        coll.objects.link(obj)
+    return obj
 
 
 def move_object_to_collections(obj, target_collections):
-    """Unlink obj from every collection it's currently in and link it into
-    each collection in target_collections instead."""
     for coll in list(obj.users_collection):
         coll.objects.unlink(obj)
     for coll in target_collections:
         coll.objects.link(obj)
 
 
-def blender_to_meshlib(blender_obj):
-    """
-    Convert a Blender mesh object to a meshlib Mesh using MeshBuilder.
-    """
-    from .meshlib_utils import get_meshlib
-    mm, _ = get_meshlib()
-    
-    if blender_obj.type != 'MESH':
-        raise ValueError("Selected object is not a mesh.")
+def swap_mesh_keep_transforms(obj, world_mesh):
+    """Give obj the geometry of world_mesh (world-space coordinates) without
+    moving the object. Materials of the old mesh are kept. Returns the old mesh,
+    which the caller frees after the depsgraph has been updated."""
+    world_mesh.transform(obj.matrix_world.inverted())
+    old = obj.data
+    for mat in old.materials:
+        world_mesh.materials.append(mat)
+    obj.data = world_mesh
+    world_mesh.name = obj.name
+    return old
 
-    mesh_data = blender_obj.data
 
-    # Extract vertices
-    vertices = []
-    for v in mesh_data.vertices:
-        vertices.append([v.co.x, v.co.y, v.co.z])
-
-    # Extract faces (triangulate ngons via fan)
-    faces = []
-    for poly in mesh_data.polygons:
-        idx = list(poly.vertices)
-        if len(idx) == 3:
-            faces.append(idx)
-        elif len(idx) == 4:
-            faces.append([idx[0], idx[1], idx[2]])
-            faces.append([idx[0], idx[2], idx[3]])
-        else:
-            for i in range(2, len(idx)):
-                faces.append([idx[0], idx[i-1], idx[i]])
-
-    # Build meshlib mesh
-    try:
-        tris = [mm.MeshBuilder.Triangle(f[0], f[1], f[2]) for f in faces]
-        ml_mesh = mm.MeshBuilder.fromTriangles(vertices, tris)
-    except (AttributeError, TypeError):
+def free_unused_meshes(meshes):
+    """Remove meshes left without users. The view layer is updated first so the
+    depsgraph no longer references them (removing a mesh it still holds made the
+    next file save freeze)."""
+    meshes = [m for m in meshes if m is not None]
+    if not meshes:
+        return
+    bpy.context.view_layer.update()
+    for m in meshes:
         try:
-            ml_mesh = mm.MeshBuilder.fromPointTriples(vertices, faces)
-        except Exception as e:
-            raise RuntimeError("MeshBuilder creation failed") from e
-
-    return ml_mesh
-
-
-def blender_to_meshlib_via_stl(blender_obj, tmp_dir=None, apply_modifiers=True):
-    """
-    Export the given Blender object to a temporary STL and load it via meshlib.
-    This avoids constructing huge Python-side vectors for very dense meshes.
-    """
-    import os
-    import tempfile
-    import bpy
-    from .meshlib_utils import get_meshlib
-    mm, _ = get_meshlib()
-    # Do not rely on enabling addons; use available operators
-
-    # Prepare temp filepath
-    tmp_dir = tmp_dir or tempfile.gettempdir()
-    os.makedirs(tmp_dir, exist_ok=True)
-    fd, stl_path = tempfile.mkstemp(prefix="quick_infill_", suffix=".stl", dir=tmp_dir)
-    os.close(fd)
-
-    # Preserve selection state
-    view_layer = bpy.context.view_layer
-    prev_active = view_layer.objects.active
-    prev_selection = [obj for obj in bpy.context.selected_objects]
-
-    try:
-        # Select only the target object
-        for obj in bpy.context.selected_objects:
-            obj.select_set(False)
-        blender_obj.select_set(True)
-        view_layer.objects.active = blender_obj
-
-        # Export selection to STL using Blender native operator
-        res = bpy.ops.wm.stl_export(
-            'EXEC_DEFAULT',
-            filepath=stl_path,
-            export_selected_objects=True,
-            use_batch=False,
-            global_scale=STL_EXPORT_SCALE,
-            apply_modifiers=apply_modifiers,
-            evaluation_mode='DAG_EVAL_VIEWPORT',
-        )
-        if res != {'FINISHED'}:
-            raise RuntimeError("Could not export STL with Blender 4.5 native operator")
-
-        # Load via meshlib
-        loaded = mm.loadMesh(stl_path)
-        mesh = loaded.mesh if hasattr(loaded, 'mesh') else loaded
-        return mesh
-    finally:
-        # Restore selection
-        for obj in bpy.context.selected_objects:
-            obj.select_set(False)
-        for obj in prev_selection:
-            obj.select_set(True)
-        view_layer.objects.active = prev_active
-        # Clean up temp file
-        try:
-            os.remove(stl_path)
-        except Exception:
+            if m.users == 0 and not m.use_fake_user:
+                bpy.data.meshes.remove(m)
+        except ReferenceError:
             pass
 
 
-def meshlib_to_blender_via_stl(meshlib_mesh, name: str = "Converted Mesh", import_scale: float = 0.1):
-    """
-    Save a meshlib mesh to a temporary STL and import it back into Blender at a given scale.
-    Returns the imported Blender object.
-
-    The object lands in a hidden staging collection (see _get_scratch_layer_collection),
-    not the user's real collections. Callers that keep the result (replace_original=False)
-    must move it into its final collection(s) via move_object_to_collections().
-    """
-    import os
-    import tempfile
-    import bpy
-    from .meshlib_utils import get_meshlib
-    mm, _ = get_meshlib()
-    # Do not rely on enabling addons; use available operators
-
-    tmp_dir = tempfile.gettempdir()
-    os.makedirs(tmp_dir, exist_ok=True)
-    fd, stl_path = tempfile.mkstemp(prefix="quick_infill_out_", suffix=".stl", dir=tmp_dir)
-    os.close(fd)
-
-    # Save meshlib mesh to STL
-    saved = False
-    try:
-        mm.saveMesh(meshlib_mesh, stl_path)
-        saved = True
-    except Exception:
+def remove_objects(objs):
+    """Delete objects and any meshes they leave unused."""
+    meshes = []
+    for obj in objs:
         try:
-            mm.saveMeshAs(meshlib_mesh, stl_path)
-            saved = True
-        except Exception:
-            saved = False
-    if not saved:
-        raise RuntimeError("Could not save meshlib mesh to STL; consider direct meshlib_to_blender fallback")
-
-    # Track current objects to detect newly imported one
-    prev_objs = set(bpy.data.objects)
-
-    # Redirect the import into the hidden staging collection so it never
-    # dirties the user's real collections during the import.
-    view_layer = bpy.context.view_layer
-    prev_active_layer_collection = view_layer.active_layer_collection
-    scratch_layer_collection = _get_scratch_layer_collection()
-    if scratch_layer_collection is not None:
-        view_layer.active_layer_collection = scratch_layer_collection
-
-    try:
-        imported = False
-        # Prefer wm.stl_import if available
-        if hasattr(bpy.ops.wm, "stl_import"):
-            try:
-                res = bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-                imported = (res == {'FINISHED'})
-            except Exception:
-                imported = False
-        # Fallback to legacy importer
-        if not imported and hasattr(bpy.ops, "import_mesh") and hasattr(bpy.ops.import_mesh, "stl"):
-            try:
-                res = bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-                imported = (res == {'FINISHED'})
-            except Exception:
-                imported = False
-    finally:
-        view_layer.active_layer_collection = prev_active_layer_collection
-
-    if not imported:
-        raise RuntimeError("STL import failed")
-
-    new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
-    if not new_objs:
-        # As a fallback, try selected objects
-        new_objs = list(bpy.context.selected_objects)
-    if not new_objs:
-        raise RuntimeError("Imported STL but could not find the new object")
-
-    obj = new_objs[0]
-    obj.name = name
-
-    # Clean up temp STL
-    try:
-        os.remove(stl_path)
-    except Exception:
-        pass
-
-    return obj
+            if obj.type == 'MESH':
+                meshes.append(obj.data)
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass
+    free_unused_meshes(meshes)
 
 
 def select_results(result_objs):
-    """Select the given result objects and make the first one active.
-    
-    Call after multi-object operator loops to keep selection consistent.
-    """
-    for obj in bpy.context.selected_objects:
-        obj.select_set(False)
-    for obj in result_objs:
-        if obj and obj.name in bpy.data.objects:
-            obj.select_set(True)
-    if result_objs:
-        bpy.context.view_layer.objects.active = result_objs[0]
-
-
-def meshlib_to_blender(meshlib_mesh, name="Converted Mesh"):
-    """
-    Convert a meshlib Mesh to a Blender mesh object.
-    
-    Args:
-        meshlib_mesh (mm.Mesh): The meshlib Mesh to convert.
-        name (str): Name for the new Blender object. 
-    
-    Returns:
-        bpy.types.Object: The new Blender mesh object.
-    """
-    from .meshlib_utils import get_meshlib
-    mm, _ = get_meshlib()
-    
-    # Extract vertices
-    vertices = []
-    for i in range(meshlib_mesh.points.size()):
-        vert_id = mm.VertId(i)
-        point = meshlib_mesh.points[vert_id]
-        vertices.append((point.x, point.y, point.z))
-    
-    # Extract faces
-    faces = []
-    for i in range(meshlib_mesh.topology.numValidFaces()):
-        face = meshlib_mesh.topology.getFace(i)
-        if face.valid():
-            face_indices = [face[0], face[1], face[2]]
-            faces.append(face_indices)
-    
-    # Create new mesh in Blender
-    new_mesh = bpy.data.meshes.new(name)
-    new_mesh.from_pydata(vertices, [], faces)
-    new_mesh.update()
-    
-    # Create new object
-    new_obj = bpy.data.objects.new(name, new_mesh)
-    
-    # Link to current scene
-    bpy.context.scene.collection.objects.link(new_obj)
-    
-    return new_obj
-
-
-def _process_mesh_operation_single(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
-    """Actual operation pipeline without island splitting."""
-    from .offset_utils import decimate_mesh, should_auto_decimate_faces
-
-    obj_name = blender_obj.name
-
-    settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
-    mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
-    ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
-    smart = bool(getattr(settings, "smart_resolution", False)) if settings is not None else False
-    apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
-
-    effective_resolution = resolution
-    if smart:
-        existing_tag = read_object_resolution_tag(blender_obj)
-        if existing_tag:
-            effective_resolution, ratio = RESOLUTION_PRESETS[existing_tag]
-            mode = "VOXEL_RATIO"
-
-    # Convert to meshlib
-    src_mesh = blender_to_meshlib_via_stl(blender_obj, apply_modifiers=apply_modifiers)
-    initial_face_count = src_mesh.topology.numValidFaces()
-    initial_vertex_count = src_mesh.topology.numValidVerts()
-
-    # Apply the operation
-    out_mesh = operation_fn(src_mesh, effective_resolution)
-
-    # Auto decimate if enabled - only when significant face growth occurred
-    final_face_count = out_mesh.topology.numValidFaces()
-    if auto_decimate:
-        do_decimate, target_faces = should_auto_decimate_faces(
-            initial_face_count,
-            final_face_count,
-            voxel_size=effective_resolution,
-            mode=mode,
-            ratio=ratio,
-        )
-        if do_decimate:
-            out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=effective_resolution)
-
-    final_vertex_count = out_mesh.topology.numValidVerts()
-
-    # Convert back to Blender
-    result_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + output_suffix, import_scale=import_scale)
-
-    tag_index = _tag_to_index(nearest_resolution_tag(effective_resolution)) if effective_resolution is not None else -1
-    face_tags = [tag_index] * len(result_obj.data.polygons)
-    write_mesh_resolution_tags(result_obj.data, face_tags, remesh_voxel_size=effective_resolution)
-
-    # If replace_original is enabled, swap mesh data and delete the temp object.
-    # Otherwise, move the kept result out of the hidden staging collection
-    # and into the source object's collection(s).
-    if replace_original:
-        result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
-    else:
-        move_object_to_collections(result_obj, list(blender_obj.users_collection) or [bpy.context.scene.collection])
-    set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
-
-    return result_obj, initial_vertex_count, final_vertex_count
-
-
-def process_object_with_island_split(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
-    """Process a mesh one connected-component (island) at a time, entirely inside
-    meshlib, then merge the results and import back into Blender exactly once.
-
-    This avoids Blender-side object duplication/split/join (bpy.ops.mesh.separate,
-    bpy.ops.object.join, bpy.data.objects.remove in a loop), which is slow and
-    prone to invalidating other Python Object references when objects are removed.
-    """
-    from .meshlib_utils import get_meshlib
-    from .offset_utils import decimate_mesh, should_auto_decimate_faces
-    mm, _ = get_meshlib()
-
-    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
-    if settings is None:
-        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
-    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
-
-    if not process_islands:
-        return _process_mesh_operation_single(
-            blender_obj,
-            operation_fn,
-            output_suffix,
-            auto_decimate=auto_decimate,
-            import_scale=import_scale,
-            replace_original=replace_original,
-            resolution=resolution,
-        )
-
-    obj_name = blender_obj.name
-    smart = bool(getattr(settings, "smart_resolution", False)) if settings is not None else False
-    apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
-    blender_island_tags = compute_blender_island_tags(blender_obj) if smart else []
-
-    src_mesh = blender_to_meshlib_via_stl(blender_obj, apply_modifiers=apply_modifiers)
-
-    component_bitsets = mm.MeshComponents.getAllComponents(mm.MeshPart(src_mesh))
-    if len(component_bitsets) <= 1:
-        return _process_mesh_operation_single(
-            blender_obj,
-            operation_fn,
-            output_suffix,
-            auto_decimate=auto_decimate,
-            import_scale=import_scale,
-            replace_original=replace_original,
-            resolution=resolution,
-        )
-
-    mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
-    ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
-
-    total_initial = 0
-    total_final = 0
-    merged_mesh = mm.Mesh()
-    face_tags = []
-    voxel_sizes_used = []
-
-    for bitset in component_bitsets:
-        island_mesh = mm.Mesh()
-        island_mesh.addMeshPart(mm.MeshPart(src_mesh, bitset))
-
-        initial_faces = island_mesh.topology.numValidFaces()
-
-        island_resolution, island_ratio, island_mode = resolution, ratio, mode
-        if smart and blender_island_tags:
-            bbox = src_mesh.computeBoundingBox(bitset)
-            centroid = (bbox.min + bbox.max) * 0.5
-            centroid_world = mathutils.Vector((centroid.x, centroid.y, centroid.z)) / STL_EXPORT_SCALE
-            matched_tag = _nearest_island_tag(centroid_world, blender_island_tags)
-            if matched_tag:
-                island_resolution, island_ratio = RESOLUTION_PRESETS[matched_tag]
-                island_mode = "VOXEL_RATIO"
-
-        try:
-            out_mesh = operation_fn(island_mesh, island_resolution)
-        except Exception:
-            # This island collapsed under the operation (e.g. Trim Edges/Trim
-            # Thin on a thin sliver); drop just this island instead of
-            # aborting the whole multi-island merge.
-            continue
-
-        total_initial += island_mesh.topology.numValidVerts()
-
-        if auto_decimate:
-            final_faces = out_mesh.topology.numValidFaces()
-            do_decimate, target_faces = should_auto_decimate_faces(
-                initial_faces,
-                final_faces,
-                voxel_size=island_resolution,
-                mode=island_mode,
-                ratio=island_ratio,
-            )
-            if do_decimate:
-                out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=island_resolution)
-
-        n_faces = out_mesh.topology.numValidFaces()
-        tag_index = _tag_to_index(nearest_resolution_tag(island_resolution)) if island_resolution is not None else -1
-        face_tags.extend([tag_index] * n_faces)
-        if island_resolution is not None:
-            voxel_sizes_used.append(island_resolution)
-
-        total_final += out_mesh.topology.numValidVerts()
-        merged_mesh.addMesh(out_mesh)
-
-    if merged_mesh.topology.numValidFaces() == 0:
-        raise RuntimeError(f"All mesh islands collapsed for '{blender_obj.name}'")
-
-    result_obj = meshlib_to_blender_via_stl(merged_mesh, obj_name + output_suffix, import_scale=import_scale)
-
-    remesh_voxel_size = min(voxel_sizes_used) if voxel_sizes_used else resolution
-    write_mesh_resolution_tags(result_obj.data, face_tags, remesh_voxel_size=remesh_voxel_size)
-
-    if replace_original:
-        result_obj = replace_mesh_keep_transforms(blender_obj, result_obj)
-    else:
-        move_object_to_collections(result_obj, list(blender_obj.users_collection) or [bpy.context.scene.collection])
-    set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
-
-    return result_obj, total_initial, total_final
-
-
-def process_mesh_operation(blender_obj, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
-    """
-    Generic wrapper for mesh operations: import -> process -> optional decimate -> export.
-    """
-    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
-    if settings is None:
-        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
-    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
-
-    if process_islands:
-        return process_object_with_island_split(
-            blender_obj,
-            operation_fn,
-            output_suffix,
-            auto_decimate=auto_decimate,
-            import_scale=import_scale,
-            replace_original=replace_original,
-            resolution=resolution,
-        )
-
-    return _process_mesh_operation_single(
-        blender_obj,
-        operation_fn,
-        output_suffix,
-        auto_decimate=auto_decimate,
-        import_scale=import_scale,
-        replace_original=replace_original,
-        resolution=resolution,
-    )
-
-
-def replace_mesh_keep_transforms(original_obj, new_obj):
-    """
-    Replace the mesh data of original_obj with new_obj's mesh data,
-    keeping original_obj's transforms (location, rotation, scale) intact.
-    
-    The new mesh is transformed so it appears in the correct position
-    when using the original object's transforms.
-    
-    Args:
-        original_obj: The original Blender object to update
-        new_obj: The new object with the mesh data to use
-    
-    Returns:
-        The original object (now with new mesh data)
-    """
-    import bpy
-    import bmesh
-    
-    # Get the transformation matrices
-    # new_obj is at origin with some scale (e.g., 0.1 from STL import)
-    # original_obj has its own transforms
-    # We need to transform new_obj's mesh so it appears correct with original_obj's transforms
-    
-    # The mesh vertices in new_obj are in new_obj's local space
-    # When we assign them to original_obj, they'll be interpreted in original_obj's local space
-    # So we need: new_world_position = original_world_position
-    # new_obj.matrix_world @ new_local = original_obj.matrix_world @ original_local
-    # original_local = original_obj.matrix_world.inverted() @ new_obj.matrix_world @ new_local
-    
-    transform_matrix = original_obj.matrix_world.inverted() @ new_obj.matrix_world
-    
-    # Apply the transformation to the new mesh vertices
-    new_mesh = new_obj.data
-    bm = bmesh.new()
-    bm.from_mesh(new_mesh)
-    bmesh.ops.transform(bm, matrix=transform_matrix, verts=bm.verts)
-    bm.to_mesh(new_mesh)
-    bm.free()
-    new_mesh.update()
-    
-    # Store reference to old mesh data for cleanup
-    old_mesh = original_obj.data
-    
-    # Assign the new mesh data to the original object
-    original_obj.data = new_mesh
-    
-    # Give the mesh a proper name
-    original_obj.data.name = original_obj.name
-
-    # Remove the temporary imported object (but not its mesh data, which is now in use)
-    bpy.data.objects.remove(new_obj, do_unlink=True)
-
-    # Reselect the original object and make it active
-    original_obj.select_set(True)
-    bpy.context.view_layer.objects.active = original_obj
-
-    # Sync the depsgraph so it transitions from old_mesh to new_mesh
-    # BEFORE freeing old_mesh.  Without this the depsgraph still holds a
-    # reference to old_mesh internally; removing the mesh while that reference
-    # is live leaves a dangling pointer that Blender dereferences on the next
-    # file save, causing a freeze.
-    bpy.context.view_layer.update()
-
-    # Now safe to free the old mesh – the depsgraph no longer references it.
-    if old_mesh.users == 0:
-        bpy.data.meshes.remove(old_mesh)
-
-    return original_obj
-
-
-def batch_process_mesh_operation(blender_objs, operation_fn, output_suffix, auto_decimate=False, import_scale=0.1, replace_original=False, resolution=None):
-    """
-    Optimized batch wrapper for mesh operations on multiple objects.
-    Processes each object individually but batches Blender I/O for efficiency.
-    
-    Args:
-        blender_objs: List of source Blender mesh objects
-        operation_fn: Function that takes meshlib mesh and returns processed meshlib mesh
-        output_suffix: Suffix for output object names (e.g., "_Grown")
-        auto_decimate: If True, decimate output to match initial vertex count per object
-        import_scale: Scale factor for STL import (default 0.1)
-        replace_original: If True, replace original objects' mesh data instead of creating new objects
-    
-    Returns:
-        list of tuples: [(output_blender_obj, initial_vertex_count, final_vertex_count), ...]
-    """
-    import os
-    import tempfile
-    from .meshlib_utils import get_meshlib
-    from .offset_utils import decimate_mesh
-    mm, _ = get_meshlib()
-
-    settings = getattr(bpy.context.scene, "quick_infill_settings", None)
-    if settings is None:
-        settings = getattr(bpy.context.scene, "quick_infill_tools_settings", None)
-    process_islands = bool(getattr(settings, "process_islands", False)) if settings is not None else False
-    
-    if not blender_objs:
-        return [], []
-
-    if process_islands:
-        results = []
-        collapsed_objs = []
-        # Restore the pre-operation selection afterwards so behavior matches
-        # the non-island batch path below (selection state is not meant to
-        # reflect the newly created results in either mode).
-        view_layer = bpy.context.view_layer
-        prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
-        prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
-        try:
-            for obj in blender_objs:
-                try:
-                    result_obj, initial_verts, final_verts = process_object_with_island_split(
-                        obj,
-                        operation_fn,
-                        output_suffix,
-                        auto_decimate=auto_decimate,
-                        import_scale=import_scale,
-                        replace_original=replace_original,
-                        resolution=resolution,
-                    )
-                    results.append((result_obj, initial_verts, final_verts))
-                except Exception as exc:
-                    collapsed_objs.append((obj, exc))
-        finally:
-            for obj in bpy.context.selected_objects:
-                obj.select_set(False)
-            for name in prev_selection_names:
-                if name in bpy.data.objects:
-                    bpy.data.objects[name].select_set(True)
-            if prev_active_name and prev_active_name in bpy.data.objects:
-                view_layer.objects.active = bpy.data.objects[prev_active_name]
-        return results, collapsed_objs
-    
-    results = []
-    collapsed_objs = []
-    tmp_dir = tempfile.gettempdir()
-
-    # Precompute the effective (voxel_size, ratio, mode) per object up front:
-    # under Smart resolution, an object with an existing tag uses that tag's
-    # preset values instead of the current UI settings.
-    smart = bool(getattr(settings, "smart_resolution", False)) if settings is not None else False
-    default_mode = getattr(settings, "decimate_mode", "VOXEL_RATIO") if settings is not None else "VOXEL_RATIO"
-    default_ratio = getattr(settings, "decimation_ratio", None) if settings is not None else None
-
-    effective_resolutions = []
-    effective_ratios = []
-    effective_modes = []
-    for obj in blender_objs:
-        eff_res, eff_ratio, eff_mode = resolution, default_ratio, default_mode
-        if smart:
-            existing_tag = read_object_resolution_tag(obj)
-            if existing_tag:
-                eff_res, eff_ratio = RESOLUTION_PRESETS[existing_tag]
-                eff_mode = "VOXEL_RATIO"
-        effective_resolutions.append(eff_res)
-        effective_ratios.append(eff_ratio)
-        effective_modes.append(eff_mode)
-    
-    # Save current selection state once (store names to avoid stale StructRNA references)
-    view_layer = bpy.context.view_layer
-    prev_active_name = view_layer.objects.active.name if view_layer.objects.active else None
-    prev_selection_names = [obj.name for obj in bpy.context.selected_objects]
-    
-    try:
-        # Phase 1: Export all objects to STL files (batch export setup)
-        stl_paths = []
-        for obj in blender_objs:
-            fd, stl_path = tempfile.mkstemp(prefix=f"qi_batch_{obj.name}_", suffix=".stl", dir=tmp_dir)
-            os.close(fd)
-            stl_paths.append(stl_path)
-        
-        # Export each object (Blender requires individual selection for STL export)
-        meshlib_meshes = []
-        initial_face_counts = []
-        initial_vert_counts = []
-        
-        apply_modifiers = bool(getattr(settings, "apply_modifiers_on_export", False)) if settings is not None else False
-
-        for i, obj in enumerate(blender_objs):
-            # Select only this object
-            for o in bpy.context.selected_objects:
-                o.select_set(False)
-            obj.select_set(True)
-            view_layer.objects.active = obj
-            
-            # Export to STL
-            bpy.ops.wm.stl_export(
-                'EXEC_DEFAULT',
-                filepath=stl_paths[i],
-                export_selected_objects=True,
-                use_batch=False,
-                global_scale=STL_EXPORT_SCALE,
-                apply_modifiers=apply_modifiers,
-                evaluation_mode='DAG_EVAL_VIEWPORT',
-            )
-            
-            # Load into meshlib
-            loaded = mm.loadMesh(stl_paths[i])
-            mesh = loaded.mesh if hasattr(loaded, 'mesh') else loaded
-            meshlib_meshes.append(mesh)
-            initial_face_counts.append(mesh.topology.numValidFaces())
-            initial_vert_counts.append(mesh.topology.numValidVerts())
-            
-            # Clean up input STL immediately
-            try:
-                os.remove(stl_paths[i])
-            except Exception:
-                pass
-        
-        # Phase 2: Process meshes in parallel (pure meshlib, no Blender API).
-        # ThreadPoolExecutor lets multiple C++ meshlib operations run concurrently
-        # because MeshLib releases the GIL. Worker count is capped to avoid
-        # saturating the GPU if CUDA offsets are in use.
-        from .offset_utils import should_auto_decimate_faces
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        n_workers = min(len(meshlib_meshes), 4)
-
-        def _process_one(args):
-            i, mesh = args
-            eff_res = effective_resolutions[i]
-            out_mesh = operation_fn(mesh, eff_res)
-            if auto_decimate:
-                final_faces = out_mesh.topology.numValidFaces()
-                do_decimate, target_faces = should_auto_decimate_faces(
-                    initial_face_counts[i],
-                    final_faces,
-                    voxel_size=eff_res,
-                    mode=effective_modes[i],
-                    ratio=effective_ratios[i],
-                )
-                if do_decimate:
-                    out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=eff_res)
-            return i, out_mesh
-
-        success_map = {}
-        error_map = {}
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_process_one, (i, mesh)): i for i, mesh in enumerate(meshlib_meshes)}
-            for future in as_completed(futures):
-                i = futures[future]
-                try:
-                    idx, out_mesh = future.result()
-                    success_map[idx] = out_mesh
-                except Exception as exc:
-                    error_map[i] = exc
-
-        # Rebuild survivors in original order so subsequent phases stay aligned
-        processed_meshes = []
-        surviving_indices = []
-        for i in range(len(meshlib_meshes)):
-            if i in success_map:
-                processed_meshes.append(success_map[i])
-                surviving_indices.append(i)
-            else:
-                collapsed_objs.append((blender_objs[i], error_map.get(i, RuntimeError("unknown"))))
-
-        # Phase 3: Save surviving meshes to STL in parallel (pure file I/O)
-        output_stl_paths = []
-        for j in range(len(processed_meshes)):
-            src_idx = surviving_indices[j]
-            fd, stl_path = tempfile.mkstemp(prefix=f"qi_out_{blender_objs[src_idx].name}_", suffix=".stl", dir=tmp_dir)
-            os.close(fd)
-            output_stl_paths.append(stl_path)
-
-        def _save_one(args):
-            mesh, stl_path = args
-            try:
-                mm.saveMesh(mesh, stl_path)
-            except Exception:
-                mm.saveMeshAs(mesh, stl_path)
-
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            list(executor.map(_save_one, zip(processed_meshes, output_stl_paths)))
-
-        # Phase 4: Import surviving results back to Blender. Redirected into the
-        # hidden staging collection for the whole loop so repeated imports don't
-        # dirty the user's real collections (see meshlib_to_blender_via_stl).
-        result_objs = []
-        view_layer = bpy.context.view_layer
-        prev_active_layer_collection = view_layer.active_layer_collection
-        scratch_layer_collection = _get_scratch_layer_collection()
-        if scratch_layer_collection is not None:
-            view_layer.active_layer_collection = scratch_layer_collection
-        try:
-            for j, stl_path in enumerate(output_stl_paths):
-                src_idx = surviving_indices[j]
-                prev_objs = set(bpy.data.objects)
-
-                # Import STL
-                if hasattr(bpy.ops.wm, "stl_import"):
-                    bpy.ops.wm.stl_import('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-                else:
-                    bpy.ops.import_mesh.stl('EXEC_DEFAULT', filepath=stl_path, global_scale=float(import_scale))
-
-                # Find the newly imported object
-                new_objs = [obj for obj in bpy.data.objects if obj not in prev_objs]
-                if not new_objs:
-                    new_objs = list(bpy.context.selected_objects)
-
-                if new_objs:
-                    result_obj = new_objs[0]
-                    result_obj.name = blender_objs[src_idx].name + output_suffix
-                    result_objs.append(result_obj)
-
-                # Clean up output STL
-                try:
-                    os.remove(stl_path)
-                except Exception:
-                    pass
-        finally:
-            view_layer.active_layer_collection = prev_active_layer_collection
-
-        # Phase 5: Handle replace_original and build final results (survivors only)
-        for j, result_obj in enumerate(result_objs):
-            src_idx = surviving_indices[j]
-            original_obj = blender_objs[src_idx]
-            final_verts = processed_meshes[j].topology.numValidVerts()
-
-            eff_res = effective_resolutions[src_idx]
-            tag_index = _tag_to_index(nearest_resolution_tag(eff_res)) if eff_res is not None else -1
-            face_tags = [tag_index] * len(result_obj.data.polygons)
-            write_mesh_resolution_tags(result_obj.data, face_tags, remesh_voxel_size=eff_res)
-
-            if replace_original:
-                result_obj = replace_mesh_keep_transforms(original_obj, result_obj)
-            else:
-                move_object_to_collections(result_obj, list(original_obj.users_collection) or [bpy.context.scene.collection])
-            set_object_resolution_label(result_obj, _dominant_tag_label(face_tags))
-
-            results.append((result_obj, initial_vert_counts[src_idx], final_verts))
-    
-    finally:
-        # Restore selection state (use names to avoid stale StructRNA references)
-        for obj in bpy.context.selected_objects:
+    """Select the given objects and make the first one active."""
+    # Walk the view layer rather than context.selected_objects: that list can
+    # still hold objects this operator just deleted (e.g. voxel boolean Replace).
+    for obj in bpy.context.view_layer.objects:
+        if obj.select_get():
             obj.select_set(False)
-        for name in prev_selection_names:
-            if name in bpy.data.objects:
-                bpy.data.objects[name].select_set(True)
-        if prev_active_name and prev_active_name in bpy.data.objects:
-            view_layer.objects.active = bpy.data.objects[prev_active_name]
-    
-    return results, collapsed_objs
+    alive = [o for o in result_objs if o is not None and o.name in bpy.data.objects]
+    for obj in alive:
+        try:
+            obj.select_set(True)
+        except RuntimeError:
+            pass  # not in the view layer
+    if alive:
+        bpy.context.view_layer.objects.active = alive[0]
+
+
+# ---------------------------------------------------------------------------
+# The one processing pipeline
+# ---------------------------------------------------------------------------
+
+class ProcessResult:
+    def __init__(self):
+        self.results = []      # (obj, initial_verts, final_verts)
+        self.collapsed = []    # (obj, MeshCollapsedError) - geometry vanished
+        self.errors = []       # (obj, exception) - real failures; object left untouched
+        self.dropped_islands = 0
+
+    def error_summary(self):
+        return "; ".join(f"{o.name}: {e}" for o, e in self.errors[:3]) + (" ..." if len(self.errors) > 3 else "")
+
+
+class _Job:
+    __slots__ = ("obj", "name", "src", "face_map", "face_tags", "res", "ratio", "mode",
+                 "out", "out_tags", "voxels_used", "initial_verts", "dropped", "error")
+
+
+def _effective_settings(obj, settings, resolution, smart):
+    ratio = settings.decimation_ratio
+    mode = settings.decimate_mode
+    if smart:
+        tag = read_object_resolution_tag(obj)
+        if tag:
+            res, ratio = RESOLUTION_PRESETS[tag]
+            return res, ratio, "VOXEL_RATIO"
+    return resolution, ratio, mode
+
+
+def _decimate(out, initial_faces, res, mode, ratio):
+    do, target = should_auto_decimate_faces(initial_faces, face_count(out), voxel_size=res, mode=mode, ratio=ratio)
+    if do:
+        out = decimate_mesh(out, target_face_count=target, resolution=res)
+    return out
+
+
+def _tag_index(res):
+    return _tag_to_index(nearest_resolution_tag(res)) if res is not None else -1
+
+
+def _compute(job, operation_fn, auto_decimate, islands, smart):
+    """Worker: pure meshlib (no bpy). Fills job.out / job.out_tags or raises."""
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    src = job.src
+
+    components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
+    if len(components) <= 1:
+        out = operation_fn(src, job.res)
+        if face_count(out) == 0:
+            raise MeshCollapsedError()
+        if auto_decimate:
+            out = _decimate(out, face_count(src), job.res, job.mode, job.ratio)
+        job.out = out
+        job.out_tags = np.full(face_count(out), _tag_index(job.res), dtype=np.int32)
+        job.voxels_used = [job.res] if job.res is not None else []
+        return
+
+    n_faces = src.topology.faceSize()
+    merged = mm.Mesh()
+    tags, voxels = [], []
+    for bitset in components:
+        island = mm.Mesh()
+        island.addMeshPart(mm.MeshPart(src, bitset))
+        res, ratio, mode = job.res, job.ratio, job.mode
+        if smart and job.face_tags is not None:
+            mask = mn.getNumpyBitSet(bitset)
+            mask = np.pad(mask, (0, max(0, n_faces - mask.size)))[:n_faces]
+            tag = _index_to_tag(_majority(job.face_tags[mask[:job.face_tags.size]]))
+            if tag:
+                res, ratio = RESOLUTION_PRESETS[tag]
+                mode = "VOXEL_RATIO"
+        check_cancelled()
+        try:
+            out = operation_fn(island, res)
+            if face_count(out) == 0:
+                raise MeshCollapsedError()
+        except JobCancelled:
+            raise
+        except Exception:
+            # An island that collapses (or that meshlib can't process) is dropped
+            # from the merged result; the rest of the object is still processed.
+            job.dropped += 1
+            continue
+        if auto_decimate:
+            out = _decimate(out, face_count(island), res, mode, ratio)
+        tags.append(np.full(face_count(out), _tag_index(res), dtype=np.int32))
+        if res is not None:
+            voxels.append(res)
+        merged.addMesh(out)
+    if face_count(merged) == 0:
+        raise MeshCollapsedError()
+    job.out = merged
+    job.out_tags = np.concatenate(tags) if tags else np.zeros(0, dtype=np.int32)
+    job.voxels_used = voxels
+
+
+class PipelineRun:
+    """One run of the pipeline, split into three steps so the meshlib part can
+    run on a background thread while Blender stays responsive:
+
+        prepare()  main thread  - read the Blender meshes
+        compute()  any thread   - meshlib only, cancellable
+        finish()   main thread  - write the results back into Blender
+    """
+
+    def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
+                 replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
+                 parallel=True):
+        s = settings or bpy.context.scene.quick_infill_settings
+        self.objects = list(objects)
+        self.operation_fn = operation_fn
+        self.suffix = output_suffix
+        self.resolution = resolution
+        self.auto_decimate = auto_decimate
+        self.replace = replace_original
+        self.settings = s
+        self.islands = s.process_islands if islands is None else islands
+        self.smart = s.smart_resolution if smart is None else smart
+        self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
+        self.parallel = parallel
+        self.jobs = []
+        self.pr = ProcessResult()
+        self.cancelled = False
+
+    # 1. main thread
+    def prepare(self):
+        depsgraph = bpy.context.evaluated_depsgraph_get() if self.apply_modifiers else None
+        for obj in self.objects:
+            job = _Job()
+            job.obj, job.name, job.dropped, job.error, job.out = obj, obj.name, 0, None, None
+            try:
+                job.src, job.face_map = blender_to_meshlib(obj, self.apply_modifiers, depsgraph, with_face_map=True)
+            except MeshCollapsedError as e:
+                self.pr.collapsed.append((obj, e))
+                continue
+            except Exception as e:
+                self.pr.errors.append((obj, e))
+                continue
+            job.res, job.ratio, job.mode = _effective_settings(obj, self.settings, self.resolution, self.smart)
+            job.face_tags = None
+            if self.islands and self.smart and job.face_map is not None:
+                poly_tags = read_face_tags(obj.data) if not self.apply_modifiers else None
+                if poly_tags is not None and poly_tags.size and job.face_map.max(initial=-1) < poly_tags.size:
+                    job.face_tags = poly_tags[job.face_map]
+            job.initial_verts = job.src.topology.numValidVerts()
+            self.jobs.append(job)
+        return self
+
+    # 2. any thread (no bpy)
+    def compute(self, control=None):
+        def work(job):
+            try:
+                if control is not None:
+                    control.check()
+                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart)
+            except Exception as e:  # recorded per job, handled on the main thread
+                job.error = e
+            finally:
+                if control is not None:
+                    control.item_done()
+
+        if self.parallel and len(self.jobs) > 1:
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(self.jobs))) as ex:
+                list(ex.map(work, self.jobs))
+        else:
+            for job in self.jobs:
+                work(job)
+        self.cancelled = any(isinstance(j.error, JobCancelled) for j in self.jobs) or \
+            (control is not None and control.cancelled)
+        return self
+
+    # 3. main thread
+    def finish(self):
+        """Write results back. After a cancel nothing is changed in the scene."""
+        pr = self.pr
+        if self.cancelled:
+            return pr
+        old_meshes = []
+        for job in self.jobs:
+            pr.dropped_islands += job.dropped
+            try:
+                job.obj.name  # the object may have been deleted while the job ran
+            except ReferenceError:
+                continue
+            if isinstance(job.error, MeshCollapsedError):
+                pr.collapsed.append((job.obj, job.error))
+                continue
+            if job.error is not None:
+                pr.errors.append((job.obj, job.error))
+                continue
+            try:
+                new_mesh = meshlib_to_blender_mesh(job.out, job.name + self.suffix)
+            except MeshCollapsedError as e:
+                pr.collapsed.append((job.obj, e))
+                continue
+            voxel = min(job.voxels_used) if job.voxels_used else self.resolution
+            write_mesh_resolution_tags(new_mesh, job.out_tags, remesh_voxel_size=voxel)
+            if self.replace:
+                old_meshes.append(swap_mesh_keep_transforms(job.obj, new_mesh))
+                result = job.obj
+            else:
+                result = link_new_object(job.name + self.suffix, new_mesh,
+                                         list(job.obj.users_collection) or [bpy.context.scene.collection])
+            set_object_resolution_label(result, _dominant_tag_label(job.out_tags))
+            pr.results.append((result, job.initial_verts, job.out.topology.numValidVerts()))
+
+        # One depsgraph update for the whole run, then free the replaced meshes.
+        if old_meshes:
+            free_unused_meshes(old_meshes)
+        else:
+            bpy.context.view_layer.update()
+        return pr
+
+
+def process_objects(objects, operation_fn, output_suffix, **kwargs):
+    """Run operation_fn(meshlib_mesh, voxel_size) -> meshlib_mesh on each object, synchronously.
+
+    - Islands: each loose part processed separately, then merged into one object.
+    - Smart: per object (or per island) voxel size + ratio from the resolution tag.
+    - Replace: the object keeps its transform and materials and gets the new mesh;
+      otherwise a new object named <name><suffix> is added to the same collections.
+    Objects are processed in parallel (meshlib releases the GIL); CUDA steps are
+    serialised inside cuda_offset. Returns a ProcessResult.
+    """
+    return PipelineRun(objects, operation_fn, output_suffix, **kwargs).prepare().compute().finish()
+
+
+# ---------------------------------------------------------------------------
+# Run-time estimate (asked before starting very long jobs)
+# ---------------------------------------------------------------------------
+#
+# How it works: a trial offset at a 4x coarser voxel (a few ms) measures how big
+# the real result will be (result faces = 16 x trial faces, accurate to ~1% on
+# 6,240 timed runs). The work is then priced with coefficients fitted on 168
+# real operator runs on Infill_Test.blend (Grow/Remesh/Trim Thin/Trim Edges on
+# the four test objects at all presets with Islands on and off, plus batches of
+# 12 and 48 wall pieces), RTX 5090 / Ryzen 9950X3D, Nov 2026. On those runs 99%
+# of predictions were within 2x of the real time. Held-out check on 53 different runs
+# (other wall pieces, Smart Res, Fix Undercuts): 79% within 1.25x, 91% within
+# 1.5x, all within 2x (worst 0.51x: Smart + Islands on a sculpt with mixed tags).
+# Fix Undercuts terms come from 1,088 per-direction timings (median 1.03x).
+# The estimate then keeps learning: see EstimateLearner below.
+
+COEF = {
+    "mvox": 0.0096,        # s per million voxels, per offset
+    "in_faces": 0.412,     # s per million input faces, per offset
+    "dec_single": 0.384,   # s per million result faces decimated on one thread (< 200k faces)
+    "bool_faces": 0.2036,  # s per million result faces, per voxel boolean
+    "bool_call": 0.0025,   # s per voxel boolean
+    "result": 0.1529,      # s per million result faces (decimation, write-back, tags)
+    "job": 0.12,           # s per job (operator overhead, scene update)
+    "object": 0.03,        # s per object
+    "island": 0.0158,      # s per island when Islands is on
+    "uc_mvox": 0.0124,     # Fix Undercuts: s per million voxels, per direction
+    "uc_in_faces": 0.41,   # Fix Undercuts: s per million input faces, per direction
+    "uc_call": 0.024,      # Fix Undercuts: s per direction
+}
+PROBE_FACTOR = 4.0          # trial voxel = 4x coarser -> 64x fewer voxels
+PROBE_MAX_MVOX = 20.0       # keep the trial itself fast on huge grids
+
+
+def _grid_mvox(lo, hi, voxel, grow):
+    ext = (np.asarray(hi) - np.asarray(lo)) + 2.0 * abs(grow) + 4.0 * voxel
+    return float(np.prod(np.ceil(np.maximum(ext, voxel) / voxel))) / 1e6
+
+
+class ToolCost:
+    """How much work a tool does per processed part (object or island)."""
+
+    def __init__(self, offsets=1, decimates=1, booleans=0, undercut_dirs=0, scale=1.0):
+        self.offsets = offsets
+        self.decimates = decimates
+        self.booleans = booleans
+        self.undercut_dirs = undercut_dirs
+        self.scale = scale  # fitted correction for work the terms don't capture
+
+
+GROW_LIKE = ToolCost()
+
+
+def object_parts(obj, voxel, grow=0.0, *, islands=False, apply_modifiers=False):
+    """[(million voxels, million input faces, million result faces)] per processed part."""
+    from .offset_utils import cuda_offset
+    mm, _ = get_meshlib()
+    src = blender_to_meshlib(obj, apply_modifiers)
+    box = src.computeBoundingBox()
+    mvox = _grid_mvox([box.min.x, box.min.y, box.min.z], [box.max.x, box.max.y, box.max.z], voxel, grow)
+    factor = PROBE_FACTOR * max(1.0, (mvox / PROBE_FACTOR ** 3 / PROBE_MAX_MVOX) ** (1.0 / 3.0))
+    probe = cuda_offset(src, voxel * factor, grow)
+    mfaces = face_count(probe) * factor * factor / 1e6
+    in_faces = face_count(src) / 1e6
+
+    comps = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
+    if len(comps) <= 1:
+        return [(mvox, in_faces, mfaces)]
+    total_in = max(1, face_count(src))
+    parts = []
+    for bs in comps:
+        b = src.computeBoundingBox(bs)
+        share = bs.count() / total_in
+        parts.append((_grid_mvox([b.min.x, b.min.y, b.min.z], [b.max.x, b.max.y, b.max.z], voxel, grow),
+                      in_faces * share, mfaces * share))
+    return parts
+
+
+def parts_seconds(parts, cost, decimate=True):
+    k = COEF
+    t = k["object"]
+    if len(parts) > 1:
+        t += k["island"] * len(parts)
+    for pv, pin, pf in parts:
+        t += cost.offsets * (k["mvox"] * pv + k["in_faces"] * pin)
+        t += cost.undercut_dirs * (k["uc_mvox"] * pv + k["uc_in_faces"] * pin + k["uc_call"])
+        t += cost.booleans * (k["bool_faces"] * pf + k["bool_call"])
+        if decimate and pf * 1e6 <= PARALLEL_DECIMATE_FACES:
+            t += cost.decimates * k["dec_single"] * pf
+        t += k["result"] * pf
+    return t * cost.scale
+
+
+def predict_object(obj, voxel, grow=0.0, *, islands=False, decimate=True, apply_modifiers=False, cost=GROW_LIKE):
+    return parts_seconds(object_parts(obj, voxel, grow, islands=islands, apply_modifiers=apply_modifiers), cost, decimate)
+
+
+def estimate_seconds(objects, voxel, *, grow=0.0, decimate=True, islands=False, cost=GROW_LIKE, apply_modifiers=False,
+                     smart=False):
+    """Predicted seconds for a job on `objects` (before learning; see EstimateLearner).
+
+    With Smart on, each object is priced at its own tagged voxel size, as the job will run it.
+    """
+    total = COEF["job"] * cost.scale
+    for obj in objects:
+        if obj.type != 'MESH' or len(obj.data.polygons) == 0:
+            continue
+        v = voxel
+        if smart:
+            tag = read_object_resolution_tag(obj)
+            if tag:
+                v = RESOLUTION_PRESETS[tag][0]
+        total += predict_object(obj, v, grow, islands=islands, decimate=decimate, cost=cost,
+                                apply_modifiers=apply_modifiers)
+    return total
+
+
+class EstimateLearner:
+    """Corrects estimates with this machine's real timings, per tool.
+
+    After each job that was estimated, actual/predicted is remembered (last 12
+    per tool, this Blender session); later estimates are multiplied by the
+    median of those ratios, clamped to 1/3x..3x.
+    """
+    _ratios = {}
+
+    @classmethod
+    def correct(cls, tool, seconds):
+        r = cls._ratios.get(tool)
+        if not r:
+            return seconds
+        return seconds * float(np.clip(np.median(r), 1 / 3, 3.0))
+
+    @classmethod
+    def record(cls, tool, predicted, actual):
+        if predicted > 0.05 and actual > 0.05:
+            r = cls._ratios.setdefault(tool, [])
+            r.append(actual / predicted)
+            del r[:-12]

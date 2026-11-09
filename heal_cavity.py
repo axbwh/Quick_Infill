@@ -1,127 +1,156 @@
+"""
+Create Cavity Infill: builds an infill object (<name>Infill) that fills
+resin-trapping cavities. Uses the Infill settings (resolution, grow, shrink
+multiplier, working resolution), which are separate from the voxel tools.
+"""
+
 import bpy
 from bpy.types import Operator
-from .offset_utils import cuda_offset, weighted_dist_shell, compute_voxel_size
-from .blender_meshlib_utils import (
-    blender_to_meshlib,
-    blender_to_meshlib_via_stl,
-    meshlib_to_blender,
-    meshlib_to_blender_via_stl,
-    move_object_to_collections,
-)
 
-class QUICKINFILL_OT_heal_cavity(Operator):
+from .meshlib_utils import get_meshlib
+from .offset_utils import (
+    cuda_offset, weighted_dist_shell, compute_voxel_size, decimate_mesh,
+    should_auto_decimate_cavity_faces, face_count,
+)
+from .blender_meshlib_utils import (
+    blender_to_meshlib, meshlib_to_blender_mesh, link_new_object, select_results, estimate_seconds, ToolCost,
+)
+from .meshlib_utils import JobCancelled
+from .job_runner import ModalJobMixin, JobSpec
+
+
+def build_infill(src_mesh, s, report=None):
+    """meshlib mesh in -> infill meshlib mesh out, using the Infill settings `s`."""
+    mm, _ = get_meshlib()
+    working_res = int(float(s.target_res) * 1_000_000)
+    resolution = float(s.resolution)
+    grow = float(s.grow)
+    shrink_mult = float(s.shrink_mult)
+
+    initial_faces = face_count(src_mesh)
+    initial_verts = src_mesh.topology.numValidVerts()
+    if initial_verts > working_res:
+        src_mesh = decimate_mesh(src_mesh, reduction_ratio=working_res / initial_verts)
+        if report:
+            report({'INFO'}, f"Decimated mesh: {initial_verts} → {src_mesh.topology.numValidVerts()} vertices")
+
+    vox = resolution if s.voxel_mode == 'RESOLUTION' else compute_voxel_size(src_mesh, working_res, resolution)
+
+    if s.method == "NAIVE":
+        grown = cuda_offset(src_mesh, vox, grow)
+        out = cuda_offset(grown, vox, -grow * shrink_mult)
+    else:
+        grown = cuda_offset(src_mesh, vox, grow)
+        shrunk = cuda_offset(grown, vox, -grow)
+        shell = weighted_dist_shell(shrunk, src_mesh, vox, shrink_mult, max_vertices=working_res, target_resolution=working_res)
+        out = mm.boolean(shrunk, shell, mm.BooleanOperation.DifferenceAB).mesh
+
+    if s.trim_thin:
+        out = cuda_offset(cuda_offset(out, vox, -vox), vox, vox)
+
+    do, target = should_auto_decimate_cavity_faces(initial_faces, face_count(out))
+    if do:
+        out = decimate_mesh(out, target_face_count=target, resolution=vox)
+    return out
+
+
+class _InfillSettingsSnapshot:
+    """Plain copy of the Infill settings, safe to read from the worker thread."""
+
+    def __init__(self, s):
+        for k in ("target_res", "resolution", "grow", "shrink_mult", "voxel_mode", "method", "trim_thin"):
+            setattr(self, k, getattr(s, k))
+
+
+class QUICKINFILL_OT_heal_cavity(ModalJobMixin, Operator):
     bl_idname = "quick_infill.heal_cavity"
     bl_label = "Heal Cavity"
-    bl_description = "Generate infill for selected mesh using CUDA offset operations"
+    bl_description = "Generate an infill object for each selected mesh using CUDA offset operations"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        try:
-            # Safe meshlib import
-            from .meshlib_utils import get_meshlib
-            mm, mc = get_meshlib()
-            
-            # Read settings from Scene to avoid _PropertyDeferred
-            s = getattr(context.scene, 'quick_infill_settings', None)
-            # Coerce robustly with fallbacks
-            def _cf(v, d):
+    def _objects(self, context):
+        objs = [o for o in context.selected_objects if o.type == 'MESH']
+        # Active object first, so a single click behaves as before.
+        if context.active_object in objs:
+            objs.remove(context.active_object)
+            objs.insert(0, context.active_object)
+        return objs
+
+    def job_estimate(self, context):
+        mm, _ = get_meshlib()
+        s = context.scene.quick_infill_settings
+        # Naive: grow + shrink; Accurate: grow + shrink + weighted shell + boolean; Trim Thin: 2 more offsets.
+        offsets = (2 if s.method == 'NAIVE' else 3) + (2 if s.trim_thin else 0)
+        # scale: fitted on 16 real runs (the weighted shell's cost isn't in the shared terms)
+        cost = ToolCost(offsets=offsets, decimates=1, booleans=0 if s.method == 'NAIVE' else 1,
+                        scale=0.53 if s.method == 'NAIVE' else 4.08)
+        total = 0.0
+        for obj in self._objects(context):
+            vox = float(s.resolution)
+            if s.voxel_mode == 'TARGET_VOXELS':
+                src = blender_to_meshlib(obj, s.apply_modifiers_on_export)
+                vox = max(float(mm.suggestVoxelSize(mm.MeshPart(src), float(s.target_res) * 1e6)), vox)
+            total += estimate_seconds([obj], vox, grow=float(s.grow), cost=cost, apply_modifiers=s.apply_modifiers_on_export)
+        return total
+    def job_setup(self, context):
+        s = context.scene.quick_infill_settings
+        objs = self._objects(context)
+        if not objs:
+            self.report({'ERROR'}, "No mesh selected.")
+            return None
+        snap = _InfillSettingsSnapshot(s)
+        apply_mods = s.apply_modifiers_on_export
+        state = {"inputs": [], "outputs": [], "failed": [], "notes": []}
+
+        def prepare():
+            for obj in objs:
                 try:
-                    return float(v)
-                except Exception:
-                    return float(d)
+                    state["inputs"].append((obj, obj.name, blender_to_meshlib(obj, apply_mods)))
+                except Exception as e:
+                    state["failed"].append((obj.name, e))
 
-            # New UI uses millions input (0.5 - 2.0). Convert to absolute count.
-            # target_res drives both voxel count and decimation limit (~1M vertices)
-            target_res_millions = getattr(s, 'target_res', 2.0)
-            target_voxels_val = int(float(target_res_millions) * 1_000_000)
-            max_vertices_limit = int(float(target_res_millions) * 1_000_000)  # Use same limit for decimation
+        def compute(control):
+            for obj, name, src in state["inputs"]:
+                try:
+                    if control is not None:
+                        control.check()
+                    out = build_infill(src, snap, lambda lvl, msg: state["notes"].append(msg))
+                    if face_count(out) == 0:
+                        raise RuntimeError("the infill came out empty")
+                    state["outputs"].append((obj, name, out))
+                except JobCancelled:
+                    raise
+                except Exception as e:
+                    state["failed"].append((name, e))
+                    print(f"[Quick Infill] Heal Cavity error on '{name}': {e}")
+                finally:
+                    if control is not None:
+                        control.item_done()
 
-            resolution_val = _cf(getattr(s, 'resolution', 0.1), 0.1)
-            voxel_mode = getattr(s, 'voxel_mode', 'TARGET_VOXELS')
-            grow_val = _cf(getattr(s, 'grow', 2.0), 2.0)
-            shrink_mult_val = _cf(getattr(s, 'shrink_mult', 1.5), 1.5)
-            method = getattr(s, 'method', 'NAIVE')
-            trim_thin_val = getattr(s, 'trim_thin', False)
+        def finish():
+            created = []
+            for obj, name, out in state["outputs"]:
+                try:
+                    colls = list(obj.users_collection) or [bpy.context.scene.collection]
+                except ReferenceError:
+                    colls = [bpy.context.scene.collection]
+                created.append(link_new_object(name + "Infill", meshlib_to_blender_mesh(out, name + "Infill"), colls))
+            bpy.context.view_layer.update()
+            for msg in state["notes"]:
+                self.report({'INFO'}, msg)
+            if created:
+                select_results(created)
+                self.report({'INFO'}, "Heal Cavity completed. Created " + ", ".join(f"'{o.name}'" for o in created))
+            if state["failed"]:
+                self.report({'ERROR'}, "Heal Cavity failed: " + "; ".join(f"{n}: {e}" for n, e in state["failed"][:3]))
+            return {'FINISHED'} if created else {'CANCELLED'}
 
-
-            # Get selected mesh
-            selected_objs = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            if not selected_objs:
-                self.report({'ERROR'}, "No mesh selected.")
-                return {'CANCELLED'}
-
-            src_mesh_blender = selected_objs[0]
-            # Convert to meshlib; fallback to STL route for very dense meshes
-            apply_modifiers = bool(getattr(s, 'apply_modifiers_on_export', False))
-            src_mesh = blender_to_meshlib_via_stl(src_mesh_blender, apply_modifiers=apply_modifiers)
-            INITIAL_VERTEX_COUNT = src_mesh.topology.numValidVerts()
-            INITIAL_FACE_COUNT = src_mesh.topology.numValidFaces()
-            print(f"Initial mesh: {INITIAL_VERTEX_COUNT} vertices, {INITIAL_FACE_COUNT} faces")
-            
-            # Decimate if mesh exceeds target resolution limit
-            if INITIAL_VERTEX_COUNT > max_vertices_limit:
-                from .offset_utils import decimate_mesh
-                reduction_ratio = max_vertices_limit / INITIAL_VERTEX_COUNT
-                src_mesh = decimate_mesh(src_mesh, reduction_ratio=reduction_ratio)
-                new_vertex_count = src_mesh.topology.numValidVerts()
-                print(f"Decimated mesh from {INITIAL_VERTEX_COUNT} to {new_vertex_count} vertices (target: {max_vertices_limit})")
-                self.report({'INFO'}, f"Decimated mesh: {INITIAL_VERTEX_COUNT} → {new_vertex_count} vertices")
-
-            obj_name = src_mesh_blender.name
-
-            # Calculate voxel size via helper or direct, based on mode
-            if voxel_mode == 'RESOLUTION':
-                vox = float(resolution_val)
-            else:
-                vox = compute_voxel_size(src_mesh, int(target_voxels_val), float(resolution_val))
-            print(f"Voxel Size: {vox}")
-
-            if method == "NAIVE":
-                grow_mesh = cuda_offset(src_mesh, vox, grow_val)
-                shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val*shrink_mult_val)
-                # Smooth step: shrink then grow by one voxel to clean artifacts
-                out_mesh = shrink_mesh
-            else:
-                # Use helpers from offset_utils
-                # Process mesh
-                grow_mesh = cuda_offset(src_mesh, vox, grow_val)
-                shrink_mesh = cuda_offset(grow_mesh, vox, -grow_val)
-                shell_mesh = weighted_dist_shell(shrink_mesh, src_mesh, vox, shrink_mult_val, max_vertices=max_vertices_limit, target_resolution=int(target_res_millions * 1_000_000))
-                trim_mesh = mm.boolean(shrink_mesh, shell_mesh, mm.BooleanOperation.DifferenceAB).mesh
-                out_mesh = trim_mesh
-
-            # Apply trimThin if enabled
-            if trim_thin_val:
-                ss_mesh_shrink = cuda_offset(out_mesh, vox, -vox)
-                out_mesh = cuda_offset(ss_mesh_shrink, vox, vox)
-            
-            # Decimate output mesh if face count increased significantly
-            from .offset_utils import decimate_mesh, should_auto_decimate_cavity_faces
-            final_face_count = out_mesh.topology.numValidFaces()
-            do_decimate, target_faces = should_auto_decimate_cavity_faces(INITIAL_FACE_COUNT, final_face_count)
-            if do_decimate:
-                out_mesh = decimate_mesh(out_mesh, target_face_count=target_faces, resolution=vox)
-                new_final_count = out_mesh.topology.numValidFaces()
-                print(f"Decimated output mesh from {final_face_count} to {new_final_count} faces (target: {target_faces})")
-                self.report({'INFO'}, f"Decimated result: {final_face_count} → {new_final_count} faces")
-        
-            infill_obj = meshlib_to_blender_via_stl(out_mesh, obj_name + "Infill", import_scale=0.1)
-            move_object_to_collections(infill_obj, list(src_mesh_blender.users_collection) or [bpy.context.scene.collection])
-
-            self.report({'INFO'}, f"Heal Cavity completed. Created '{obj_name}Infill'")
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Heal Cavity failed: {e}")
-            print(f"[Quick Infill] Heal Cavity error: {e}")
-            return {'CANCELLED'}
+        return JobSpec(prepare, compute, finish, items=len(objs))
 
 
 def register():
-    import bpy
     bpy.utils.register_class(QUICKINFILL_OT_heal_cavity)
 
 
 def unregister():
-    import bpy
     bpy.utils.unregister_class(QUICKINFILL_OT_heal_cavity)

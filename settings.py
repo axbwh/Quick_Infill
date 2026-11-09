@@ -153,9 +153,11 @@ class QuickInfillSettings(PropertyGroup):
     # ----- Remove Scoop (support tools) -----
     scoop_method: EnumProperty(
         name="Method",
-        items=(('VIEW', "View", "Cut where the scoop ends, seen looking down at each side of the stone at the View Angle"),
+        items=(('FILL', "Fill", "Delete the faces no 35-degree side view can see (the scoop) and fill the hole smoothly, "
+                                "like repairing a 3D-scan defect (no flat cut)"),
+               ('VIEW', "View", "Cut flat where the scoop ends, seen looking down at each side of the stone at the View Angle"),
                ('CONTACT', "Contact", "Cut where a flat cut covers the Contact share of the stone's footprint")),
-        default='VIEW',
+        default='FILL',
     )
     scoop_angle: FloatProperty(
         name="View Angle", description="Look down at each side of the stone at this angle: the scoop hides under the face",

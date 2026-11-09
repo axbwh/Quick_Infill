@@ -187,6 +187,114 @@ def view_cut_height(v, faces, angle=35.0, share=0.5):
     return min(cut, MAX_CUT, MAX_CUT_SHARE * H)
 
 
+def _rect_axes(xy):
+    """Unit axes (u, w) of the smallest bounding rectangle of 2D points."""
+    h = _hull2d(xy)
+    best = None
+    for i in range(len(h)):
+        e = h[(i + 1) % len(h)] - h[i]
+        n = float(np.linalg.norm(e))
+        if n < 1e-9:
+            continue
+        u = e / n
+        w = np.array([-u[1], u[0]])
+        a = float(np.ptp(h @ u) * np.ptp(h @ w))
+        if best is None or a < best[0]:
+            best = (a, u, w)
+    return (best[1], best[2]) if best else (np.array([1.0, 0.0]), np.array([0.0, 1.0]))
+
+
+def fill_scoop_object(obj, angle=35.0, low_share=0.5, smooth=True):
+    """Alex 2026-11-09: not a flat cut. Look down at each island from its four sides at `angle`
+    (meshlib FixUndercuts.find with the up direction tilted towards that side, the same test
+    Fix Undercuts uses); faces none of the four views can see, in the lower `low_share` of the
+    stone, are the scoop. They are deleted and the hole is filled smoothly with meshlib's
+    fillHoleNicely, the way a 3D-scan defect is repaired. New faces get the sp_cut attribute.
+    Replaces obj's mesh (world-space round trip). Returns the number of faces removed."""
+    import math
+    from .meshlib_utils import get_meshlib, get_mrmeshnumpy
+    from .blender_meshlib_utils import blender_to_meshlib, meshlib_to_blender_mesh, swap_mesh_keep_transforms
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    mesh, face_map = blender_to_meshlib(obj, with_face_map=True)
+    V = mn.getNumpyVerts(mesh).astype(np.float64)
+    F = mn.getNumpyFaces(mesh.topology).astype(np.int64)
+    nf = len(F)
+    # islands on the triangle list (union-find on shared vertices)
+    parent = np.arange(len(V))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b, c in F:
+        ra, rb, rc = find(a), find(b), find(c)
+        parent[rb] = ra
+        parent[find(rc)] = ra
+    root = np.array([find(a) for a in F[:, 0]])
+    ang = math.radians(angle)
+    scoop = np.zeros(nf, bool)
+    cz = V[F].mean(1)[:, 2]
+    for r in np.unique(root):
+        fi = np.nonzero(root == r)[0]
+        vi = np.unique(F[fi])
+        u, w = _rect_axes(V[vi, :2])
+        hidden = np.ones(nf, bool)
+        for side in (w, -w, u, -u):
+            up = mm.Vector3f(float(-side[0] * math.cos(ang)), float(-side[1] * math.cos(ang)), float(math.sin(ang)))
+            fp = mm.FixUndercuts.FindParams() if hasattr(mm.FixUndercuts, 'FindParams') else mm.FixUndercuts.FixParams().findParameters
+            fp.upDirection = up
+            bs = mm.FaceBitSet()
+            mm.FixUndercuts.find(mesh, fp, bs)
+            und = np.zeros(nf, bool)
+            for f in range(nf):
+                if bs.test(mm.FaceId(f)):
+                    und[f] = True
+            hidden &= und
+        z0, z1 = V[vi, 2].min(), V[vi, 2].max()
+        sel = np.zeros(nf, bool)
+        sel[fi] = True
+        scoop |= sel & hidden & (cz <= z0 + low_share * (z1 - z0))
+    n_del = int(scoop.sum())
+    if not n_del:
+        return 0
+    bs = mm.FaceBitSet()
+    bs.resize(nf, False)
+    for f in np.nonzero(scoop)[0]:
+        bs.set(mm.FaceId(int(f)), True)
+    mesh.topology.deleteFaces(bs)
+    # fill every hole smoothly
+    edges = np.linalg.norm(V[F[:, 0]] - V[F[:, 1]], axis=1)
+    st = mm.FillHoleNicelySettings()
+    st.smoothCurvature = bool(smooth)
+    try:
+        st.subdivideSettings.maxEdgeLen = float(np.median(edges))
+    except Exception:
+        pass
+    patch = []
+    for e in mesh.topology.findHoleRepresentiveEdges():
+        try:
+            pf = mm.fillHoleNicely(mesh, e, st)
+            patch.append(pf)
+        except Exception as ex:
+            print("Remove Scoop fill", ex)
+    valid = mesh.topology.getValidFaces()
+    tags = []
+    for f in range(mesh.topology.faceSize()):
+        fid = mm.FaceId(f)
+        if valid.test(fid):
+            tags.append(any(pf.size() > f and pf.test(fid) for pf in patch))
+    me = meshlib_to_blender_mesh(mesh, obj.name)
+    if len(me.polygons) == len(tags):
+        at = me.attributes.new(CUT_ATTR, 'BOOLEAN', 'FACE')
+        at.data.foreach_set('value', np.array(tags, bool))
+    old = swap_mesh_keep_transforms(obj, me)
+    if old.users == 0:
+        bpy.data.meshes.remove(old)
+    return n_del
+
+
 def _islands(bm):
     """Vertex lists of each connected part."""
     bm.verts.index_update()
@@ -330,6 +438,10 @@ def remove_scoop_objects(context, objs, s):
             me.name = obj.name + "_NoScoop"
             target_obj = link_new_object(obj.name + "_NoScoop", me, list(obj.users_collection) or [context.scene.collection])
             target_obj.matrix_world = obj.matrix_world.copy()
+        if s.scoop_method == 'FILL':
+            islands += 1 if fill_scoop_object(target_obj, float(s.scoop_angle)) else 0
+            results.append(target_obj)
+            continue
         bm = bmesh.new()
         bm.from_mesh(me)
         islands += remove_scoop_bmesh(bm, obj.matrix_world, target, offset, s.scoop_method,
@@ -381,7 +493,9 @@ def draw_remove_scoop(col, s):
     col.separator()
     col.label(text="Remove Scoop:")
     col.row(align=True).prop(s, "scoop_method", expand=True)
-    if s.scoop_method == 'VIEW':
+    if s.scoop_method == 'FILL':
+        col.prop(s, "scoop_angle", text="View Angle")
+    elif s.scoop_method == 'VIEW':
         col.prop(s, "scoop_angle", text="View Angle")
         col.prop(s, "scoop_share", text="Bottom Line", slider=True)
     else:

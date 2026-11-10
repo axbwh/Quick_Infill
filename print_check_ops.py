@@ -166,9 +166,10 @@ class QUICKINFILL_OT_seal_cavities(ModalJobMixin, Operator):
 class QUICKINFILL_OT_make_manifold(Operator):
     bl_idname = "quick_infill.make_manifold"
     bl_label = "Make Manifold"
-    bl_description = ("Unite the selected objects (stones, blank, infill, plugs) into ONE watertight object with "
-                      "Blender's Manifold solver, optionally cut it at the build plate, then repair self-intersections "
-                      "and zero-size faces with meshlib. The originals are kept; the result is '<active>_Solid'")
+    bl_description = ("Unite the selected objects (stones, infill, plugs) into ONE watertight object with Blender's "
+                      "Manifold solver, repair self-intersections and zero-size faces with meshlib, then make the flat "
+                      "cuts last (Intersect With blank, Cut at Plate) so they stay flat. The originals are kept; the "
+                      "result is '<active>_Solid'")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -177,9 +178,10 @@ class QUICKINFILL_OT_make_manifold(Operator):
 
     def execute(self, context):
         s = context.scene.quick_infill_settings
-        objs = _model_objects(context)
+        blank_obj = s.manifold_blank if (s.manifold_blank is not None and s.manifold_blank.type == 'MESH') else None
+        objs = [o for o in _model_objects(context) if o != blank_obj]
         if not objs:
-            self.report({'ERROR'}, "No mesh selected.")
+            self.report({'ERROR'}, "No mesh selected (apart from the blank).")
             return {'CANCELLED'}
         active = context.active_object if context.active_object in objs else objs[0]
         name = active.name + "_Solid"
@@ -187,10 +189,13 @@ class QUICKINFILL_OT_make_manifold(Operator):
         notes = []
         try:
             meshes = [blender_to_meshlib(o, s.apply_modifiers_on_export) for o in objs]
+            # the blank is read as you see it: with its modifiers
+            blank = blender_to_meshlib(blank_obj, True) if blank_obj is not None else None
             # with "Lowest Point" the plate already touches the model: nothing to cut
             plate = 0.0 if (s.manifold_cut_plate and s.check_plate == 'Z0') else None
-            out, health = make_manifold.make_manifold(meshes, plate_z=plate, open_shell_voxel=float(s.check_voxel) * 0.5,
-                                                      log=notes.append)
+            out, health, flat = make_manifold.make_manifold(meshes, plate_z=plate, blank=blank,
+                                                            open_shell_voxel=float(s.check_voxel) * 0.5,
+                                                            log=notes.append)
         except JobCancelled:
             self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
             return {'CANCELLED'}
@@ -204,6 +209,8 @@ class QUICKINFILL_OT_make_manifold(Operator):
         select_results([ob])
         for n in notes:
             self.report({'INFO'}, "Make Manifold: " + n)
+        if flat is not None:
+            self.report({'INFO'} if flat.flat() else {'WARNING'}, "Make Manifold: " + flat.text())
         if health.clean():
             self.report({'INFO'}, f"Make Manifold: '{ob.name}' is {health.text()}")
         else:
@@ -229,6 +236,7 @@ def draw_print_check(layout, context):
     row = col.row(align=True)
     row.operator("quick_infill.make_manifold", text="Make Manifold", icon='MESH_CUBE')
     row.prop(s, "manifold_cut_plate", text="Cut at Plate", toggle=True)
+    col.prop(s, "manifold_blank", text="Intersect With")
 
 
 classes = (

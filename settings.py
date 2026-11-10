@@ -240,6 +240,12 @@ class QuickInfillSettings(PropertyGroup):
         name="Cut at Plate", description="Make Manifold also cuts the result flat at the build plate (world Z = 0)",
         default=True,
     )
+    manifold_blank: PointerProperty(
+        name="Intersect With", type=bpy.types.Object,
+        description="Optional blank: Make Manifold intersects the united result with this object (read with its "
+                    "modifiers), after the repair, so the blank's flat faces stay flat",
+        poll=lambda self, ob: ob.type == 'MESH',
+    )
     check_result_cavities: StringProperty(default="", options={'SKIP_SAVE'})
     check_result_cups: StringProperty(default="", options={'SKIP_SAVE'})
     check_result_islands: StringProperty(default="", options={'SKIP_SAVE'})

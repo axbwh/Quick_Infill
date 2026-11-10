@@ -73,7 +73,9 @@ Sidebar > Quick Infill > Print Check. Select everything that prints as one piece
 - **Seal Cavities** adds a `<active>_Plugs` object that fills every sealed cavity. Sealed cavities cannot be seen from
   outside, so nothing visible changes.
 - **Make Manifold** unites the selection into one watertight `<active>_Solid` object (Blender's Manifold solver on
-  clean copies, optional cut at Z = 0), then repairs self-intersections and zero-size faces with meshlib.
+  clean copies), repairs self-intersections and zero-size faces with meshlib, and makes the flat cuts LAST
+  (*Intersect With* a blank, *Cut at Plate*), so a repair can never pull the bottom out of flat. It reports how much
+  of the bottom lies on the plate.
 - *Min Drain Gap*: openings narrower than this count as closed. 0 is what a slicer reports.
 
 `fill_support.fill_and_support(mesh, wall_dir, plate_z)` runs the whole wall-face recipe (meshes A to H of the stone

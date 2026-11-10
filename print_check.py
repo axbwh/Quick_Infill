@@ -19,6 +19,35 @@ winding number, so open, overlapping and self-intersecting meshes are fine.
 Sizes are in meshlib space (mm for Alex's files: Blender units x 10).
 
 The analysis itself is plain numpy (no bpy), so it can run on a worker thread.
+
+Where the method comes from
+---------------------------
+The layer-by-layer test is the one resin slicers use, and it was checked
+against the published sources:
+
+  * UVtools (open source, sn4k3/UVtools, IssueManager.cs) finds "resin traps"
+    and "suction cups" in two passes over the sliced layers: bottom-up it
+    keeps a map of air and marks every closed hollow of a layer that does not
+    overlap air from the layer below; top-down it re-tests those against air
+    from above. Open above = suction cup, closed both ways = resin trap. It
+    drops traps that touch the first layer ("Not a trap if on plate"), and it
+    needs a minimum number of overlapping pixels before it calls a hollow
+    drained. Here: `sealed` = its resin trap, `cups` = its suction cup,
+    `plate pockets` = the on-plate case it drops, `drain_gap` = its
+    minimum-overlap rule done in 3D on the distance field.
+  * Manners and Smalley, US patent 5,945,058 (3D Systems, 1999), is the oldest
+    description: holes of layer N are intersected with the trapped region of
+    layer N-1, tracked layer to layer, and openings narrower than about
+    0.5 to 2 mm are treated as closed because resin does not flow through.
+  * Tedia and Williams, "Manufacturability analysis tool for additive
+    manufacturing using voxel-based geometric modeling" (Solid Freeform
+    Fabrication Symposium 2016), does the same for voids that trap powder,
+    resin or support material by filling a voxel model from outside.
+  * CHITUBOX's own manual only says its Cavity Detection finds "enclosed
+    pockets or voids" that cause "vacuum effects": sealed + cups here.
+
+The difference from UVtools is the grid: it reads the printer's pixels
+(0.02 to 0.05 mm), this reads voxels of `voxel` size (0.2 mm by default).
 """
 
 import numpy as np
@@ -324,8 +353,10 @@ class Report:
         self.voxel = 0.0
         self.grid = None
         self.masks = {}
-        self.sealed_volume = 0.0
+        self.sealed_volume = 0.0          # sealed for good: no opening at all, not even at the plate
         self.sealed_count = 0
+        self.pocket_volume = 0.0          # sealed only by the build plate: opens when the print comes off it
+        self.pocket_count = 0
         self.cup_volume = 0.0
         self.cup_max_depth = 0.0
         self.island_count = 0
@@ -341,10 +372,12 @@ class Report:
         return 100.0 * self.contact_area / self.footprint_area if self.footprint_area > 0 else 0.0
 
     def ok(self):
-        return self.sealed_count == 0 and self.island_count == 0 and self.contact_percent >= 99.5
+        return (self.sealed_count == 0 and self.pocket_count == 0 and self.island_count == 0
+                and self.contact_percent >= 99.5)
 
     def summary(self):
-        return (f"sealed cavities {self.sealed_count} ({self.sealed_volume:.1f} mm3), "
+        return (f"sealed cavities {self.sealed_count} ({self.sealed_volume:.2f} mm3), "
+                f"plate pockets {self.pocket_count} ({self.pocket_volume:.2f} mm3), "
                 f"cups {self.cup_volume:.1f} mm3 (deepest {self.cup_max_depth:.1f} mm), "
                 f"islands {self.island_count} ({self.island_area:.1f} mm2, {self.unsupported_volume:.1f} mm3 unsupported), "
                 f"ledges {self.ledge_area:.1f} mm2, "
@@ -416,8 +449,17 @@ def check(meshes, voxel=0.2, plate_z=None, min_cup_depth=1.0, ledge=1.0, strip=4
     r.seconds["trapped"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    # Sealed space that reaches the first layer is closed only by the build plate:
+    # it opens when the print is taken off (UVtools does not report it at all).
+    # It still matters here, because it means the bottom is not flat on the plate.
+    seed = np.zeros_like(sealed)
+    seed[0] = sealed[0]
+    pockets = flood3d(seed, sealed) if seed.any() else seed
+    sealed = sealed & ~pockets
     r.sealed_volume = g.volume(sealed)
     r.sealed_count = count_blobs(sealed, h, min_cavity)
+    r.pocket_volume = g.volume(pockets)
+    r.pocket_count = count_blobs(pockets, h, min_cavity)
     r.cup_volume = g.volume(cups)
     r.cup_max_depth = float(depth.max()) * h if cups.any() else 0.0
 
@@ -437,7 +479,7 @@ def check(meshes, voxel=0.2, plate_z=None, min_cup_depth=1.0, ledge=1.0, strip=4
     missing[0] = footprint & ~contact
     r.seconds["analyse"] = time.perf_counter() - t0
 
-    r.masks = {"sealed": sealed, "cups": cups, "islands": islands2, "unsupported": unsupported,
+    r.masks = {"sealed": sealed, "plate_pockets": pockets, "cups": cups, "islands": islands2, "unsupported": unsupported,
                "ledges": ledges, "no_contact": missing}
     return r
 

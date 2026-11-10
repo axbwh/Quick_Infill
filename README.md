@@ -77,6 +77,9 @@ Sidebar > Quick Infill > Print Check. Select everything that prints as one piece
   (*Intersect With* a blank, *Cut at Plate*), so a repair can never pull the bottom out of flat. It reports how much
   of the bottom lies on the plate.
 - *Min Drain Gap*: openings narrower than this count as closed. 0 is what a slicer reports.
+- Sealed space that reaches the first layer is listed apart as *plate pockets* (`PC_PlatePockets`, pink): it is closed
+  only by the build plate and opens when the print comes off. The method follows UVtools' resin trap / suction cup
+  detection and the 3D Systems trapped-volume patent (US 5,945,058); see the notes at the top of `print_check.py`.
 
 `fill_support.fill_and_support(mesh, wall_dir, plate_z)` runs the whole wall-face recipe (meshes A to H of the stone
 builder notes) in memory; it has no button here, it is meant to be called by the stone packer.

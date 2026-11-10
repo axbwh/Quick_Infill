@@ -21,6 +21,7 @@ MARKER_MAX_FACES = 200_000
 # name, mask key, object colour
 MARKERS = (
     ("PC_Sealed", "sealed", (1.0, 0.05, 0.05, 1.0)),
+    ("PC_PlatePockets", "plate_pockets", (1.0, 0.1, 0.6, 1.0)),
     ("PC_Cups", "cups", (1.0, 0.45, 0.0, 1.0)),
     ("PC_Islands", "islands", (1.0, 0.9, 0.0, 1.0)),
     ("PC_Ledges", "ledges", (0.6, 0.2, 1.0, 1.0)),
@@ -103,7 +104,8 @@ class QUICKINFILL_OT_print_check(ModalJobMixin, Operator):
                 ob.hide_select = False
             bpy.context.view_layer.update()
             st = scene.quick_infill_settings
-            st.check_result_cavities = f"Sealed cavities: {rep.sealed_count}  ({rep.sealed_volume:.2f} mm³)"
+            st.check_result_cavities = (f"Sealed cavities: {rep.sealed_count}  ({rep.sealed_volume:.2f} mm³), "
+                                        f"plate pockets: {rep.pocket_count}  ({rep.pocket_volume:.2f} mm³)")
             st.check_result_cups = f"Suction cups: {rep.cup_volume:.1f} mm³, deepest {rep.cup_max_depth:.1f} mm"
             st.check_result_islands = (f"Islands: {rep.island_count}  ({rep.island_area:.1f} mm²), "
                                        f"ledges {rep.ledge_area:.1f} mm²")

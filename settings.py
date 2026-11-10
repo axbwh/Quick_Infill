@@ -13,7 +13,7 @@ are not shared with the voxel tools.
 
 import bpy
 from bpy.types import PropertyGroup
-from bpy.props import FloatProperty, BoolProperty, EnumProperty, PointerProperty
+from bpy.props import FloatProperty, BoolProperty, EnumProperty, PointerProperty, StringProperty
 
 from .offset_utils import OFFSET_PRESETS, INFILL_PRESETS, ANGLE_PRESETS
 
@@ -219,11 +219,38 @@ class QuickInfillSettings(PropertyGroup):
         default="BUILDING_ACCURATE", options={'HIDDEN'},
     )
 
+    # ----- Print Check / Seal Cavities / Make Manifold -----
+    check_voxel: FloatProperty(
+        name="Check Voxel", description="Voxel size (and layer height) Print Check and Seal Cavities look at the model with, in mm",
+        default=0.2, min=0.05, max=1.0, precision=3,
+    )
+    check_drain_gap: FloatProperty(
+        name="Min Drain Gap",
+        description="Openings narrower than this (mm) count as closed, because resin does not drain through them. "
+                    "0 = only cavities with no opening at all, which is what a slicer reports",
+        default=0.0, min=0.0, max=2.0, precision=2,
+    )
+    check_plate: EnumProperty(
+        name="Build Plate",
+        items=[("Z0", "Plate at Z = 0", "The model is cut at world Z = 0 and printed on that face"),
+               ("LOWEST", "Lowest Point", "The plate touches the lowest point of the selection")],
+        default="Z0",
+    )
+    manifold_cut_plate: BoolProperty(
+        name="Cut at Plate", description="Make Manifold also cuts the result flat at the build plate (world Z = 0)",
+        default=True,
+    )
+    check_result_cavities: StringProperty(default="", options={'SKIP_SAVE'})
+    check_result_cups: StringProperty(default="", options={'SKIP_SAVE'})
+    check_result_islands: StringProperty(default="", options={'SKIP_SAVE'})
+    check_result_contact: StringProperty(default="", options={'SKIP_SAVE'})
+
     # ----- UI state -----
     show_voxel_tools_menu: BoolProperty(name="Show Voxel Tools", default=True)
     show_infill_tools_menu: BoolProperty(name="Show Infill Tools", default=True)
     show_tools: BoolProperty(name="Show Offset Tools", default=False)
     show_support_tools: BoolProperty(name="Show Support Tools", default=False)
+    show_print_check: BoolProperty(name="Show Print Check", default=True)
 
 
 def get_settings(context=None):

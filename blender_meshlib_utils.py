@@ -213,6 +213,10 @@ def blender_to_meshlib(obj, apply_modifiers=False, depsgraph=None, with_face_map
         mw = np.array(obj.matrix_world, dtype=np.float64)
         verts = (verts @ mw[:3, :3].T + mw[:3, 3]) * STL_EXPORT_SCALE
         tris, tri_polys = _triangles(me)
+        # A mirrored object (negative scale) would arrive inside-out: meshlib then
+        # reads it as a hole and the voxel tools drop it. Turn its triangles over.
+        if np.linalg.det(mw[:3, :3]) < 0:
+            tris = np.ascontiguousarray(tris[:, ::-1])
     finally:
         if eval_obj is not None:
             eval_obj.to_mesh_clear()

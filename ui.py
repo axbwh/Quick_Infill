@@ -4,7 +4,7 @@ import bpy
 from bpy.types import Panel, Operator
 from bpy.props import FloatProperty, EnumProperty
 
-from . import tools_panel, support_tools
+from . import tools_panel, support_tools, print_check_ops
 from .offset_utils import OFFSET_PRESETS, INFILL_PRESETS, RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag
 from .settings import get_active_offset_preset, get_active_building_preset
 
@@ -285,6 +285,13 @@ class QUICKINFILL_PT_sidebar(Panel):
             sc.prop(s, "shrink_mult")
             sc.separator(factor=1.0)
             sc.prop(s, "trim_thin")
+
+        # ---------------- Print Check ----------------
+        box = col.box()
+        icon = 'DOWNARROW_HLT' if s.show_print_check else 'RIGHTARROW'
+        box.row().prop(s, "show_print_check", text="Print Check", icon=icon, emboss=False)
+        if s.show_print_check:
+            print_check_ops.draw_print_check(box, context)
 
 
 classes = (

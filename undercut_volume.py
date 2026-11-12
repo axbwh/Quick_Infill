@@ -24,8 +24,9 @@ BAND = 4.0          # distances are exact up to this many voxels from the surfac
 PAD = 3             # empty voxels kept around the model
 
 
-def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6):
-    """(phi[z, y, x] float32, origin xyz of voxel (0,0,0)'s centre). Negative inside."""
+def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6, bounds=None):
+    """(phi[z, y, x] float32, origin xyz of voxel (0,0,0)'s centre). Negative inside.
+    bounds: (lo, hi) the grid must cover (default: the mesh's own box)."""
     mm, mc = get_meshlib()
     mn = get_mrmeshnumpy()
     # computeBoundingBox looks at the vertices in use only (a mesh fresh from a
@@ -33,6 +34,9 @@ def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6):
     box = mesh.computeBoundingBox()
     lo = np.array([box.min.x, box.min.y, box.min.z], dtype=np.float64)
     hi = np.array([box.max.x, box.max.y, box.max.z], dtype=np.float64)
+    if bounds is not None:
+        lo = np.minimum(lo, np.asarray(bounds[0], dtype=np.float64))
+        hi = np.maximum(hi, np.asarray(bounds[1], dtype=np.float64))
     h = float(voxel)
     org = lo - pad * h
     nx, ny, nz = (int(np.ceil((hi[i] - lo[i]) / h)) + 2 * pad + 1 for i in range(3))
@@ -175,15 +179,85 @@ def _shrink_tops(phi, up, amount, angle_deg, voxel):
     return np.where(mask, phi + amount, phi)
 
 
-def fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0):
-    """Undercut fix for every up vector, intersected. Returns a new grid."""
+def fill_reach(points, up_vectors):
+    """How far the fill of fix_undercuts_grid can reach: (lo, hi, floors).
+
+    The fill for one direction is the model's shadow along -up, down to the
+    model's lowest point along up (floors[i], where meshlib's own fix stops as
+    well). Several directions are intersected, so the result lies in the
+    intersection of those shadows: a convex block whose corners are found here
+    from its faces. With the eight side directions that block is the wedge
+    under the model, and the grid has to hold all of it. (Until 2026-11-13 the
+    grid was the model's box plus three voxels, which cut the wedge off just
+    under the model: "the scoop doesn't go as far as it can anymore".)
+    """
+    P = np.asarray(points, dtype=np.float64)
+    if len(P) > 20000:
+        P = P[:: len(P) // 20000 + 1]
+    normals, limits, floors = [], [], []
+    for up in up_vectors:
+        u = np.asarray(up, dtype=np.float64)
+        u = u / np.linalg.norm(u)
+        d = P @ u
+        floors.append(float(d.min()))
+        normals += [u, -u]
+        limits += [float(d.max()), -float(d.min())]
+        for e in np.eye(3):
+            n = np.cross(e, u)
+            ln = np.linalg.norm(n)
+            if ln < 1e-6:
+                continue
+            n = n / ln
+            d = P @ n
+            normals += [n, -n]
+            limits += [float(d.max()), -float(d.min())]
+    N = np.array(normals)
+    c = np.array(limits)
+    lo, hi = P.min(0), P.max(0)
+    m = len(N)
+    if m >= 3:
+        idx = np.arange(m)
+        I, J, K = np.meshgrid(idx, idx, idx, indexing='ij')
+        sel = (I < J) & (J < K)
+        ii, jj, kk = I[sel], J[sel], K[sel]
+        A = np.stack([N[ii], N[jj], N[kk]], 1)                  # (t, 3, 3)
+        b = np.stack([c[ii], c[jj], c[kk]], 1)
+        det = np.linalg.det(A)
+        ok = np.abs(det) > 1e-6
+        if ok.any():
+            X = np.linalg.solve(A[ok], b[ok][:, :, None])[:, :, 0]
+            span = float(np.linalg.norm(hi - lo)) + 1e-9
+            inside = (X @ N.T <= c[None, :] + 1e-6 * span).all(1)
+            if inside.any():
+                lo = np.minimum(lo, X[inside].min(0))
+                hi = np.maximum(hi, X[inside].max(0))
+    return lo, hi, floors
+
+
+def _clip_below(f, up, floor, origin, voxel, fill):
+    """Empty every voxel lower than `floor` along `up` (in place)."""
+    h = float(voxel)
+    nz, ny, nx = f.shape
+    xy = (origin[1] + np.arange(ny) * h)[:, None] * up[1] + (origin[0] + np.arange(nx) * h)[None, :] * up[0]
+    for z in range(nz):
+        low = xy + (origin[2] + z * h) * up[2] < floor
+        if low.any():
+            f[z][low] = fill
+
+
+def fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0, origin=None, floors=None):
+    """Undercut fix for every up vector, intersected. Returns a new grid.
+    origin + floors (from fill_reach): each direction's fill stops at the
+    model's lowest point along it, as meshlib's own fix does."""
     fill = float(BAND * voxel)
     result = None
-    for up in up_vectors:
+    for n_up, up in enumerate(up_vectors):
         check_cancelled()
         up = np.asarray(up, dtype=np.float64)
         up = up / np.linalg.norm(up)
         f = sweep_min(phi, up, fill)
+        if origin is not None and floors is not None:
+            _clip_below(f, up, floors[n_up] - 2.0 * float(voxel), origin, voxel, fill)
         if shrink_amount > 0:
             f = _shrink_tops(f, up, float(shrink_amount), float(shrink_angle), float(voxel))
         result = f if result is None else np.maximum(result, f, out=result)
@@ -198,8 +272,14 @@ def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=
     undercut fix does (measured on a wall of 150 stones: surfaces agree within
     one voxel on 99% of the points).
     """
-    phi, org = distance_grid(mesh, voxel)
+    mn = get_mrmeshnumpy()
+    pts = mn.getNumpyVerts(mesh)
+    box = mesh.computeBoundingBox()
+    blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
+    pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]      # (not the unused points of a boolean's inputs)
+    lo, hi, floors = fill_reach(pts, up_vectors)
+    phi, org = distance_grid(mesh, voxel, bounds=(lo, hi))
     if enclosed_gap is not None:
         fill_enclosed(phi, voxel, enclosed_gap)
-    out = fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount, shrink_angle)
+    out = fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount, shrink_angle, origin=org, floors=floors)
     return grid_to_mesh(out, org, voxel)

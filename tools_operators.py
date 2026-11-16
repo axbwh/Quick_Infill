@@ -124,7 +124,8 @@ class _FlatAwareOffset(_OffsetToolBase):
             for o in flat:
                 try:
                     r = flat_outline.offset_object(o, d, replace=s.replace_original, suffix=self.suffix,
-                                                   apply_modifiers=apply_mods)
+                                                   apply_modifiers=apply_mods,
+                                                   clean=flat_outline.clean_from_settings(s))
                 except Exception as e:
                     pr.errors.append((o, e))
                     continue
@@ -227,7 +228,8 @@ class QUICKINFILL_OT_create_outline(Operator):
     bl_idname = "quick_infill.create_outline"
     bl_label = "Create Outline"
     bl_description = ("New flat polygon: the outline of each selected mesh as seen from the current view "
-                      "(same outline method as Ashlarize)")
+                      "(same outline method as Ashlarize). Cleaned up with the Offset Tools values: "
+                      "slits closed by Distance, bumps trimmed by half of it, simplified to Voxel Size")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -244,10 +246,12 @@ class QUICKINFILL_OT_create_outline(Operator):
             view_dir = Vector((0.0, 0.0, -1.0))
         else:
             view_dir = rv3d.view_rotation @ Vector((0.0, 0.0, -1.0))
+        s = context.scene.quick_infill_settings
         made = []
         for o in selected_meshes(context):
             try:
-                r = flat_outline.create_outline(o, tuple(view_dir))
+                r = flat_outline.create_outline(o, tuple(view_dir),
+                                                clean=flat_outline.clean_from_settings(s))
             except Exception as e:
                 self.report({'ERROR'}, f"Create Outline failed on '{o.name}': {e}")
                 continue

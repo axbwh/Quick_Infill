@@ -12,7 +12,10 @@ Infill does not import Ashlarize):
 
 Work is done in meshlib space (Blender units x STL_EXPORT_SCALE = mm on
 SystemHEX), like the voxel tools, so the Distance setting means the same thing.
-Ashlarize's locked values 0.08 / 0.04 / 0.02 BU are 0.8 / 0.4 / 0.2 here.
+Ashlarize's locked values 0.08 / 0.04 / 0.02 BU are 0.8 / 0.4 / 0.2 here (the defaults).
+In the Quick Infill tools the clean-up follows the Offset Tools settings instead
+(Alex 2026-11-16): closing = Distance, opening = Distance / 2, Douglas-Peucker =
+Voxel Size. See clean_from_settings().
 
 Grow / Shrink rule (Alex 2026-11-16): an object is grown or shrunk as a flat
 polygon only when ALL its pieces are flat polygons. If it also holds real
@@ -224,10 +227,17 @@ def simplify_ring(P, dev=DP_DEV):
     return P[sorted(set(a_) | set(b_))]
 
 
-def cleanup(rings):
-    """Ashlarize's cleanup: closing, opening, Douglas-Peucker."""
-    rings = open_(close(rings))
-    out = [simplify_ring(r) for r in rings]
+def clean_from_settings(s):
+    """(closing, opening, Douglas-Peucker) from the Offset Tools: Distance, Distance / 2, Voxel Size."""
+    d = float(s.distance)
+    return d, 0.5 * d, float(s.shared_voxel_size)
+
+
+def cleanup(rings, clean=None):
+    """Ashlarize's cleanup: closing, opening, Douglas-Peucker. clean = (closing, opening, dp)."""
+    close_r, open_r, dev = clean or (CLOSE_R, OPEN_R, DP_DEV)
+    rings = open_(close(rings, close_r), open_r)
+    out = [simplify_ring(r, dev) if dev > 0 else r for r in rings]
     return [r for r in out if len(r) >= 3 and abs(area(r)) > MIN_AREA]
 
 
@@ -473,13 +483,13 @@ def build_mesh(name, pieces, to_local=None):
 # Grow / Shrink a flat object
 # --------------------------------------------------------------------------------------------
 
-def offset_object(obj, dist, *, replace=True, suffix="", apply_modifiers=False):
+def offset_object(obj, dist, *, replace=True, suffix="", apply_modifiers=False, clean=None):
     """Grow (dist > 0) or shrink (dist < 0) a flat-polygon object in its plane(s).
     Returns the result object, or None if everything vanished (object left unchanged)."""
     V, T, E = read_mesh(obj, apply_modifiers)
     pieces = []
     for c, n, u, v, rings in flat_pieces(V, T, E):
-        rings = cleanup(offset(rings, dist))
+        rings = cleanup(offset(rings, dist), clean)
         if rings:
             pieces.append((c, n, u, v, rings))
     if not pieces:
@@ -505,7 +515,7 @@ def offset_object(obj, dist, *, replace=True, suffix="", apply_modifiers=False):
 # Create Outline: the outline seen along a view direction
 # --------------------------------------------------------------------------------------------
 
-def view_outline(V, T, d):
+def view_outline(V, T, d, clean=None):
     """(centre, normal, u, v, rings) of the outline of triangles (V, T) seen along unit direction d
     (towards the object), on the plane through the point nearest the viewer."""
     n = -np.asarray(d, float)
@@ -516,16 +526,16 @@ def view_outline(V, T, d):
     c = c0 + n * (float(h.max()) - float(c0 @ n))         # the outer plane, facing the viewer
     P = V - c
     uv = np.stack([P @ u, P @ v], -1)
-    rings = cleanup(silhouette(uv, T))
+    rings = cleanup(silhouette(uv, T), clean)
     return c, n, u, v, rings
 
 
-def create_outline(obj, view_dir, *, apply_modifiers=True, suffix="_Outline"):
+def create_outline(obj, view_dir, *, apply_modifiers=True, suffix="_Outline", clean=None):
     """New flat object: obj's outline seen along view_dir (world, towards the scene)."""
     V, T, _ = read_mesh(obj, apply_modifiers)
     if not len(T):
         return None
-    c, n, u, v, rings = view_outline(V, T, view_dir)
+    c, n, u, v, rings = view_outline(V, T, view_dir, clean)
     if not rings:
         return None
     centre = Vector(c / SCALE)

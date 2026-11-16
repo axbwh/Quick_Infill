@@ -229,7 +229,7 @@ class QUICKINFILL_OT_create_outline(Operator):
     bl_label = "Create Outline"
     bl_description = ("New flat polygon: the outline of each selected mesh as seen from the current view "
                       "(same outline method as Ashlarize). Cleaned up with the Offset Tools values: "
-                      "slits closed by Distance, bumps trimmed by half of it")
+                      "slits closed by Distance, bumps trimmed by half of it, resampled every Voxel Size")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

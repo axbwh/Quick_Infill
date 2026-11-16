@@ -14,8 +14,9 @@ Work is done in meshlib space (Blender units x STL_EXPORT_SCALE = mm on
 SystemHEX), like the voxel tools, so the Distance setting means the same thing.
 Ashlarize's locked values 0.08 / 0.04 / 0.02 BU are 0.8 / 0.4 / 0.2 here (the defaults).
 In the Quick Infill tools the clean-up follows the Offset Tools settings instead
-(Alex 2026-11-16): closing = Distance, opening = Distance / 2, and no
-Douglas-Peucker ("just get rid of the Douglas Peucker"). See clean_from_settings().
+(Alex 2026-11-16): closing = Distance, opening = Distance / 2, then instead of
+Douglas-Peucker a straight resample by distance at Voxel Size that keeps the sharp
+corners. See clean_from_settings() and resample_ring().
 
 Grow / Shrink rule (Alex 2026-11-16): an object is grown or shrunk as a flat
 polygon only when ALL its pieces are flat polygons. If it also holds real
@@ -257,16 +258,60 @@ def simplify_ring(P, dev=DP_DEV):
 
 
 def clean_from_settings(s):
-    """(closing, opening, Douglas-Peucker) from the Offset Tools: Distance, Distance / 2, none."""
+    """(closing, opening, step) from the Offset Tools: Distance, Distance / 2, and a negative
+    step = resample by distance at Voxel Size (no Douglas-Peucker)."""
     d = float(s.distance)
-    return d, 0.5 * d, 0.0
+    return d, 0.5 * d, -float(s.shared_voxel_size)
+
+
+SHARP_DEG = 30.0       # a turn sharper than this is a corner the resample keeps
+
+
+def resample_ring(P, step, sharp_deg=SHARP_DEG):
+    """Straight resample by distance (Alex 2026-11-16): points every `step` along the ring,
+    evenly spaced between the sharp corners (turn > sharp_deg), which are kept exactly.
+    Orientation kept. Round offset arcs are many small turns, so they are not corners."""
+    P = np.asarray(P, float)
+    if step <= 0 or len(P) < 3:
+        return P
+    a = P - np.roll(P, 1, 0)                      # edge into each vertex
+    b = np.roll(P, -1, 0) - P                     # edge out of it
+    na, nb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
+    cosang = np.einsum('ij,ij->i', a, b) / np.maximum(na * nb, 1e-12)
+    corners = np.flatnonzero(cosang < math.cos(math.radians(sharp_deg)))
+    if len(corners) > 1:                          # corners closer than half a step: keep the sharper one
+        s_ = np.r_[0.0, np.cumsum(nb)][:-1]       # arc length at each vertex
+        perim = float(nb.sum())
+        keep = []
+        for c in corners[np.argsort(cosang[corners])]:
+            if all(min(abs(s_[c] - s_[k]), perim - abs(s_[c] - s_[k])) >= 0.5 * step for k in keep):
+                keep.append(c)
+        corners = np.array(sorted(keep))
+    if not len(corners):
+        corners = np.array([0])
+    out = []
+    for k, c0 in enumerate(corners):
+        c1 = corners[(k + 1) % len(corners)]
+        idx = np.arange(c0, c1 + 1) if c1 > c0 else np.r_[np.arange(c0, len(P)), np.arange(0, c1 + 1)]
+        seg = P[idx]                              # corner .. next corner (closed when one corner)
+        d = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
+        if d[-1] <= 0:
+            continue
+        n = max(1, int(round(d[-1] / step)))
+        t = np.linspace(0.0, d[-1], n + 1)[:-1]   # the next corner starts the next run
+        out.append(np.stack([np.interp(t, d, seg[:, 0]), np.interp(t, d, seg[:, 1])], 1))
+    return dedupe(np.concatenate(out)) if out else P
 
 
 def cleanup(rings, clean=None):
-    """Ashlarize's cleanup: closing, opening, Douglas-Peucker. clean = (closing, opening, dp)."""
+    """Ashlarize's cleanup: closing, opening, Douglas-Peucker. clean = (closing, opening, dp);
+    a negative dp means: resample by that distance instead, sharp corners kept."""
     close_r, open_r, dev = clean or (CLOSE_R, OPEN_R, DP_DEV)
     rings = open_(close(rings, close_r), open_r)
-    out = [simplify_ring(r, dev) if dev > 0 else r for r in rings]
+    if dev < 0:
+        out = [resample_ring(r, -dev) for r in rings]
+    else:
+        out = [simplify_ring(r, dev) if dev > 0 else r for r in rings]
     return [r for r in out if len(r) >= 3 and abs(area(r)) > MIN_AREA]
 
 

@@ -264,29 +264,28 @@ def clean_from_settings(s):
     return d, 0.5 * d, -float(s.shared_voxel_size)
 
 
-SHARP_DEG = 30.0       # a turn sharper than this is a corner the resample keeps
+def dp_ring_indices(P, dev):
+    """Indices Douglas-Peucker keeps on a closed ring (split at its two farthest points)."""
+    P = np.asarray(P, float)
+    if len(P) < 4:
+        return np.arange(len(P))
+    k = int(np.argmax(np.hypot(*(P - P[0]).T)))
+    a_ = _dp(P[:k + 1], dev)
+    closed = np.concatenate([P[k:], P[:1]])
+    b_ = [k + i for i in _dp(closed, dev)][1:-1]
+    return np.array(sorted(set(a_) | set(b_)))
 
 
-def resample_ring(P, step, sharp_deg=SHARP_DEG):
-    """Straight resample by distance (Alex 2026-11-16): points every `step` along the ring,
-    evenly spaced between the sharp corners (turn > sharp_deg), which are kept exactly.
-    Orientation kept. Round offset arcs are many small turns, so they are not corners."""
+def resample_ring(P, step):
+    """Alex 2026-11-16: "find the sharp corners with Douglas-Peucker, then count how many
+    times the voxel size fits in between, keep those on the real outline and space them out
+    evenly between the sharp points." Corners = Douglas-Peucker points at tolerance `step`
+    (kept exactly); between two corners, round(length / step) equal steps measured ALONG the
+    real outline, so every new point lies on it. Orientation kept."""
     P = np.asarray(P, float)
     if step <= 0 or len(P) < 3:
         return P
-    a = P - np.roll(P, 1, 0)                      # edge into each vertex
-    b = np.roll(P, -1, 0) - P                     # edge out of it
-    na, nb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
-    cosang = np.einsum('ij,ij->i', a, b) / np.maximum(na * nb, 1e-12)
-    corners = np.flatnonzero(cosang < math.cos(math.radians(sharp_deg)))
-    if len(corners) > 1:                          # corners closer than half a step: keep the sharper one
-        s_ = np.r_[0.0, np.cumsum(nb)][:-1]       # arc length at each vertex
-        perim = float(nb.sum())
-        keep = []
-        for c in corners[np.argsort(cosang[corners])]:
-            if all(min(abs(s_[c] - s_[k]), perim - abs(s_[c] - s_[k])) >= 0.5 * step for k in keep):
-                keep.append(c)
-        corners = np.array(sorted(keep))
+    corners = dp_ring_indices(P, step)
     if not len(corners):
         corners = np.array([0])
     out = []

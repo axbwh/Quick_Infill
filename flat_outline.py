@@ -61,10 +61,26 @@ def region_area(rings):
     return -sum(area(r) for r in rings)
 
 
+def dedupe(P, eps=1e-4):
+    """Drop repeated points (consecutive, and the last one when it equals the first).
+    getOutline can return a ring with a repeated point; offsetContours then has a
+    zero-length edge, does not offset there, and a closing cut up to its full radius
+    into the shape (Alex's corner stones lost their bottom, 2026-11-16)."""
+    P = np.asarray(P, float)
+    if len(P) < 2:
+        return P
+    step = np.linalg.norm(P - np.roll(P, 1, 0), axis=1)
+    P = P[step > eps] if (step > eps).any() else P[:1]
+    return P
+
+
 def _contours(rings):
     mm = _mm()
     cs = mm.std_vector_std_vector_Vector2_float()
     for P in rings:
+        P = dedupe(P)
+        if len(P) < 3:
+            continue
         c = mm.std_vector_Vector2_float()
         for x, y in P:
             c.append(mm.Vector2f(float(x), float(y)))
@@ -79,6 +95,7 @@ def _rings(res):
         x = np.array([[p.x, p.y] for p in r], float)
         if len(x) > 1 and np.allclose(x[0], x[-1]):
             x = x[:-1]
+        x = dedupe(x)
         if len(x) >= 3 and abs(area(x)) > MIN_AREA:
             out.append(x)
     return out
@@ -148,11 +165,23 @@ def silhouette(uv, T):
     ar = 0.5 * ((P[:, 1, 0] - P[:, 0, 0]) * (P[:, 2, 1] - P[:, 0, 1])
                 - (P[:, 2, 0] - P[:, 0, 0]) * (P[:, 1, 1] - P[:, 0, 1]))
     pos, neg = T[ar > 1e-12], T[ar < -1e-12][:, ::-1]         # every triangle counter-clockwise
-    rings = []
+    # The triangles facing the viewer and the ones facing away are outlined apart, then
+    # joined: one getOutline over both sets of cycles came back EMPTY on a stone seen side on
+    # (their silhouette edges lie on top of each other).
+    parts = []
     for part in (pos, neg):
-        for cyc in _boundary_cycles(part, len(uv)):
-            rings.append(uv[cyc])
-    return outline(rings)
+        if len(part):
+            o = outline([uv[c] for c in _boundary_cycles(part, len(uv))])
+            if o:
+                parts.append(o)
+    if len(parts) < 2:
+        return parts[0] if parts else []
+    a, b = (region_area(x) for x in parts)
+    for rings in (parts[0] + parts[1], [np.round(r / 1e-3) * 1e-3 for r in parts[0] + parts[1]]):
+        u_ = outline(rings)
+        if u_ and max(a, b) * (1 - 1e-6) - 1e-6 <= region_area(u_) <= (a + b) * (1 + 1e-6) + 1e-6:
+            return u_
+    return parts[0] if a >= b else parts[1]                   # a closed mesh: both are the same outline
 
 
 def _offset_raw(rings, r):

@@ -14,9 +14,9 @@ Work is done in meshlib space (Blender units x STL_EXPORT_SCALE = mm on
 SystemHEX), like the voxel tools, so the Distance setting means the same thing.
 Ashlarize's locked values 0.08 / 0.04 / 0.02 BU are 0.8 / 0.4 / 0.2 here (the defaults).
 In the Quick Infill tools the clean-up follows the Offset Tools settings instead
-(Alex 2026-11-16): closing = Distance, opening = Distance / 2, then instead of
-Douglas-Peucker a straight resample by distance at Voxel Size that keeps the sharp
-corners. See clean_from_settings() and resample_ring().
+(Alex 2026-11-16): closing = Distance, opening = Distance / 2, then the points are
+resampled along the real outline between Douglas-Peucker corners, as many as Auto
+Decimation (Off / Original / Ratio) asks. See clean_from_settings() and resample_ring().
 
 Grow / Shrink rule (Alex 2026-11-16): an object is grown or shrunk as a flat
 polygon only when ALL its pieces are flat polygons. If it also holds real
@@ -258,10 +258,22 @@ def simplify_ring(P, dev=DP_DEV):
 
 
 def clean_from_settings(s):
-    """(closing, opening, step) from the Offset Tools: Distance, Distance / 2, and a negative
-    step = resample by distance at Voxel Size (no Douglas-Peucker)."""
+    """Clean-up from the Offset Tools (Alex 2026-11-16): closing = Distance, opening =
+    Distance / 2, then the point count follows Auto Decimation:
+      Off      - no Douglas-Peucker, no resample (the cleaned outline as it is),
+      Original - resampled to the original outline's point count (duplicates removed),
+      Ratio    - resampled every Voxel Size / sqrt(Ratio). The voxel tools keep Ratio of the
+                 FACES; points along an outline go with the square root of that.
+    In Original and Ratio the corners are Douglas-Peucker points at Voxel Size, kept exactly."""
     d = float(s.distance)
-    return d, 0.5 * d, -float(s.shared_voxel_size)
+    vox = float(s.shared_voxel_size)
+    mode = s.decimate_mode
+    if mode == 'OFF':
+        return d, 0.5 * d, 'off', 0.0, 0.0
+    if mode == 'ORIGINAL':
+        return d, 0.5 * d, 'original', vox, 0.0
+    ratio = max(1e-4, min(1.0, float(s.decimation_ratio)))
+    return d, 0.5 * d, 'step', vox, vox / math.sqrt(ratio)
 
 
 def dp_ring_indices(P, dev):
@@ -276,41 +288,87 @@ def dp_ring_indices(P, dev):
     return np.array(sorted(set(a_) | set(b_)))
 
 
-def resample_ring(P, step):
+def _even_counts(lengths, total):
+    """Split `total` points over runs of these lengths, in proportion, at least one each."""
+    L = np.asarray(lengths, float)
+    if total <= len(L) or L.sum() <= 0:
+        return np.ones(len(L), int)
+    exact = L / L.sum() * total
+    n = np.maximum(1, np.floor(exact).astype(int))
+    for i in np.argsort(-(exact - np.floor(exact))):
+        if n.sum() >= total:
+            break
+        n[i] += 1
+    while n.sum() > total and (n > 1).any():
+        n[np.argmax(n)] -= 1
+    return n
+
+
+def resample_ring(P, corner_dev, step=None, count=None):
     """Alex 2026-11-16: "find the sharp corners with Douglas-Peucker, then count how many
     times the voxel size fits in between, keep those on the real outline and space them out
-    evenly between the sharp points." Corners = Douglas-Peucker points at tolerance `step`
-    (kept exactly); between two corners, round(length / step) equal steps measured ALONG the
-    real outline, so every new point lies on it. Orientation kept."""
+    evenly between the sharp points." Corners = Douglas-Peucker points at tolerance
+    corner_dev (kept exactly). Between two corners: round(length / step) equal steps, or with
+    count, `count` points over the whole ring shared out by length. The steps are measured
+    ALONG the real outline, so every new point lies on it. Orientation kept."""
     P = np.asarray(P, float)
-    if step <= 0 or len(P) < 3:
+    if len(P) < 3 or (not step and not count):
         return P
-    corners = dp_ring_indices(P, step)
+    corners = dp_ring_indices(P, corner_dev) if corner_dev > 0 else np.array([0])
     if not len(corners):
         corners = np.array([0])
-    out = []
+    runs = []
     for k, c0 in enumerate(corners):
         c1 = corners[(k + 1) % len(corners)]
         idx = np.arange(c0, c1 + 1) if c1 > c0 else np.r_[np.arange(c0, len(P)), np.arange(0, c1 + 1)]
         seg = P[idx]                              # corner .. next corner (closed when one corner)
         d = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
-        if d[-1] <= 0:
-            continue
-        n = max(1, int(round(d[-1] / step)))
+        if d[-1] > 0:
+            runs.append((seg, d))
+    if not runs:
+        return P
+    if count:
+        ns = _even_counts([d[-1] for _, d in runs], int(count))
+    else:
+        ns = [max(1, int(round(d[-1] / step))) for _, d in runs]
+    out = []
+    for (seg, d), n in zip(runs, ns):
         t = np.linspace(0.0, d[-1], n + 1)[:-1]   # the next corner starts the next run
         out.append(np.stack([np.interp(t, d, seg[:, 0]), np.interp(t, d, seg[:, 1])], 1))
-    return dedupe(np.concatenate(out)) if out else P
+    return dedupe(np.concatenate(out))
 
 
-def cleanup(rings, clean=None):
-    """Ashlarize's cleanup: closing, opening, Douglas-Peucker. clean = (closing, opening, dp);
-    a negative dp means: resample by that distance instead, sharp corners kept."""
-    close_r, open_r, dev = clean or (CLOSE_R, OPEN_R, DP_DEV)
+def point_count(rings):
+    """Points of an outline, repeated points left out (Original mode's target)."""
+    return sum(len(dedupe(r)) for r in rings)
+
+
+def cleanup(rings, clean=None, n_points=None):
+    """Closing, opening, then the point step. clean = (closing, opening, dp) as in Ashlarize
+    (a negative dp = resample every -dp with Douglas-Peucker corners at -dp), or
+    (closing, opening, mode, corner_dev, step) from clean_from_settings(); n_points is the
+    original outline's point count for mode 'original'."""
+    clean = clean or (CLOSE_R, OPEN_R, DP_DEV)
+    close_r, open_r = clean[0], clean[1]
     rings = open_(close(rings, close_r), open_r)
-    if dev < 0:
-        out = [resample_ring(r, -dev) for r in rings]
+    if len(clean) == 3:
+        dev = clean[2]
+        if dev < 0:
+            out = [resample_ring(r, -dev, step=-dev) for r in rings]
+        else:
+            out = [simplify_ring(r, dev) if dev > 0 else r for r in rings]
     else:
-        out = [simplify_ring(r, dev) if dev > 0 else r for r in rings]
+        mode, corner_dev, step = clean[2], clean[3], clean[4]
+        if mode == 'off':
+            out = list(rings)
+        elif mode == 'original' and n_points:
+            per = [abs(float(np.linalg.norm(np.diff(np.vstack([r, r[:1]]), axis=0), axis=1).sum())) for r in rings]
+            counts = _even_counts(per, max(int(n_points), 3 * len(rings)))
+            out = [resample_ring(r, corner_dev, count=max(3, int(c))) for r, c in zip(rings, counts)]
+        elif mode == 'step' and step > 0:
+            out = [resample_ring(r, corner_dev, step=step) for r in rings]
+        else:
+            out = list(rings)
     return [r for r in out if len(r) >= 3 and abs(area(r)) > MIN_AREA]
 
 
@@ -562,7 +620,7 @@ def offset_object(obj, dist, *, replace=True, suffix="", apply_modifiers=False, 
     V, T, E = read_mesh(obj, apply_modifiers)
     pieces = []
     for c, n, u, v, rings in flat_pieces(V, T, E):
-        rings = cleanup(offset(rings, dist), clean)
+        rings = cleanup(offset(rings, dist), clean, point_count(rings))
         if rings:
             pieces.append((c, n, u, v, rings))
     if not pieces:
@@ -599,7 +657,8 @@ def view_outline(V, T, d, clean=None):
     c = c0 + n * (float(h.max()) - float(c0 @ n))         # the outer plane, facing the viewer
     P = V - c
     uv = np.stack([P @ u, P @ v], -1)
-    rings = cleanup(silhouette(uv, T), clean)
+    raw = silhouette(uv, T)
+    rings = cleanup(raw, clean, point_count(raw))
     return c, n, u, v, rings
 
 

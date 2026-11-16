@@ -445,7 +445,7 @@ class PipelineRun:
 
     def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
                  replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
-                 parallel=True):
+                 parallel=True, strip_flat=()):
         s = settings or bpy.context.scene.quick_infill_settings
         self.objects = list(objects)
         self.operation_fn = operation_fn
@@ -458,6 +458,7 @@ class PipelineRun:
         self.smart = s.smart_resolution if smart is None else smart
         self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
         self.parallel = parallel
+        self.strip_flat = set(strip_flat)   # objects whose flat polygon pieces are left out (Grow / Shrink)
         self.jobs = []
         self.pr = ProcessResult()
         self.cancelled = False
@@ -470,6 +471,11 @@ class PipelineRun:
             job.obj, job.name, job.dropped, job.error, job.out = obj, obj.name, 0, None, None
             try:
                 job.src, job.face_map = blender_to_meshlib(obj, self.apply_modifiers, depsgraph, with_face_map=True)
+                if obj in self.strip_flat:
+                    from .flat_outline import strip_flat
+                    stripped = strip_flat(job.src)
+                    if stripped is not job.src:
+                        job.src, job.face_map = stripped, None
             except MeshCollapsedError as e:
                 self.pr.collapsed.append((obj, e))
                 continue

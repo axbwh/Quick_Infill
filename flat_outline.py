@@ -14,8 +14,8 @@ Work is done in meshlib space (Blender units x STL_EXPORT_SCALE = mm on
 SystemHEX), like the voxel tools, so the Distance setting means the same thing.
 Ashlarize's locked values 0.08 / 0.04 / 0.02 BU are 0.8 / 0.4 / 0.2 here (the defaults).
 In the Quick Infill tools the clean-up follows the Offset Tools settings instead
-(Alex 2026-11-16): closing = Distance, opening = Distance / 2, Douglas-Peucker =
-Voxel Size. See clean_from_settings().
+(Alex 2026-11-16): closing = Distance, opening = Distance / 2, and no
+Douglas-Peucker ("just get rid of the Douglas Peucker"). See clean_from_settings().
 
 Grow / Shrink rule (Alex 2026-11-16): an object is grown or shrunk as a flat
 polygon only when ALL its pieces are flat polygons. If it also holds real
@@ -257,9 +257,9 @@ def simplify_ring(P, dev=DP_DEV):
 
 
 def clean_from_settings(s):
-    """(closing, opening, Douglas-Peucker) from the Offset Tools: Distance, Distance / 2, Voxel Size."""
+    """(closing, opening, Douglas-Peucker) from the Offset Tools: Distance, Distance / 2, none."""
     d = float(s.distance)
-    return d, 0.5 * d, float(s.shared_voxel_size)
+    return d, 0.5 * d, 0.0
 
 
 def cleanup(rings, clean=None):

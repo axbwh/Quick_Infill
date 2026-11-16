@@ -96,27 +96,70 @@ class _OffsetToolBase(ModalJobMixin):
         return {'FINISHED'} if pr.results or pr.collapsed else {'CANCELLED'}
 
 
-class QUICKINFILL_OT_grow(_OffsetToolBase, Operator):
-    bl_idname = "quick_infill.grow"
-    bl_label = "Grow"
-    bl_description = "Grow selected mesh(es) by the distance value. With multiple selections, processes each object individually"
-    suffix, label = "_Grown", "Grow"
+class _FlatAwareOffset(_OffsetToolBase):
+    """Grow / Shrink. An object made only of flat polygons is offset in its plane with the
+    outline method (flat_outline). An object with real volume AND flat polygons loses the
+    flat polygons and the rest goes through the voxel offset as usual (Alex 2026-11-16)."""
+    sign = 1.0
 
     def make_operation(self, s):
-        d = float(s.distance)
+        d = self.sign * float(s.distance)
         return lambda mesh, res: cuda_offset(mesh, res, d)
 
+    def job_setup(self, context):
+        from . import flat_outline
+        s = context.scene.quick_infill_settings
+        objs = selected_meshes(context)
+        if not objs:
+            self.report({'ERROR'}, "No mesh selected.")
+            return None
+        apply_mods = s.apply_modifiers_on_export
+        kinds = {o: flat_outline.classify(o, apply_mods) for o in objs}
+        flat = [o for o in objs if kinds[o] == 'flat']
+        volume = [o for o in objs if kinds[o] != 'flat']
+        mixed = [o for o in volume if kinds[o] == 'mixed']
+        d = self.sign * float(s.distance)
 
-class QUICKINFILL_OT_shrink(_OffsetToolBase, Operator):
+        def finish(pr):
+            for o in flat:
+                try:
+                    r = flat_outline.offset_object(o, d, replace=s.replace_original, suffix=self.suffix,
+                                                   apply_modifiers=apply_mods)
+                except Exception as e:
+                    pr.errors.append((o, e))
+                    continue
+                if r is None:
+                    pr.collapsed.append((o, "polygon vanished"))
+                else:
+                    pr.results.append((r, 0, len(r.data.vertices)))
+            if flat:
+                bpy.context.view_layer.update()
+            return self.job_finish(bpy.context, pr)
+
+        run = PipelineRun(volume, self.make_operation(s), self.suffix,
+                          resolution=float(s.shared_voxel_size), auto_decimate=s.decimate_mode != "OFF",
+                          replace_original=s.replace_original, settings=s, strip_flat=mixed)
+        return JobSpec(prepare=run.prepare, compute=run.compute, finish=lambda: finish(run.finish()),
+                       items=max(1, len(volume)))
+
+
+class QUICKINFILL_OT_grow(_FlatAwareOffset, Operator):
+    bl_idname = "quick_infill.grow"
+    bl_label = "Grow"
+    bl_description = ("Grow selected mesh(es) by the distance value. With multiple selections, processes each object "
+                      "individually. Flat polygons grow in their own plane")
+    suffix, label = "_Grown", "Grow"
+    sign = 1.0
+
+
+class QUICKINFILL_OT_shrink(_FlatAwareOffset, Operator):
     bl_idname = "quick_infill.shrink"
     bl_label = "Shrink"
-    bl_description = "Shrink selected mesh(es) by the distance value. With multiple selections, processes each object individually"
+    bl_description = ("Shrink selected mesh(es) by the distance value. With multiple selections, processes each object "
+                      "individually. Flat polygons shrink in their own plane")
     suffix, label = "_Shrunk", "Shrink"
     est_grow = 0.0
-
-    def make_operation(self, s):
-        d = float(s.distance)
-        return lambda mesh, res: cuda_offset(mesh, res, -d)
+    sign = -1.0
 
 
 class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
@@ -180,12 +223,52 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         return trim_edges
 
 
+class QUICKINFILL_OT_create_outline(Operator):
+    bl_idname = "quick_infill.create_outline"
+    bl_label = "Create Outline"
+    bl_description = ("New flat polygon: the outline of each selected mesh as seen from the current view "
+                      "(same outline method as Ashlarize)")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        from . import flat_outline
+        from mathutils import Vector
+        # From the sidebar button context.region_data is not the viewport: use the 3D view's own.
+        sp = context.space_data
+        rv3d = sp.region_3d if sp is not None and sp.type == 'VIEW_3D' else None
+        if rv3d is None:   # no 3D view (scripts): look straight down
+            view_dir = Vector((0.0, 0.0, -1.0))
+        else:
+            view_dir = rv3d.view_rotation @ Vector((0.0, 0.0, -1.0))
+        made = []
+        for o in selected_meshes(context):
+            try:
+                r = flat_outline.create_outline(o, tuple(view_dir))
+            except Exception as e:
+                self.report({'ERROR'}, f"Create Outline failed on '{o.name}': {e}")
+                continue
+            if r is None:
+                self.report({'WARNING'}, f"Create Outline: '{o.name}' has no outline from this view")
+            else:
+                made.append(r)
+        if not made:
+            return {'CANCELLED'}
+        select_results(made)
+        self.report({'INFO'}, f"Create Outline: made {len(made)} outline(s)")
+        return {'FINISHED'}
+
+
 classes = (
     QUICKINFILL_OT_grow,
     QUICKINFILL_OT_shrink,
     QUICKINFILL_OT_remesh,
     QUICKINFILL_OT_trim_thin,
     QUICKINFILL_OT_trim_edges,
+    QUICKINFILL_OT_create_outline,
 )
 
 

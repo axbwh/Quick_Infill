@@ -22,6 +22,7 @@ def draw_offset_tools(layout, context):
     row = col.row(align=True)
     row.operator("quick_infill.grow", text="Grow", icon='PROP_CON')
     row.operator("quick_infill.shrink", text="Shrink", icon='PROP_OFF')
+    col.row(align=True).operator("quick_infill.create_outline", text="Create Outline", icon='MESH_PLANE')
     col.separator()
     row = col.row(align=True)
     row.operator("quick_infill.remesh", text="Remesh", icon='ALIASED')

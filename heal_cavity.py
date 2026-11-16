@@ -9,7 +9,7 @@ from bpy.types import Operator
 
 from .meshlib_utils import get_meshlib
 from .offset_utils import (
-    cuda_offset, weighted_dist_shell, compute_voxel_size, decimate_mesh,
+    cuda_offset, carve_weighted, compute_voxel_size, decimate_mesh,
     should_auto_decimate_cavity_faces, face_count,
 )
 from .blender_meshlib_utils import (
@@ -42,8 +42,7 @@ def build_infill(src_mesh, s, report=None):
     else:
         grown = cuda_offset(src_mesh, vox, grow)
         shrunk = cuda_offset(grown, vox, -grow)
-        shell = weighted_dist_shell(shrunk, src_mesh, vox, shrink_mult, max_vertices=working_res, target_resolution=working_res)
-        out = mm.boolean(shrunk, shell, mm.BooleanOperation.DifferenceAB).mesh
+        out = carve_weighted(shrunk, src_mesh, vox, shrink_mult, max_vertices=working_res, target_resolution=working_res)
 
     if s.trim_thin:
         out = cuda_offset(cuda_offset(out, vox, -vox), vox, vox)

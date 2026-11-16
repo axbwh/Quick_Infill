@@ -22,6 +22,9 @@ from .job_runner import ModalJobMixin
 from .settings import get_active_angle_preset
 
 DIAG = 0.7071067811865476  # sqrt(2)/2
+# Several directions at a positive angle are fixed on one voxel grid. False = the
+# old route (meshlib FixUndercuts per direction + voxel intersections).
+FAST_UNDERCUTS = True
 Z_UP = (0, 0, 1)
 
 
@@ -162,6 +165,13 @@ def fix_undercuts_multi(mesh, directions, angle, voxel_size, shrink_amount, shri
 
     if abs_angle == 0 or directions == [Z_UP]:
         return fix_undercuts_for_direction(mesh, _vec3(up_fn(Z_UP, 0.0)), voxel_size, shrink_amount, shrink_angle)
+
+    if FAST_UNDERCUTS and not union_mode and len(directions) > 1:
+        # All directions on one voxel grid (see undercut_volume.py): 5 to 50 times
+        # faster than fixing each direction with meshlib and voxel-intersecting the meshes.
+        from .undercut_volume import fix_undercuts_mesh
+        ups = [up_fn(d, abs_angle) for d in directions]
+        return fix_undercuts_mesh(mesh, ups, voxel_size, shrink_amount, shrink_angle), len(directions)
 
     apply_z_after = union_mode and Z_UP in directions
     process_dirs = [d for d in directions if d != Z_UP] if apply_z_after else list(directions)

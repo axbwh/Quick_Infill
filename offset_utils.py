@@ -149,9 +149,24 @@ def cuda_offset(mesh, resolution: float, distance: float):
             raise
 
 
-def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mult: float,
-                        max_vertices: Optional[int] = None, target_resolution: Optional[float] = None):
-    """Variable-width shell, thicker where farther from reference_mesh (Cavity Infill, Accurate)."""
+# Cavity Infill (Accurate) carves the closed-up mesh back with a skin that is
+# one voxel thick where it lies on the model and thicker where it bridges a gap.
+# True = build that skin from an inward offset (the even part) plus meshlib's
+# point-based weighted shell (the thick part): about 8 times faster than the
+# triangle-based weighted shell, and on a wall of 150 stones the carved result
+# differs by 0.013 mm on average (0.06 mm at the 99th percentile) at a 0.34 mm voxel.
+FAST_SHELL = True
+
+
+def _vert_scalars(values):
+    mm, _ = get_meshlib()
+    sc = mm.VertScalars()
+    sc.vec = mm.std_vector_float(np.asarray(values, dtype=np.float32).tolist())
+    return sc
+
+
+def _shell_inputs(mesh_to_offset, reference_mesh, voxel_size, shrink_mult, max_vertices, target_resolution):
+    """(working mesh, per-vertex weights, voxel size) shared by both shell routes."""
     mm, _ = get_meshlib()
     MAX_VERTICES = max_vertices if max_vertices is not None else 1_000_000
 
@@ -165,15 +180,8 @@ def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrin
         working_ref = decimate_mesh(reference_mesh, reduction_ratio=ratio)
 
     sd = mm.findSignedDistances(working_ref, working_mesh)
-    # Vectorised (was two Python loops over every vertex)
-    weights = np.abs(np.fromiter((float(d) for d in sd), dtype=np.float64)) * float(shrink_mult)
-
     n = working_mesh.points.size()
-    scalars = mm.VertScalars(n)
-    vec = scalars.vec
-    for i in range(n):  # VertScalars has no buffer interface; one assignment loop remains
-        vec[i] = float(weights[i])
-    max_weight = float(weights.max()) if len(weights) else 1.0
+    weights = np.abs(np.fromiter((float(d) for d in sd), dtype=np.float64, count=n)) * float(shrink_mult)
 
     if target_resolution is not None and max_vertices is not None:
         target_voxel_count = min(int(max_vertices), int(target_resolution))
@@ -181,12 +189,49 @@ def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrin
         adaptive_voxel_size = max(float(voxel_size), suggested)
     else:
         adaptive_voxel_size = float(voxel_size)
+    return working_mesh, weights, adaptive_voxel_size
 
+
+def weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mult: float,
+                        max_vertices: Optional[int] = None, target_resolution: Optional[float] = None):
+    """Variable-width shell, thicker where farther from reference_mesh (Cavity Infill, Accurate)."""
+    mm, _ = get_meshlib()
+    working_mesh, weights, adaptive_voxel_size = _shell_inputs(mesh_to_offset, reference_mesh, voxel_size, shrink_mult,
+                                                               max_vertices, target_resolution)
     params = mm.WeightedShell.ParametersMetric()
     params.voxelSize = float(adaptive_voxel_size)
     params.offset = float(adaptive_voxel_size)
-    params.dist.maxWeight = max_weight
-    return mm.WeightedShell.meshShell(working_mesh, scalars, params)
+    params.dist.maxWeight = float(weights.max()) if len(weights) else 1.0
+    return mm.WeightedShell.meshShell(working_mesh, _vert_scalars(weights), params)
+
+
+def carve_weighted(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mult: float,
+                   max_vertices: Optional[int] = None, target_resolution: Optional[float] = None):
+    """mesh_to_offset minus the weighted shell (see FAST_SHELL)."""
+    mm, _ = get_meshlib()
+    if not FAST_SHELL:
+        shell = weighted_dist_shell(mesh_to_offset, reference_mesh, voxel_size, shrink_mult, max_vertices, target_resolution)
+        return mm.boolean(mesh_to_offset, shell, mm.BooleanOperation.DifferenceAB).mesh
+
+    working_mesh, weights, av = _shell_inputs(mesh_to_offset, reference_mesh, voxel_size, shrink_mult,
+                                              max_vertices, target_resolution)
+    # Even part of the skin: everything within one (shell) voxel of the surface.
+    thin = cuda_offset(mesh_to_offset, av, -av)
+    if face_count(thin) == 0 or len(weights) == 0 or float(weights.max()) <= 1e-6:
+        return thin
+    # Thick part: balls of radius av + weight round the surface points.
+    mn = get_mrmeshnumpy()
+    check_cancelled()
+    cloud = mn.pointCloudFromPoints(mn.getNumpyVerts(working_mesh).astype(np.float32))
+    params = mm.WeightedShell.ParametersMetric()
+    params.voxelSize = float(av)
+    params.offset = float(av)
+    params.dist.maxWeight = float(weights.max())
+    shell = mm.WeightedShell.pointsShell(cloud, _vert_scalars(weights), params)
+    check_cancelled()
+    if face_count(shell) == 0:
+        return thin
+    return mm.boolean(thin, shell, mm.BooleanOperation.DifferenceAB).mesh
 
 
 def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float:

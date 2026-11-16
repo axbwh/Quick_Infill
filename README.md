@@ -61,3 +61,25 @@ ruff check .
 
 ## License
 GPL-2.0-or-later (see blender_manifest.toml).
+
+## Print Check, Seal Cavities, Make Manifold (1.2.0)
+
+Sidebar > Quick Infill > Print Check. Select everything that prints as one piece (stones, blank, infill) first.
+
+- **Print Check** reads the selection the way a resin slicer does, layer by layer from the build plate, and reports
+  sealed cavities (trapped resin), suction cups, islands, ledges and plate contact. Problem areas are added as coloured
+  objects in the `Print Check` collection (`PC_Sealed` red, `PC_Cups` orange, `PC_Islands` yellow, `PC_Ledges` purple,
+  `PC_NoContact` blue).
+- **Seal Cavities** adds a `<active>_Plugs` object that fills every sealed cavity. Sealed cavities cannot be seen from
+  outside, so nothing visible changes.
+- **Make Manifold** unites the selection into one watertight `<active>_Solid` object (Blender's Manifold solver on
+  clean copies), repairs self-intersections and zero-size faces with meshlib, and makes the flat cuts LAST
+  (*Intersect With* a blank, *Cut at Plate*), so a repair can never pull the bottom out of flat. It reports how much
+  of the bottom lies on the plate.
+- *Min Drain Gap*: openings narrower than this count as closed. 0 is what a slicer reports.
+- Sealed space that reaches the first layer is listed apart as *plate pockets* (`PC_PlatePockets`, pink): it is closed
+  only by the build plate and opens when the print comes off. The method follows UVtools' resin trap / suction cup
+  detection and the 3D Systems trapped-volume patent (US 5,945,058); see the notes at the top of `print_check.py`.
+
+`fill_support.fill_and_support(mesh, wall_dir, plate_z)` runs the whole wall-face recipe (meshes A to H of the stone
+builder notes) in memory; it has no button here, it is meant to be called by the stone packer.

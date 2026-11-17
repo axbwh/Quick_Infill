@@ -841,7 +841,7 @@ FAST_PIECE = 10.0    # pieces are at most this many x thickness long
 SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone beside the band stands this x h above it
 SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
 MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
-DEPTH_K = 1.1        # fast variant: chip depth = this x the depth rule below (tuned on 8894d6b: jamb 0096 1.2x today, median 0.42x)
+DEPTH_K = 1.0        # fast variant: chip depth = this x the depth rule below (on deb5ad5 the jamb 0096 is already 1.33x today at 1.0; more only raises it)
 DEPTH_RULE = "plane"  # fast variant: "wedge" = k x Thin / (2 tan(a/2)); "plane" = k x T cos^2(a/2) / (2 sin(a/2))
 LIP_UNDER = 3.0      # fast variant: material under an edge thinner than this x Thin is a thin lip: it gets chipped harder
 LIP_FRAC = 0.9       # fast variant: a lip at most Thin thick loses this share of it (the whole lip, less a hair)

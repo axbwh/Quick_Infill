@@ -46,9 +46,22 @@ def _prevent_quit_hang(mm):
     Initialising dbgeng once now, outside the lock, avoids it: in testing,
     quitting hung in 2 of 4 normal and 4 of 5 background runs without this,
     and in 0 of 14 runs with it. Costs about 0.6 s, once per session.
+    meshlib 3.2 no longer has getCurrentStacktrace in Python (nor its own
+    dbgeng stack trace): there the debug engine DLLs are only loaded ahead,
+    in case something else uses them.
     """
     try:
-        mm.getCurrentStacktrace()
+        if hasattr(mm, "getCurrentStacktrace"):
+            mm.getCurrentStacktrace()
+            return
+        import ctypes
+        import sys
+        if sys.platform == "win32":
+            for dll in ("dbghelp.dll", "dbgeng.dll"):
+                try:
+                    ctypes.WinDLL(dll)
+                except OSError:
+                    pass
     except Exception:
         pass
 

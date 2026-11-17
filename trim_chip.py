@@ -841,6 +841,7 @@ FAST_PIECE = 10.0    # pieces are at most this many x thickness long
 SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone beside the band stands this x h above it
 SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
 MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
+DEPTH_K = 1.0        # fast variant: chip depth = this x the depth at which the wedge is Thin thick (1.0: jamb 0096 0.26% vs today 0.30%)
 
 
 def chip_depth(a_half, T, face_size, thick_under):
@@ -850,12 +851,13 @@ def chip_depth(a_half, T, face_size, thick_under):
     a_half: half the edge's inside angle (radians); T: thickness in mesh units (FAST_THICK_PER_SIZE x
     Thin); face_size: sqrt of the area of the larger of the edge's two faces; thick_under: the stone's
     thickness straight under the edge along the chip normal (None if unknown).
-    A wedge of angle a is thinner than T within T / (2 tan(a/2)) of its edge; the plane through those
-    two lines lies T cos^2(a/2) / (2 sin(a/2)) under the edge. Capped at FAST_MAX_CUT x T, at
+    The chip goes down to where the wedge is Thin (= T / FAST_THICK_PER_SIZE) thick:
+    DEPTH_K x Thin / (2 tan(a/2)), i.e. 0.015 at 90 deg and 0.026 at 60 deg for Thin 0.03. (The earlier
+    rule, T cos^2(a/2) / (2 sin(a/2)), went about 2x deeper at 90 deg and over-chipped the jamb.) Capped at FAST_MAX_CUT x T, at
     FACE_CAP x face_size (bumps between two small faces get small chips) and at THICK_CAP x
     thick_under (thin stones are not sliced)."""
-    s = max(math.sin(a_half), 1e-6)
-    h = min(T * math.cos(a_half) ** 2 / (2 * s), FAST_MAX_CUT * T, FACE_CAP * face_size)
+    thin = T / FAST_THICK_PER_SIZE
+    h = min(DEPTH_K * thin / (2 * max(math.tan(a_half), 1e-6)), FAST_MAX_CUT * T, FACE_CAP * face_size)
     if thick_under is not None:
         h = min(h, THICK_CAP * thick_under)
     return h

@@ -42,7 +42,9 @@ def build_infill(src_mesh, s, report=None):
     else:
         grown = cuda_offset(src_mesh, vox, grow)
         shrunk = cuda_offset(grown, vox, -grow)
-        out = carve_weighted(shrunk, src_mesh, vox, shrink_mult, max_vertices=working_res, target_resolution=working_res)
+        # fixed_voxel (set by Fill and Support): the skin uses the same voxel, not one from the mesh's box
+        out = carve_weighted(shrunk, src_mesh, vox, shrink_mult, max_vertices=working_res,
+                             target_resolution=None if getattr(s, "fixed_voxel", False) else working_res)
 
     if s.trim_thin:
         out = cuda_offset(cuda_offset(out, vox, -vox), vox, vox)

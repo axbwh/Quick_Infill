@@ -57,47 +57,50 @@ def get_active_angle_preset(s):
 class QuickInfillSettings(PropertyGroup):
     # ----- shared by every voxel tool (Offset, Support, booleans) -----
     shared_voxel_size: FloatProperty(
-        name="Voxel Size", description="Voxel size used by the offset, support and boolean tools",
+        name="Voxel Size", description="Size of the grid a mesh is rebuilt on.\nSmaller is finer and slower. "
+                                        "Used by the offset, support and boolean tools",
         default=OFFSET_PRESETS['STONE']["voxel"], min=0.025, max=0.4, precision=3,
     )
     decimation_ratio: FloatProperty(
-        name="Decimation Ratio", description="Fraction of final faces to keep during auto-decimation",
+        name="Decimation Ratio", description="How many of the result's faces are kept.\n"
+                                              "0.02 keeps one face in fifty. Used when Decimate is set to Ratio",
         default=OFFSET_PRESETS['STONE']["ratio"], min=0.001, max=1.0, precision=4,
     )
     decimate_mode: EnumProperty(
-        name="Decimate Mode", description="Choose when automatic decimation is active",
+        name="Decimate Mode", description="How a result is reduced to fewer faces",
         items=[
-            ("VOXEL_RATIO", "Ratio", "Decimate based on the current ratio value"),
-            ("ORIGINAL", "Original", "Decimate back to the original polycount"),
-            ("OFF", "Off", "Disable auto-decimation"),
+            ("VOXEL_RATIO", "Ratio", "Reduce the result to the share of faces set by Ratio"),
+            ("ORIGINAL", "Original", "Reduce the result to the face count the mesh had before"),
+            ("OFF", "Off", "Do not reduce the result.\nIt keeps every face the voxel grid makes"),
         ],
         default="VOXEL_RATIO",
     )
     replace_original: BoolProperty(
         name="Replace Original",
-        description="Replace the original object with the result instead of creating a new object",
+        description="Replace the mesh with the result.\nOff: the original is kept and the result is a new object",
         default=True,
     )
     process_islands: BoolProperty(
         name="Islands",
-        description="Process each mesh island individually, then join the result back into one object",
+        description="Work on each loose part of a mesh on its own.\nThe parts are joined back into one object "
+                    "afterwards, so parts that touch do not melt together",
         default=False,
     )
     smart_resolution: BoolProperty(
         name="Smart",
-        description="Use each island/object's existing resolution tag (if any) for its voxel size and decimation ratio, "
-                    "falling back to the current settings for untagged geometry",
-        default=False,
+        description="Work each mesh at its own resolution tag.\nA tagged object (or island) uses its tag's voxel "
+                    "size and ratio. The values set here are only used for meshes without a tag",
+        default=True,
     )
     apply_modifiers_on_export: BoolProperty(
         name="Apply Modifiers",
-        description="Use each object's modifier result (viewport) as the input. Off = ignore modifiers",
+        description="Work on each object as its modifiers leave it.\nOff: the modifiers are ignored",
         default=False,
     )
     ask_above_seconds: FloatProperty(
         name="Ask Above",
-        description="Before starting a job estimated to take longer than this, ask first (0 = never ask). "
-                    "Running jobs can always be stopped with Esc",
+        description="Ask before starting a job expected to take longer than this many seconds.\n"
+                    "0: never ask. A running job can always be stopped with Esc",
         default=30.0, min=0.0, soft_max=600.0, step=500, precision=0,
     )
     # Kept for files saved by older versions; the highlighted preset is computed when drawn.
@@ -109,40 +112,45 @@ class QuickInfillSettings(PropertyGroup):
 
     # ----- Offset tools -----
     distance: FloatProperty(
-        name="Distance", description="Offset distance for grow/shrink operations",
+        name="Distance", description="How far Grow and Shrink move the surface, in mm.\n"
+                                      "Also the base distance of Trim Edges and the slit size Create Outline closes",
         default=OFFSET_PRESETS['STONE']["distance"], min=0.0, max=4.0, precision=3,
     )
     trim_edges_x: FloatProperty(
-        name="Trim Edges X", description="Extra factor for Trim Edges final grow step (1 + x)",
+        name="Trim Edges X", description="How much Trim Edges gives back after rounding the edges off.\n"
+                                          "Higher keeps more of the stone (the last grow step is 1 + X times Distance)",
         default=OFFSET_PRESETS['STONE']["x"], min=0.0, max=0.5, precision=3, subtype='FACTOR',
     )
     trim_edges_density: FloatProperty(
-        name="Trim Edges Density", description="Target face density before Trim Edges boolean (faces per area unit)",
+        name="Trim Edges Density", description="How finely the trimmed surface is meshed.\n"
+                                                "Faces per unit of area before it is cut back to the stone",
         default=1.0, min=0.5, max=4.0, precision=4,
     )
 
     # ----- Support tools -----
     undercut_angle: FloatProperty(
         name="Angle",
-        description="Undercut angle in degrees. 0° = vertical (Z up), +/-90° = horizontal (selected axis). "
-                    "Negative angles use voxel union when combining directions",
+        description="How far the lit directions are tilted from straight down.\n"
+                    "0 = straight down, 90 = level. Remove Scoop looks at the stone from this angle too. "
+                    "Negative angles join the directions with a voxel union",
         default=60.0, min=-90.0, max=90.0, precision=1,
     )
-    dir_x_pos: BoolProperty(name="+X", description="Include +X direction", default=True)
-    dir_x_neg: BoolProperty(name="-X", description="Include -X direction", default=True)
-    dir_y_pos: BoolProperty(name="+Y", description="Include +Y direction", default=True)
-    dir_y_neg: BoolProperty(name="-Y", description="Include -Y direction", default=True)
-    dir_xpos_ypos: BoolProperty(name="+X+Y", description="Include +X+Y diagonal direction", default=True)
-    dir_xpos_yneg: BoolProperty(name="+X-Y", description="Include +X-Y diagonal direction", default=True)
-    dir_xneg_ypos: BoolProperty(name="-X+Y", description="Include -X+Y diagonal direction", default=True)
-    dir_xneg_yneg: BoolProperty(name="-X-Y", description="Include -X-Y diagonal direction", default=True)
-    dir_z: BoolProperty(name="Z", description="Include straight-on direction (no tilt, like 0° angle)", default=False)
+    dir_x_pos: BoolProperty(name="+X", description="Fix undercuts seen from +X", default=True)
+    dir_x_neg: BoolProperty(name="-X", description="Fix undercuts seen from -X", default=True)
+    dir_y_pos: BoolProperty(name="+Y", description="Fix undercuts seen from +Y", default=True)
+    dir_y_neg: BoolProperty(name="-Y", description="Fix undercuts seen from -Y", default=True)
+    dir_xpos_ypos: BoolProperty(name="+X+Y", description="Fix undercuts seen from +X+Y", default=True)
+    dir_xpos_yneg: BoolProperty(name="+X-Y", description="Fix undercuts seen from +X-Y", default=True)
+    dir_xneg_ypos: BoolProperty(name="-X+Y", description="Fix undercuts seen from -X+Y", default=True)
+    dir_xneg_yneg: BoolProperty(name="-X-Y", description="Fix undercuts seen from -X-Y", default=True)
+    dir_z: BoolProperty(name="Z", description="Fix undercuts seen from straight above, with no tilt", default=False)
     auto_shrink: BoolProperty(
-        name="Auto Shrink", description="Shrink the result to compensate for material added by undercut fixing",
+        name="Auto Shrink", description="Shrink the result after fixing undercuts.\nTakes back the material the fix "
+                                         "added, on faces within 70 degrees of straight up, so stones still fit",
         default=False,
     )
     shrink_amount: FloatProperty(
-        name="Shrink Amount", description="Amount to shrink the mesh after undercut fixing",
+        name="Shrink Amount", description="How far Auto Shrink pulls the surface in, in mm",
         default=0.1, min=0.01, max=1.0, precision=2,
     )
     shrink_angle_threshold: FloatProperty(
@@ -152,11 +160,13 @@ class QuickInfillSettings(PropertyGroup):
 
     # ----- Remove Scoop (support tools) -----
     scoop_method: EnumProperty(
-        name="Method",
-        items=(('FILL', "Fill", "Delete the faces no 35-degree side view can see (the scoop) and fill the hole smoothly, "
-                                "like repairing a 3D-scan defect (no flat cut)"),
-               ('VIEW', "View", "Cut flat where the scoop ends, seen looking down at each side of the stone at the View Angle"),
-               ('CONTACT', "Contact", "Cut where a flat cut covers the Contact share of the stone's footprint")),
+        name="Method", description="How the scoop is taken off",
+        items=(('FILL', "Fill", "Fill the scoop in.\nThe faces no side view can see (the scoop) are deleted and the "
+                                "hole is filled smoothly, like repairing a 3D-scan defect. No flat cut"),
+               ('VIEW', "View", "Cut the scoop off flat, where it ends.\nFound by looking down at each side of the "
+                                "stone at the Angle"),
+               ('CONTACT', "Contact", "Cut the scoop off flat, where the cut is big enough.\nWhere a flat cut covers "
+                                      "the Contact share of the stone's footprint")),
         default='FILL',
     )
     scoop_angle: FloatProperty(
@@ -165,24 +175,27 @@ class QuickInfillSettings(PropertyGroup):
         default=60.0, min=20.0, max=80.0, precision=0, subtype='NONE',
     )
     scoop_share: FloatProperty(
-        name="Bottom Line", description="Cut at this share of the bottom points the four views see (50% = median, higher cuts more)",
+        name="Bottom Line", description="How much of the scoop is cut off.\nThe cut is at this share of the bottom points "
+                                         "the four views see: 50% is the middle, higher cuts more",
         default=50.0, min=0.0, max=100.0, precision=0, subtype='PERCENTAGE',
     )
     scoop_contact: FloatProperty(
-        name="Contact", description="Cut the scoop where the flat cut covers this share of the stone's footprint "
-                                    "(same contact-area rule as the stone packer's flat cuts)",
+        name="Contact", description="How big the flat cut must be.\nThe scoop is cut where the flat cut covers this "
+                                    "share of the stone's footprint",
         default=90.0, min=50.0, max=100.0, precision=0, subtype='PERCENTAGE',
     )
     scoop_offset: FloatProperty(
-        name="Scoop Offset", description="Move the Remove Scoop cut up (+) or down (-) from the found height, in mm",
+        name="Scoop Offset", description="Move the cut up (+) or down (-) from where it was found, in mm",
         default=0.0, min=-5.0, max=5.0, precision=2,
     )
     scoop_damage: BoolProperty(
-        name="Damage Cut", description="Run Stone Damage on the new flat face only (needs the Stone_Damage node group in the file)",
+        name="Damage Cut", description="Damage the new flat face so it matches the stone.\n"
+                                        "Needs the Stone_Damage node group in the file",
         default=True,
     )
     scoop_trim: BoolProperty(
-        name="Trim Edges", description="Run Trim Edges after the cut (and damage)", default=True,
+        name="Trim Edges", description="Round the edges off after the cut.\nRuns Trim Edges on the stone, after the damage",
+        default=True,
     )
 
     # ----- Cavity Infill (its own resolution / grow / shrink, NOT shared) -----

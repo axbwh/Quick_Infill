@@ -217,14 +217,54 @@ from .trim_round import STONE_KEEPS, PARALLEL_FACES as TRIM_EDGES_PARALLEL_FACES
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
     bl_label = "Trim Edges"
-    bl_description = ("Round off the thin, sharp edges of the selected meshes.\n"
-                      "For stones that were cut. A stone too small for the Stone resolution (it would lose more "
-                      "than a third of its volume) is trimmed at Detail instead and tagged Detail")
+    bl_description = ("Take the thin, sharp edges off the selected meshes.\n"
+                      "Flat Chip (default): a flat chip off each sharp edge, sized by Thin; Only Cut Edges "
+                      "keeps it to where a cut face meets the stone. Round (old): the voxel way; a stone too "
+                      "small for the Stone resolution is trimmed at Detail instead and tagged Detail")
     suffix, label = "_TrimEdges", "Trim Edges"
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
     decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
+
+    def job_setup(self, context):
+        s = context.scene.quick_infill_settings
+        if getattr(s, "trim_edges_method", "VOXEL") != "CHIP":
+            return super().job_setup(context)
+        objs = selected_meshes(context)
+        if not objs:
+            self.report({'ERROR'}, "No mesh selected.")
+            return None
+        from .trim_chip import fast_chip
+        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        thin = float(s.trim_edges_thin)
+        only_cut = bool(s.trim_edges_only_cut)
+        marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
+
+        def on_prepared(run):
+            if not only_cut:
+                return
+            for job in run.jobs:
+                att = job.obj.data.attributes.get("sp_cut")
+                if att is None or att.domain != 'FACE' or job.face_map is None:
+                    continue           # no marks: fast_chip finds the cut faces by shape
+                vals = [False] * len(job.obj.data.polygons)
+                att.data.foreach_get("value", vals)
+                marks[id(job.src)] = np.asarray(vals, bool)[job.face_map]
+
+        def chip(mesh, res):
+            return fast_chip(mesh, thin, unit=STL_EXPORT_SCALE, only_cut=only_cut,
+                             cut_faces=marks.get(id(mesh)), detect=True)
+
+        # the chipped stone keeps its own mesh: no voxel-style decimation afterwards
+        return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
+                             on_prepared=on_prepared, auto_decimate=False)
+
+    def job_estimate(self, context):
+        s = context.scene.quick_infill_settings
+        if getattr(s, "trim_edges_method", "VOXEL") == "CHIP":
+            return 0.05 * len(selected_meshes(context))
+        return super().job_estimate(context)
 
     def make_operation(self, s):
         from .trim_round import trim_edges as round_trim

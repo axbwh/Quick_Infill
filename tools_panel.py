@@ -28,7 +28,13 @@ def draw_offset_tools(layout, context):
     row.operator("quick_infill.remesh", text="Remesh", icon='ALIASED')
     row.operator("quick_infill.trim_thin", text="Trim Thin", icon='MOD_WARP')
     col.separator()
+    col.row(align=True).prop(s, "trim_edges_method", expand=True)
     row = col.row(align=True)
-    row.prop(s, "trim_edges_x", text="X")
-    row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
-    col.row(align=True).prop(s, "trim_edges_density", text="Trim Density")
+    if s.trim_edges_method == 'CHIP':
+        row.prop(s, "trim_edges_thin", text="Thin")
+        row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
+        col.row(align=True).prop(s, "trim_edges_only_cut")
+    else:
+        row.prop(s, "trim_edges_x", text="X")
+        row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
+        col.row(align=True).prop(s, "trim_edges_density", text="Trim Density")

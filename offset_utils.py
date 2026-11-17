@@ -161,7 +161,9 @@ FAST_SHELL = True
 def _vert_scalars(values):
     mm, _ = get_meshlib()
     sc = mm.VertScalars()
-    sc.vec = mm.std_vector_float(np.asarray(values, dtype=np.float32).tolist())
+    # meshlib 3.2 wants its allocator-typed vector here; 3.1 has only std_vector_float
+    vec_type = getattr(mm, "std_vector_float_Allocator_float", None) or mm.std_vector_float
+    sc.vec = vec_type(np.asarray(values, dtype=np.float32).tolist())
     return sc
 
 

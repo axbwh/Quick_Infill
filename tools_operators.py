@@ -11,7 +11,7 @@ from bpy.types import Operator
 
 from .meshlib_utils import get_meshlib
 from .offset_utils import (
-    cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
+    cuda_offset, decimate_mesh, target_faces_for_density, bbox_of, face_count,
     OFFSET_PRESETS, nearest_resolution_tag, MeshCollapsedError,
 )
 from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds, ToolCost, Retagged
@@ -198,6 +198,11 @@ class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
         return lambda mesh, res: cuda_offset(mesh, res, 0.0)
 
 
+# The Round method of Trim Edges and Trim Thin live in trim_round.py (pure meshlib, also run by worker
+# processes).
+from .trim_round import STONE_KEEPS, PARALLEL_FACES as TRIM_EDGES_PARALLEL_FACES  # noqa: F401, E402
+
+
 class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_thin"
     bl_label = "Trim Thin"
@@ -207,16 +212,17 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     est_cost, est_grow = ToolCost(offsets=2, decimates=1), 0.0
     delete_collapsed = True
     collapse_hint = "too thin for current resolution"
+    # decimated in parallel parts like Trim Edges: about 3x faster, the result moves by at most
+    # ~0.55 voxel (Ashlarize-library/trim-thin-speed, Alex 2026-11-18)
+    decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
 
     def make_operation(self, s):
-        def trim_thin(mesh, res):
-            shrunk = ensure_not_collapsed(cuda_offset(mesh, res, -res))
-            return cuda_offset(shrunk, res, res)
-        return trim_thin
+        from .trim_round import trim_thin
+        return lambda mesh, res: trim_thin(mesh, res)[0]
 
-
-# The Round method of Trim Edges lives in trim_round.py (pure meshlib, also run by worker processes).
-from .trim_round import STONE_KEEPS, PARALLEL_FACES as TRIM_EDGES_PARALLEL_FACES  # noqa: F401
+    def process_job(self, s):
+        """Many objects run in worker processes (the same trim_round.trim_thin and decimation there)."""
+        return ("trim_thin_job", ("thin",))
 
 
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):

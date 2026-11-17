@@ -1,6 +1,6 @@
 """
-Trim Edges, Round method (the voxel way), in pure meshlib: no bpy, so the same code runs in
-Blender and in Quick Infill's worker processes (process_pool.py, qi_worker.py).
+Trim Edges, Round method (the voxel way), and Trim Thin, in pure meshlib: no bpy, so the same code
+runs in Blender and in Quick Infill's worker processes (process_pool.py, qi_worker.py).
 
 Grow 2d, shrink 3d (rounds off thin edges), regrow (1+x)d, decimate to the density target,
 then intersect with the original to clip back to its silhouette. A stone worked at Stone that
@@ -19,8 +19,8 @@ from .offset_utils import (
 # instead (Alex 2026-11-17).
 STONE_KEEPS = 2.0 / 3.0
 
-# Trim Edges decimates in parallel parts above this many faces (its own decimation and the
-# pipeline's). Stones give 30k to 250k faces there, under the shared 200k threshold, so they were
+# Trim Edges and Trim Thin decimate in parallel parts above this many faces (their own decimation and
+# the pipeline's). Stones give 30k to 250k faces there, under the shared 200k threshold, so they were
 # decimated on one thread. In parts it is about twice as fast; the result moves by at most 0.016 BU
 # (p99 0.008), the same as today's result moves when the stone is shifted by half a voxel
 # (Ashlarize-library/trim-edges-speed, 2026-11-18).
@@ -92,7 +92,14 @@ def lean_trim(mesh, res, distance, x, density, unit):
     return out, ('DETAIL' if info.get("tag") == "DETAIL" else None)
 
 
-KINDS = {"voxel": trim_edges, "lean": lean_trim}
+def trim_thin(mesh, res):
+    """Trim Thin: shrink by one voxel, grow back by one voxel; anything thinner than two voxels goes.
+    (mesh, None). Raises MeshCollapsedError when nothing is left."""
+    shrunk = ensure_not_collapsed(cuda_offset(mesh, res, -res))
+    return cuda_offset(shrunk, res, res), None
+
+
+KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin}
 
 
 def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):

@@ -27,8 +27,6 @@ PAD = 3             # empty voxels kept around the model
 def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6, bounds=None):
     """(phi[z, y, x] float32, origin xyz of voxel (0,0,0)'s centre). Negative inside.
     bounds: (lo, hi) the grid must cover (default: the mesh's own box)."""
-    mm, mc = get_meshlib()
-    mn = get_mrmeshnumpy()
     # computeBoundingBox looks at the vertices in use only (a mesh fresh from a
     # boolean still carries the unused points of its inputs)
     box = mesh.computeBoundingBox()
@@ -40,6 +38,17 @@ def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6, bounds=None
     h = float(voxel)
     org = lo - pad * h
     nx, ny, nz = (int(np.ceil((hi[i] - lo[i]) / h)) + 2 * pad + 1 for i in range(3))
+    return distance_grid_at(mesh, h, org, (nz, ny, nx), band, slab_voxels), org
+
+
+def distance_grid_at(mesh, voxel, origin, shape, band=BAND, slab_voxels=24e6):
+    """phi[z, y, x] float32 of `mesh` on a given lattice: origin is the centre of voxel (0,0,0),
+    shape is (nz, ny, nx). Negative inside. For a second mesh on the grid of a first."""
+    mm, mc = get_meshlib()
+    mn = get_mrmeshnumpy()
+    h = float(voxel)
+    org = np.asarray(origin, dtype=np.float64)
+    nz, ny, nx = (int(v) for v in shape)
     phi = np.empty((nz, ny, nx), dtype=np.float32)
     per_slab = max(1, int(slab_voxels // (nx * ny)))
     reach = band * h
@@ -63,7 +72,7 @@ def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6, bounds=None
             del vol
             z += n
     np.clip(phi, -reach, reach, out=phi)
-    return phi, org
+    return phi
 
 
 def fill_enclosed(phi, voxel, gap=1.5):
@@ -283,3 +292,63 @@ def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=
         fill_enclosed(phi, voxel, enclosed_gap)
     out = fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount, shrink_angle, origin=org, floors=floors)
     return grid_to_mesh(out, org, voxel)
+
+
+# ---------------------------------------------------------------------------
+# A scoop that rests on the objects around it (Smart, several objects)
+# ---------------------------------------------------------------------------
+
+def rest_on_others(phi, phi_o, fixed, voxel, bite=0.5):
+    """The grid of an object whose scoop stops at the other objects (see fix_undercuts_resting).
+    phi: the object. phi_o: the other objects. fixed: the object with its undercuts fixed.
+
+    The result is `fixed` less the other objects taken `bite` voxels smaller, as distances: both
+    sides of the surface keep their real distances, so the scoop's slope comes out as smooth as it
+    is in `fixed`. (The first version wrote a flat "empty" outside the scoop, and the surface
+    snapped to the voxels: a slope came out as stairs.)"""
+    from .print_check import flood3d
+    h = float(voxel)
+    out = np.maximum(fixed, -(phi_o + bite * h))         # the scoop, up to `bite` voxels into the others
+    own = phi < 0.0
+    solid = out < 0.0
+    out[solid & ~flood3d(own, solid | own)] = 0.25 * h   # a piece cut off behind another object goes
+    np.minimum(out, phi, out=out)                        # the object itself stays whole
+    return out
+
+
+def fix_undercuts_resting(mesh, others, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0, enclosed_gap=1.5,
+                          bite=0.5):
+    """fix_undercuts_mesh for one object of several that print together (Alex 2026-11-17: "if
+    multiple loose objects are selected, it will automatically create the scoop to rest on the
+    object below").
+
+    On its own an object's scoop is the wedge under it, whatever is there: in a wall it runs into
+    the stone below. Here it stops at the other objects: the scoop is the same wedge, less the
+    part inside them, and it goes `bite` voxels into what it meets so the two join. A piece that
+    another object cuts off from the rest goes.
+
+    others: the other objects as (meshes, box lows [n, 3], box highs [n, 3]), in the same space
+    as `mesh`. Only the ones whose box reaches this object's scoop are looked at.
+    """
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    h = float(voxel)
+    pts = mn.getNumpyVerts(mesh)
+    box = mesh.computeBoundingBox()
+    blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
+    pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]      # (not the unused points of a boolean's inputs)
+    lo, hi, floors = fill_reach(pts, up_vectors)
+    phi, org = distance_grid(mesh, h, bounds=(lo, hi))
+    if enclosed_gap is not None:
+        fill_enclosed(phi, h, enclosed_gap)
+    fixed = fix_undercuts_grid(phi, up_vectors, h, shrink_amount, shrink_angle, origin=org, floors=floors)
+    meshes, los, his = others
+    near = [meshes[i] for i in np.nonzero((np.asarray(los) <= hi + 2 * h).all(1)
+                                          & (np.asarray(his) >= lo - 2 * h).all(1))[0]] if len(meshes) else []
+    if near:
+        rest = mm.Mesh()                  # its own mesh: the others are shared with the work on them
+        for m in near:
+            rest.addMesh(m)
+        check_cancelled()
+        fixed = rest_on_others(phi, distance_grid_at(rest, h, org, phi.shape), fixed, h, bite)
+    return grid_to_mesh(fixed, org, h)

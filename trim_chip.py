@@ -1803,6 +1803,7 @@ def local_round2(mesh, size=SIZE, unit=1.0, target_faces=None, info=None):
 ROUND_DETAIL = dict(voxel=0.005, distance=0.03, x=0.4)     # BU: Quick Infill's Detail preset
 ROUND_RATIO = dict(STONE=0.0175, DETAIL=0.03)
 STONE_KEEPS = 2.0 / 3.0
+ROUND_MAX_KEEP = 0.9    # the final decimation keeps at most this share of the intersect's faces
 ROUND_DECIMATE_PARTS = 8   # parallel decimation parts for the big offset mesh (1: off)
 
 
@@ -1888,8 +1889,17 @@ def _lean_round(mesh, unit, density, info, stone=None, ratio=None, fallback=True
         return src
     t = time.perf_counter()
     r_ = ratio if (ratio is not None and tag == "STONE") else ROUND_RATIO[tag]
-    target = int(r_ * n_vox * 0.96)                           # today's output: ratio x its voxel intersect faces
+    # today's output: ratio x its voxel intersect faces, times Trim Density (the "how finely" slider:
+    # 1.0 = the old face count; it used to thin only the shell before the intersect, which this
+    # decimation then overrode, so the slider did nothing)
+    base = int(r_ * n_vox * 0.96)
+    target = int(base * float(density))
     cur = int(out.topology.numValidFaces())
+    if target > base:
+        # a density above 1 adds faces up to 90% of the exact intersect, never past it: that
+        # decimation is what tidies the boolean's slivers along the trimmed edge (skipping it left
+        # needle triangles there). Density 1 and below: unchanged.
+        target = min(target, max(base, int(cur * ROUND_MAX_KEEP)))
     if target < cur:   # the shared decimation (its parallel split too), maxError 10 voxels
         from .offset_utils import decimate_mesh
         out = decimate_mesh(out, target_face_count=target,

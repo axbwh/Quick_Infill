@@ -198,8 +198,9 @@ class QuickInfillSettings(PropertyGroup):
         default=False,
     )
     trim_edges_density: FloatProperty(
-        name="Trim Edges Density", description="How finely the trimmed surface is meshed.\n"
-                                                "Faces per unit of area before it is cut back to the stone",
+        name="Trim Edges Density", description="How finely the trimmed stone is meshed (Round).\n"
+                                                "1 = the usual face count, 0.5 = half the faces. Above 1 adds "
+                                                "faces only up to what the trim's cut makes, so 2 to 4 often look alike",
         default=1.0, min=0.5, max=4.0, precision=4,
     )
 

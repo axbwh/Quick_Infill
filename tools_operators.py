@@ -66,6 +66,8 @@ class _OffsetToolBase(ModalJobMixin):
     # For the run-time estimate: work per object and the grow distance used (x Distance).
     est_cost = ToolCost(offsets=1, decimates=1)
     est_grow = 1.0
+    # The pipeline's decimation runs in parallel parts above this many faces (None: its default).
+    decimate_parallel_above = None
 
     @classmethod
     def poll(cls, context):
@@ -89,7 +91,8 @@ class _OffsetToolBase(ModalJobMixin):
             self.report({'ERROR'}, "No mesh selected.")
             return None
         # bpy.context (not the captured one): finish may run later, from the modal handler.
-        return pipeline_spec(objs, self.make_operation(s), self.suffix, s, lambda pr: self.job_finish(bpy.context, pr))
+        return pipeline_spec(objs, self.make_operation(s), self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
+                             decimate_parallel_above=self.decimate_parallel_above)
 
     def job_finish(self, context, pr):
         s = context.scene.quick_infill_settings
@@ -206,6 +209,13 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
 # at Detail instead (see trim_edges).
 STONE_KEEPS = 2.0 / 3.0
 
+# Trim Edges decimates in parallel parts above this many faces (both its own decimation and the
+# pipeline's). Stones give 30k to 250k faces there, under the shared 200k threshold, so they were
+# decimated on one thread. In parts it is about twice as fast; the result moves by at most 0.016 BU
+# (p99 0.005), the same as today's result moves when the stone is shifted by half a voxel
+# (Ashlarize-library	rim-edges-speed, 2026-11-18).
+TRIM_EDGES_PARALLEL_FACES = 20_000
+
 
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
@@ -217,6 +227,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
+    decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
 
     def make_operation(self, s):
         from .support_tools import intersect_meshes
@@ -238,7 +249,8 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                 diag = float(np.linalg.norm(hi - lo))
                 reduction = max(0.0, 1.0 - float(target) / float(max(1, current)))
                 max_err = max(float(res) * 10.0, diag * (0.01 + 0.49 * reduction))
-                w = decimate_mesh(w, target_face_count=target, max_error=max_err)
+                w = decimate_mesh(w, target_face_count=target, max_error=max_err,
+                                  parallel_above=TRIM_EDGES_PARALLEL_FACES)
             return intersect_meshes(w, mesh, res)
 
         def kept(out, mesh):

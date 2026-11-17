@@ -384,10 +384,10 @@ def _unwrap(out, res, ratio):
     return out, res, ratio
 
 
-def _decimate(out, initial_faces, res, mode, ratio):
+def _decimate(out, initial_faces, res, mode, ratio, parallel_above=None):
     do, target = should_auto_decimate_faces(initial_faces, face_count(out), voxel_size=res, mode=mode, ratio=ratio)
     if do:
-        out = decimate_mesh(out, target_face_count=target, resolution=res)
+        out = decimate_mesh(out, target_face_count=target, resolution=res, parallel_above=parallel_above)
     return out
 
 
@@ -395,7 +395,7 @@ def _tag_index(res):
     return _tag_to_index(nearest_resolution_tag(res)) if res is not None else -1
 
 
-def _compute(job, operation_fn, auto_decimate, islands, smart):
+def _compute(job, operation_fn, auto_decimate, islands, smart, parallel_above=None):
     """Worker: pure meshlib (no bpy). Fills job.out / job.out_tags or raises."""
     mm, _ = get_meshlib()
     mn = get_mrmeshnumpy()
@@ -407,7 +407,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
         if face_count(out) == 0:
             raise MeshCollapsedError()
         if auto_decimate:
-            out = _decimate(out, face_count(src), res, job.mode, ratio)
+            out = _decimate(out, face_count(src), res, job.mode, ratio, parallel_above)
         job.out = out
         job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
         job.voxels_used = [res] if res is not None else []
@@ -440,7 +440,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
             job.dropped += 1
             continue
         if auto_decimate:
-            out = _decimate(out, face_count(island), res, mode, ratio)
+            out = _decimate(out, face_count(island), res, mode, ratio, parallel_above)
         tags.append(np.full(face_count(out), _tag_index(res), dtype=np.int32))
         if res is not None:
             voxels.append(res)
@@ -463,7 +463,7 @@ class PipelineRun:
 
     def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
                  replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
-                 parallel=True, strip_flat=()):
+                 parallel=True, strip_flat=(), decimate_parallel_above=None):
         s = settings or bpy.context.scene.quick_infill_settings
         self.objects = list(objects)
         self.operation_fn = operation_fn
@@ -477,6 +477,7 @@ class PipelineRun:
         self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
         self.parallel = parallel
         self.strip_flat = set(strip_flat)   # objects whose flat polygon pieces are left out (Grow / Shrink)
+        self.decimate_parallel_above = decimate_parallel_above   # None: decimate_mesh's own threshold
         self.jobs = []
         self.pr = ProcessResult()
         self.cancelled = False
@@ -516,7 +517,8 @@ class PipelineRun:
             try:
                 if control is not None:
                     control.check()
-                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart)
+                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart,
+                         self.decimate_parallel_above)
             except Exception as e:  # recorded per job, handled on the main thread
                 job.error = e
             finally:

@@ -841,12 +841,15 @@ FAST_PIECE = 10.0    # pieces are at most this many x thickness long
 SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone beside the band stands this x h above it
 SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
 MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
-DEPTH_K = 1.0        # fast variant: chip depth = this x the depth rule below (on deb5ad5 the jamb 0096 is already 1.33x today at 1.0; more only raises it)
+DEPTH_K = 1.6        # fast variant: chip depth = this x the depth rule below (1.6: median 0.94x today's volume over the 14 test stones)
 DEPTH_RULE = "plane"  # fast variant: "wedge" = k x Thin / (2 tan(a/2)); "plane" = k x T cos^2(a/2) / (2 sin(a/2))
 LIP_UNDER = 3.0      # fast variant: material under an edge thinner than this x Thin is a thin lip: it gets chipped harder
 LIP_FRAC = 0.9       # fast variant: a lip at most Thin thick loses this share of it (the whole lip, less a hair)
 LIP_KEEP_ANGLE = True  # fast variant: on a lip the thickness cap is off: the angle depth (or the lip rule, if deeper) applies
 UNDER_BOGUS = "skip"   # fast variant: what such a reading gets: "angle" (the angle depth) or "skip" (no chip)
+FACE_FREE_DEG = 90.0  # fast variant: edges sharper than this (inside angle, deg) are not face-capped (knife lips on small faces)
+CHAIN_DANGLE = 25.0  # deg: a piece only takes edges whose inside angle is within this of its first edge's (a sharp run is not averaged away)
+PIECE_ANGLE = "mean"  # fast variant: a piece's angle: "mean" (length-weighted) or "min" (its sharpest edge)
 UNDER_MIN = 0.15     # fast variant: a thickness reading under this x Thin is the ray leaving through a neighbour face: ignored
 
 
@@ -872,11 +875,16 @@ def chip_depth(a_half, T, face_size, thick_under):
         d = DEPTH_K * T * math.cos(a_half) ** 2 / (2 * s)
     else:
         d = DEPTH_K * thin / (2 * max(math.tan(a_half), 1e-6))
-    h = min(d, FAST_MAX_CUT * T, FACE_CAP * face_size)
+    thin_lip = thick_under is not None and UNDER_MIN * thin <= thick_under < LIP_UNDER * thin
+    if 2.0 * math.degrees(a_half) < FACE_FREE_DEG or thin_lip:
+        h = min(d, FAST_MAX_CUT * T)              # sharp edges and thin lips: the face-size cap is off
+    else:
+        h = min(d, FAST_MAX_CUT * T, FACE_CAP * face_size)
     if thick_under is None:
         return h
-    if thick_under < UNDER_MIN * thin:
-        return h if UNDER_BOGUS == "angle" else 0.0
+    if thick_under < UNDER_MIN * thin:          # a knife lip (sharp edge) or a ray that left through a neighbour
+        sharp = 2.0 * math.degrees(a_half) < FACE_FREE_DEG
+        return h if (sharp or UNDER_BOGUS == "angle") else 0.0
     if thick_under >= LIP_UNDER * thin or not LIP_KEEP_ANGLE:
         h = min(h, THICK_CAP * thick_under)
     if thick_under < LIP_UNDER * thin:
@@ -996,7 +1004,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             cur, v = k, end
             while length < FAST_PIECE * T:
                 nxt = [j for j in at.get(v, []) if not used[j] and abs(dirs[j] @ dirs[cur]) >= cos_turn
-                       and bis[j] @ bis[cur] >= cos_turn]
+                       and bis[j] @ bis[cur] >= cos_turn and abs(alpha[idx[j]] - alpha[idx[k]]) < CHAIN_DANGLE]
                 if not nxt:
                     break
                 j = max(nxt, key=lambda q: abs(dirs[q] @ dirs[cur]))   # through junctions: the straightest
@@ -1044,7 +1052,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             n = n * math.cos(ang) + np.cross(ax, n) * math.sin(ang)
         u = np.cross(n, ax)
         w8 = lens[pc] / lens[pc].sum()
-        a_half = float((a2[pc] * w8).sum())
+        a_half = float((a2[pc] * w8).sum()) if PIECE_ANGLE == "mean" else float(a2[pc].min())
         thick_under = None
         try:
             hit = mm.rayMeshIntersect(mp_m, mm.Line3f(mm.Vector3f(*(c0 - n * 1e-4 * unit)), mm.Vector3f(*(-n))))

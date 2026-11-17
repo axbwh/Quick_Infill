@@ -12,8 +12,9 @@ from bpy.types import Operator
 from .meshlib_utils import get_meshlib
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
+    OFFSET_PRESETS, nearest_resolution_tag, MeshCollapsedError,
 )
-from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds, ToolCost
+from .blender_meshlib_utils import PipelineRun, select_results, remove_objects, estimate_seconds, ToolCost, Retagged
 from .job_runner import ModalJobMixin, JobSpec
 import numpy as np
 
@@ -147,8 +148,8 @@ class _FlatAwareOffset(_OffsetToolBase):
 class QUICKINFILL_OT_grow(_FlatAwareOffset, Operator):
     bl_idname = "quick_infill.grow"
     bl_label = "Grow"
-    bl_description = ("Grow selected mesh(es) by the distance value. With multiple selections, processes each object "
-                      "individually. Flat polygons grow in their own plane")
+    bl_description = ("Push the surface of the selected meshes outward by Distance.\n"
+                      "Each object is worked on its own. Flat polygons grow in their own plane")
     suffix, label = "_Grown", "Grow"
     sign = 1.0
 
@@ -156,8 +157,8 @@ class QUICKINFILL_OT_grow(_FlatAwareOffset, Operator):
 class QUICKINFILL_OT_shrink(_FlatAwareOffset, Operator):
     bl_idname = "quick_infill.shrink"
     bl_label = "Shrink"
-    bl_description = ("Shrink selected mesh(es) by the distance value. With multiple selections, processes each object "
-                      "individually. Flat polygons shrink in their own plane")
+    bl_description = ("Pull the surface of the selected meshes inward by Distance.\n"
+                      "Each object is worked on its own. Flat polygons shrink in their own plane")
     suffix, label = "_Shrunk", "Shrink"
     est_grow = 0.0
     sign = -1.0
@@ -166,7 +167,8 @@ class QUICKINFILL_OT_shrink(_FlatAwareOffset, Operator):
 class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.remesh"
     bl_label = "Remesh"
-    bl_description = "Remesh selected mesh(es) at the resolution value. With multiple selections, processes each object individually"
+    bl_description = ("Rebuild the selected meshes at the voxel size.\n"
+                      "Each object is worked on its own. The shape stays, the faces are made new")
     suffix, label = "_Remeshed", "Remesh"
     est_grow = 0.0
 
@@ -177,7 +179,8 @@ class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
 class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_thin"
     bl_label = "Trim Thin"
-    bl_description = "Remove thin sections from selected mesh(es). With multiple selections, processes each object individually"
+    bl_description = ("Remove the parts of the selected meshes that are too thin to print.\n"
+                      "Anything thinner than two voxels goes. A mesh that is thin all over is deleted")
     suffix, label = "_TrimThin", "Trim Thin"
     est_cost, est_grow = ToolCost(offsets=2, decimates=1), 0.0
     delete_collapsed = True
@@ -190,10 +193,17 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
         return trim_thin
 
 
+# Trim Edges at the Stone tag: a mesh keeps at least this share of its volume, or it is trimmed
+# at Detail instead (see trim_edges).
+STONE_KEEPS = 2.0 / 3.0
+
+
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
     bl_label = "Trim Edges"
-    bl_description = "Trim edges by offset sequence and intersect with original mesh. With multiple selections, processes each object individually"
+    bl_description = ("Round off the thin, sharp edges of the selected meshes.\n"
+                      "For stones that were cut. A stone too small for the Stone resolution (it would lose more "
+                      "than a third of its volume) is trimmed at Detail instead and tagged Detail")
     suffix, label = "_TrimEdges", "Trim Edges"
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
@@ -208,7 +218,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         # Grow 2d, shrink 3d (rounds off thin edges), regrow (1+x)d, decimate to the
         # density target, then intersect with the original to clip back to its silhouette.
         # The input mesh is never modified by these steps, so no copies are needed.
-        def trim_edges(mesh, res):
+        def trim(mesh, res, distance, x):
             w = cuda_offset(mesh, res, 2.0 * distance)
             w = ensure_not_collapsed(cuda_offset(w, res, -3.0 * distance))
             w = cuda_offset(w, res, (1.0 + x) * distance)
@@ -221,15 +231,48 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                 max_err = max(float(res) * 10.0, diag * (0.01 + 0.49 * reduction))
                 w = decimate_mesh(w, target_face_count=target, max_error=max_err)
             return intersect_meshes(w, mesh, res)
+
+        def kept(out, mesh):
+            """Share of the mesh's volume the trimmed result still has."""
+            v0 = abs(float(mesh.volume()))
+            return abs(float(out.volume())) / v0 if v0 > 1e-12 else 1.0
+
+        # A mesh worked at Stone that is too small for it (it would lose more than a third of
+        # its volume, or vanish) is trimmed with the Detail preset instead, and comes out tagged
+        # Detail, so every later tool with Smart Res on treats it as Detail too (Alex 2026-11-17).
+        def trim_edges(mesh, res):
+            try:
+                out = trim(mesh, res, distance, x)
+                if face_count(out) == 0:
+                    out = None
+            except MeshCollapsedError:
+                out = None
+            if nearest_resolution_tag(res) != 'STONE':
+                if out is None:
+                    raise MeshCollapsedError()
+                return out
+            share = kept(out, mesh) if out is not None else 0.0
+            if share >= STONE_KEEPS:
+                return out
+            d = OFFSET_PRESETS['DETAIL']
+            try:
+                fine = trim(mesh, d["voxel"], min(distance, d["distance"]), d["x"])
+            except MeshCollapsedError:
+                fine = None
+            if fine is None or face_count(fine) == 0 or kept(fine, mesh) <= share:
+                if out is None:
+                    raise MeshCollapsedError()
+                return out
+            return Retagged(fine, 'DETAIL')
         return trim_edges
 
 
 class QUICKINFILL_OT_create_outline(Operator):
     bl_idname = "quick_infill.create_outline"
     bl_label = "Create Outline"
-    bl_description = ("New flat polygon: the outline of each selected mesh as seen from the current view "
-                      "(same outline method as Ashlarize). Cleaned up with the Offset Tools values: "
-                      "slits closed by Distance, bumps trimmed by half of it, points as Auto Decimation sets")
+    bl_description = ("Make a flat outline of each selected mesh, as seen from the current view.\n"
+                      "A new flat polygon (the same outline method as Ashlarize). Slits are closed by Distance, "
+                      "bumps trimmed by half of it, and the number of points follows Decimate")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

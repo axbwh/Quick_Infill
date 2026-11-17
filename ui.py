@@ -17,6 +17,10 @@ class QUICKINFILL_OT_voxel_preset(Operator):
 
     size: FloatProperty(name="Size", default=0.1)  # type: ignore
 
+    @classmethod
+    def description(cls, context, properties):
+        return f"Set the voxel size to {properties.size:g}.\nSmaller is finer and slower"
+
     def execute(self, context):
         context.scene.quick_infill_settings.shared_voxel_size = self.size
         return {'FINISHED'}
@@ -33,6 +37,16 @@ class QUICKINFILL_OT_offset_preset(Operator):
         items=[(k, k.title(), f"{k.title()} preset") for k in OFFSET_PRESETS],
         default="STONE",
     )
+
+    _WHAT = {'STONE': "Normal stone resolution", 'DETAIL': "Finer, for small or thin parts like roof tiles",
+             'FINE': "Finer still", 'MINI': "Very fine, for miniature detail"}
+
+    @classmethod
+    def description(cls, context, properties):
+        p = OFFSET_PRESETS[properties.preset_name]
+        return (f"{properties.preset_name.title()} preset. {cls._WHAT.get(properties.preset_name, '')}.\n"
+                f"Sets voxel size {p['voxel']:g}, Distance {p['distance']:g} mm, Trim Edges X {p['x']:g} "
+                f"and ratio {p['ratio']:g}")
 
     def execute(self, context):
         s = context.scene.quick_infill_settings

@@ -267,7 +267,8 @@ def _fix_undercuts_estimate(context):
 class QUICKINFILL_OT_fix_undercuts(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts"
     bl_label = "Fix Undercuts"
-    bl_description = "Fix undercuts on selected mesh(es) for better printability. With multiple selections, processes each object individually"
+    bl_description = ("Fill the undercuts of the selected meshes, so they print without supports.\n"
+                      "Seen from every lit direction, tilted by Angle. Each object is worked on its own")
     bl_options = {'REGISTER', 'UNDO'}
 
     def job_estimate(self, context):
@@ -280,7 +281,8 @@ class QUICKINFILL_OT_fix_undercuts(ModalJobMixin, Operator):
 class QUICKINFILL_OT_fix_undercuts_from_view(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts_from_view"
     bl_label = "From View"
-    bl_description = "Fix undercuts using the viewport direction. With multiple selections, processes each object individually"
+    bl_description = ("Fill the undercuts of the selected meshes as seen from the current view.\n"
+                      "The lit directions are taken across the screen, tilted by Angle. Each object is worked on its own")
     bl_options = {'REGISTER', 'UNDO'}
 
     def job_estimate(self, context):
@@ -384,7 +386,7 @@ class _VoxelBoolBase:
 
 
 class QUICKINFILL_OT_voxel_intersect(_VoxelBoolBase, Operator):
-    """Intersect all selected mesh objects using voxel boolean"""
+    """Keep only where the selected meshes overlap.\nA voxel boolean at the voxel size: the result goes to the active object"""
     bl_idname = "quick_infill.voxel_intersect"
     bl_label = "Voxel Intersect"
     suffix = "_Intersect"
@@ -392,7 +394,7 @@ class QUICKINFILL_OT_voxel_intersect(_VoxelBoolBase, Operator):
 
 
 class QUICKINFILL_OT_voxel_union(_VoxelBoolBase, Operator):
-    """Union all selected mesh objects using voxel boolean"""
+    """Join the selected meshes into one.\nA voxel boolean at the voxel size: the result goes to the active object"""
     bl_idname = "quick_infill.voxel_union"
     bl_label = "Voxel Union"
     suffix = "_Union"
@@ -400,7 +402,7 @@ class QUICKINFILL_OT_voxel_union(_VoxelBoolBase, Operator):
 
 
 class QUICKINFILL_OT_voxel_diff(_VoxelBoolBase, Operator):
-    """Subtract every other selected mesh object from the active object, one at a time, using voxel boolean"""
+    """Cut the other selected meshes out of the active one.\nA voxel boolean at the voxel size, one mesh at a time"""
     bl_idname = "quick_infill.voxel_diff"
     bl_label = "Voxel Diff"
     suffix = "_Diff"
@@ -413,6 +415,10 @@ class QUICKINFILL_OT_support_angle_preset(Operator):
     bl_description = "Set the support undercut angle"
 
     angle: FloatProperty(name="Angle", default=60.0)
+
+    @classmethod
+    def description(cls, context, properties):
+        return f"Set the Angle to {properties.angle:g} degrees"
 
     def execute(self, context):
         context.scene.quick_infill_settings.undercut_angle = self.angle

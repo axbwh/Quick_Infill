@@ -366,6 +366,24 @@ def _effective_settings(obj, settings, resolution, smart):
     return resolution, ratio, mode
 
 
+class Retagged:
+    """An operation's result that was worked at another resolution tag than the one asked for
+    (Trim Edges: a stone too small for Stone is trimmed at Detail). The pipeline decimates and
+    tags the result with that tag's values."""
+    __slots__ = ("mesh", "tag")
+
+    def __init__(self, mesh, tag):
+        self.mesh, self.tag = mesh, tag
+
+
+def _unwrap(out, res, ratio):
+    """(mesh, voxel size, ratio) of an operation's result: its own tag's values if it was retagged."""
+    if isinstance(out, Retagged):
+        res, ratio = RESOLUTION_PRESETS[out.tag]
+        return out.mesh, res, ratio
+    return out, res, ratio
+
+
 def _decimate(out, initial_faces, res, mode, ratio):
     do, target = should_auto_decimate_faces(initial_faces, face_count(out), voxel_size=res, mode=mode, ratio=ratio)
     if do:
@@ -385,14 +403,14 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
 
     components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
     if len(components) <= 1:
-        out = operation_fn(src, job.res)
+        out, res, ratio = _unwrap(operation_fn(src, job.res), job.res, job.ratio)
         if face_count(out) == 0:
             raise MeshCollapsedError()
         if auto_decimate:
-            out = _decimate(out, face_count(src), job.res, job.mode, job.ratio)
+            out = _decimate(out, face_count(src), res, job.mode, ratio)
         job.out = out
-        job.out_tags = np.full(face_count(out), _tag_index(job.res), dtype=np.int32)
-        job.voxels_used = [job.res] if job.res is not None else []
+        job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
+        job.voxels_used = [res] if res is not None else []
         return
 
     n_faces = src.topology.faceSize()
@@ -411,7 +429,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
                 mode = "VOXEL_RATIO"
         check_cancelled()
         try:
-            out = operation_fn(island, res)
+            out, res, ratio = _unwrap(operation_fn(island, res), res, ratio)
             if face_count(out) == 0:
                 raise MeshCollapsedError()
         except JobCancelled:

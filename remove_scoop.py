@@ -461,10 +461,9 @@ def remove_scoop_objects(context, objs, s):
 class QUICKINFILL_OT_remove_scoop(Operator):
     bl_idname = "quick_infill.remove_scoop"
     bl_label = "Remove Scoop"
-    bl_description = ("Cut the support scoop off the bottom of each stone (each island of the selected meshes) "
-                      "flat, where the scoop ends seen from 35 degrees above each side (or at the Contact share "
-                      "of the footprint), keeping every "
-                      "face above it untouched. Optionally adds Stone Damage on the cut face and runs Trim Edges")
+    bl_description = ("Take the scoop off the bottom of each selected stone.\n"
+                      "Filled in, or cut off flat where the scoop ends (see Method), with every face above it "
+                      "left untouched. Damage Cut and Trim Edges then finish the new face")
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):

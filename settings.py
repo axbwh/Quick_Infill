@@ -11,6 +11,8 @@ multiplier (resolution / grow / shrink_mult / target_res / voxel_mode); those
 are not shared with the voxel tools.
 """
 
+import math
+
 import bpy
 from bpy.types import PropertyGroup
 from bpy.props import FloatProperty, BoolProperty, EnumProperty, PointerProperty, StringProperty
@@ -45,6 +47,56 @@ def get_active_building_preset(s):
             continue
         return key
     return 'NONE'
+
+
+# ----- Smart scoop: the slope comes from what prints, not from an angle -----
+# A printed layer may stick out past the one below by a "lip". Fix Undercuts builds its scoop as
+# slopes, and on a slope every layer steps out by LAYER * tan(angle): so a lip is an angle.
+# Stringing is that lip, in mm per layer (Alex 2026-11-17).
+SMART_LAYER = 0.2       # mm: the print layer the lips are counted for (a 0.4 mm nozzle's usual layer)
+SMART_LIP_MIN = 0.2     # mm: all green in Ashlarize's Undercuts overlay, a 45 degree scoop
+SMART_LIP_60 = SMART_LAYER * math.tan(math.radians(60.0))   # 0.35 mm: the 60 degree scoop (the default)
+SMART_LIP_ROUGH = 0.45  # mm: full cyan in the overlay. One line of a 0.4 mm nozzle; past it the outer line is in the air
+SMART_LIP_MAX = 0.6     # mm: the most ("increase the max stringing to around 0.6")
+# the buttons under the slider: (mm per layer, what it is)
+STRINGING_PRESETS = (
+    (SMART_LIP_MIN, "All green in the Undercuts overlay: prints clean. A 45 degree scoop, the deepest"),
+    (SMART_LIP_60, "A 60 degree scoop: the underside is a little rough"),
+    (SMART_LIP_ROUGH, "Full cyan in the Undercuts overlay: the most that still holds. A 66 degree scoop"),
+    (SMART_LIP_MAX, "The outer line droops and strings show. A 72 degree scoop, the shallowest"),
+)
+
+
+def smart_lip(stringing):
+    """mm a layer of the scoop may stick out past the one below: Stringing, kept inside its range."""
+    return min(SMART_LIP_MAX, max(SMART_LIP_MIN, float(stringing)))
+
+
+def smart_angle(stringing):
+    """The Fix Undercuts angle (degrees from straight down) that gives that lip on every layer."""
+    return math.degrees(math.atan(smart_lip(stringing) / SMART_LAYER))
+
+
+def stringing_for_angle(angle):
+    """The Stringing (mm per layer) whose scoop has this angle."""
+    return smart_lip(SMART_LAYER * math.tan(math.radians(float(angle))))
+
+
+def stringing_status(stringing):
+    """One line that says what a Stringing value prints like."""
+    lip = smart_lip(stringing)
+    if lip <= SMART_LIP_MIN + 0.005:
+        words = "prints clean"
+    elif lip <= SMART_LIP_ROUGH + 0.005:
+        words = "underside a little rough"
+    else:
+        words = "outer line droops, strings show"
+    return f"{smart_angle(stringing):.0f}° scoop: {words}"
+
+
+def get_active_stringing_preset(s):
+    """The preset (mm per layer) the Stringing slider stands on, or None."""
+    return next((lip for lip, _ in STRINGING_PRESETS if abs(float(s.undercut_stringing) - lip) < 0.005), None)
 
 
 def get_active_angle_preset(s):
@@ -134,6 +186,23 @@ class QuickInfillSettings(PropertyGroup):
                     "0 = straight down, 90 = level. Remove Scoop looks at the stone from this angle too. "
                     "Negative angles join the directions with a voxel union",
         default=60.0, min=-90.0, max=90.0, precision=1,
+    )
+    undercut_smart: BoolProperty(
+        name="Smart",
+        description="Work the scoop out from what prints, not from an Angle.\n"
+                    "No layer of the scoop sticks out further past the one below than Stringing allows. "
+                    "With several objects selected, each scoop stops at the objects around it and joins them, "
+                    "so it rests on the object below",
+        default=True,
+    )
+    undercut_stringing: FloatProperty(
+        name="Stringing",
+        description="How far each printed layer of the scoop may stick out past the one below, in mm "
+                    "(for 0.2 mm layers).\n"
+                    "0.2 is all green in the Undercuts overlay and gives the deepest scoop. "
+                    "Higher gives a shallower scoop that keeps more of the stone but prints rougher: "
+                    "0.45 is full cyan, 0.6 is where the outer line droops",
+        default=SMART_LIP_60, min=SMART_LIP_MIN, max=SMART_LIP_MAX, precision=2, step=1,
     )
     dir_x_pos: BoolProperty(name="+X", description="Fix undercuts seen from +X", default=True)
     dir_x_neg: BoolProperty(name="-X", description="Fix undercuts seen from -X", default=True)

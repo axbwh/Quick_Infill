@@ -260,12 +260,15 @@ PARALLEL_DECIMATE_FACES = 200_000
 
 
 def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None,
-                  max_error: Optional[float] = None, resolution: Optional[float] = None):
+                  max_error: Optional[float] = None, resolution: Optional[float] = None,
+                  parallel_above: Optional[int] = None):
     """Decimate in place (and return) with meshlib.
 
     resolution: voxel size in meshlib units. maxError defaults to 10x the
     voxel size - the value the tools have always used, kept so results don't
     change. (An old comment claimed resolution was in Blender units; it is not.)
+    parallel_above: decimate in parallel parts above this many faces (default
+    PARALLEL_DECIMATE_FACES).
     """
     mm, _ = get_meshlib()
     current_faces = face_count(mesh)
@@ -287,7 +290,7 @@ def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio
         lo, hi = bbox_of(mesh)
         settings.maxError = float(np.linalg.norm(hi - lo)) * 0.005
     settings.packMesh = True
-    if current_faces > PARALLEL_DECIMATE_FACES:
+    if current_faces > (PARALLEL_DECIMATE_FACES if parallel_above is None else int(parallel_above)):
         settings.subdivideParts = 16
 
     check_cancelled()

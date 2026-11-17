@@ -384,10 +384,10 @@ def _unwrap(out, res, ratio):
     return out, res, ratio
 
 
-def _decimate(out, initial_faces, res, mode, ratio):
+def _decimate(out, initial_faces, res, mode, ratio, parallel_above=None):
     do, target = should_auto_decimate_faces(initial_faces, face_count(out), voxel_size=res, mode=mode, ratio=ratio)
     if do:
-        out = decimate_mesh(out, target_face_count=target, resolution=res)
+        out = decimate_mesh(out, target_face_count=target, resolution=res, parallel_above=parallel_above)
     return out
 
 
@@ -395,7 +395,7 @@ def _tag_index(res):
     return _tag_to_index(nearest_resolution_tag(res)) if res is not None else -1
 
 
-def _compute(job, operation_fn, auto_decimate, islands, smart):
+def _compute(job, operation_fn, auto_decimate, islands, smart, parallel_above=None):
     """Worker: pure meshlib (no bpy). Fills job.out / job.out_tags or raises."""
     mm, _ = get_meshlib()
     mn = get_mrmeshnumpy()
@@ -407,7 +407,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
         if face_count(out) == 0:
             raise MeshCollapsedError()
         if auto_decimate:
-            out = _decimate(out, face_count(src), res, job.mode, ratio)
+            out = _decimate(out, face_count(src), res, job.mode, ratio, parallel_above)
         job.out = out
         job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
         job.voxels_used = [res] if res is not None else []
@@ -440,7 +440,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
             job.dropped += 1
             continue
         if auto_decimate:
-            out = _decimate(out, face_count(island), res, mode, ratio)
+            out = _decimate(out, face_count(island), res, mode, ratio, parallel_above)
         tags.append(np.full(face_count(out), _tag_index(res), dtype=np.int32))
         if res is not None:
             voxels.append(res)
@@ -463,7 +463,7 @@ class PipelineRun:
 
     def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
                  replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
-                 parallel=True, strip_flat=()):
+                 parallel=True, strip_flat=(), decimate_parallel_above=None, process_job=None):
         s = settings or bpy.context.scene.quick_infill_settings
         self.objects = list(objects)
         self.operation_fn = operation_fn
@@ -477,6 +477,10 @@ class PipelineRun:
         self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
         self.parallel = parallel
         self.strip_flat = set(strip_flat)   # objects whose flat polygon pieces are left out (Grow / Shrink)
+        self.decimate_parallel_above = decimate_parallel_above   # None: decimate_mesh's own threshold
+        # (worker function name in qi_worker, extra args): run the objects in worker processes
+        # (process_pool.py) when there are enough of them; see _compute_in_processes.
+        self.process_job = process_job
         self.jobs = []
         self.pr = ProcessResult()
         self.cancelled = False
@@ -516,22 +520,91 @@ class PipelineRun:
             try:
                 if control is not None:
                     control.check()
-                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart)
+                _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart,
+                         self.decimate_parallel_above)
             except Exception as e:  # recorded per job, handled on the main thread
                 job.error = e
             finally:
                 if control is not None:
                     control.item_done()
 
+        if not self._compute_in_processes(control):
+            self._compute_in_blender(work)
+        self.cancelled = any(isinstance(j.error, JobCancelled) for j in self.jobs) or \
+            (control is not None and control.cancelled)
+        return self
+
+    def _compute_in_blender(self, work):
         if self.parallel and len(self.jobs) > 1:
             with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(self.jobs))) as ex:
                 list(ex.map(work, self.jobs))
         else:
             for job in self.jobs:
                 work(job)
-        self.cancelled = any(isinstance(j.error, JobCancelled) for j in self.jobs) or \
-            (control is not None and control.cancelled)
-        return self
+
+    def _compute_in_processes(self, control):
+        """Run every job in the worker processes. False if that isn't possible here (too few jobs,
+        islands, no workers); a job a worker couldn't finish is then done in Blender."""
+        from . import process_pool
+        if self.process_job is None or self.islands or len(self.jobs) < process_pool.MIN_JOBS:
+            return False
+        pool = process_pool.get_pool()
+        if pool is None:
+            return False
+        from concurrent.futures import wait, FIRST_COMPLETED
+        mn = get_mrmeshnumpy()
+        fn = getattr(process_pool.worker_module(), self.process_job[0])
+        futures = {}
+        for job in self.jobs:
+            src = job.src
+            if src.topology.numValidFaces() != src.topology.faceSize():
+                src = type(src)(src)
+                src.pack()
+            args = (np.asarray(mn.getNumpyVerts(src), np.float32), np.asarray(mn.getNumpyFaces(src.topology), np.int32),
+                    job.res, job.ratio, job.mode, self.auto_decimate) + tuple(self.process_job[1])
+            futures[pool.submit(fn, args)] = job
+        pending = set(futures)
+        broken = False
+        while pending:
+            done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for fut in done:
+                job = futures[fut]
+                try:
+                    r = fut.result()
+                except Exception as e:   # a worker died: the rest is done in Blender
+                    print(f"[Quick Infill] worker failed ({e}), finishing in Blender")
+                    broken = True
+                    continue
+                if r[0] == "ok":
+                    out = mn.meshFromFacesVerts(r[2], r[1])
+                    job.out = out
+                    job.out_tags = np.full(face_count(out), _tag_index(r[3]), dtype=np.int32)
+                    job.voxels_used = [r[3]]
+                elif r[0] == "collapsed":
+                    job.error = MeshCollapsedError()
+                else:
+                    job.error = RuntimeError(r[1])
+                if control is not None:
+                    control.item_done()
+            if control is not None:
+                control.poll()
+                if control.cancelled:
+                    for fut in pending:
+                        fut.cancel()
+                    for job in self.jobs:
+                        if job.out is None and job.error is None:
+                            job.error = JobCancelled()
+                    return True
+        if broken:
+            process_pool.reset()
+            for job in self.jobs:
+                if job.out is None and job.error is None:
+                    try:
+                        _compute(job, self.operation_fn, self.auto_decimate, self.islands, self.smart,
+                                 self.decimate_parallel_above)
+                    except Exception as e:
+                        job.error = e
+        return True
 
     # 3. main thread
     def finish(self):

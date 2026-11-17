@@ -836,6 +836,24 @@ CHAIN_TURN = 25.0    # deg: neighbouring edges are one piece while they turn les
 FAST_PIECE = 6.0     # pieces are at most this many x thickness long
 
 
+def chip_depth(a_half, T, face_size, thick_under):
+    """How deep (along the chip normal, mesh units) the chip of one piece goes. The ONE place the
+    depth is decided, so it can be tuned or replaced on its own.
+
+    a_half: half the edge's inside angle (radians); T: thickness in mesh units (FAST_THICK_PER_SIZE x
+    Thin); face_size: sqrt of the area of the larger of the edge's two faces; thick_under: the stone's
+    thickness straight under the edge along the chip normal (None if unknown).
+    A wedge of angle a is thinner than T within T / (2 tan(a/2)) of its edge; the plane through those
+    two lines lies T cos^2(a/2) / (2 sin(a/2)) under the edge. Capped at FAST_MAX_CUT x T, at
+    FACE_CAP x face_size (bumps between two small faces get small chips) and at THICK_CAP x
+    thick_under (thin stones are not sliced)."""
+    s = max(math.sin(a_half), 1e-6)
+    h = min(T * math.cos(a_half) ** 2 / (2 * s), FAST_MAX_CUT * T, FACE_CAP * face_size)
+    if thick_under is not None:
+        h = min(h, THICK_CAP * thick_under)
+    return h
+
+
 def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,
               info=None):
     mm, mn = _ml()
@@ -913,7 +931,6 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         sharp &= flag[f1] ^ flag[f2]
     idx = np.nonzero(sharp)[0]
     a2 = np.radians(alpha[idx]) / 2
-    depth = np.minimum(T * np.cos(a2) ** 2 / (2 * np.sin(a2)), FAST_MAX_CUT * T)
     lap("sharp_edges")
 
     # chain edges into pieces
@@ -971,17 +988,16 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             n = n * math.cos(ang) + np.cross(ax, n) * math.sin(ang)
         u = np.cross(n, ax)
         w8 = lens[pc] / lens[pc].sum()
-        h = float((depth[pc] * w8).sum())
         a_half = float((a2[pc] * w8).sum())
-        h = min(h, FACE_CAP * float((fsize[pc] * w8).sum()))
+        thick_under = None
         try:
             hit = mm.rayMeshIntersect(mp_m, mm.Line3f(mm.Vector3f(*(c0 - n * 1e-4 * unit)), mm.Vector3f(*(-n))))
             if hit:
                 dl = hit.distanceAlongLine
-                dl = dl() if callable(dl) else dl
-                h = min(h, THICK_CAP * float(dl))
+                thick_under = float(dl() if callable(dl) else dl)
         except Exception:
             pass
+        h = chip_depth(a_half, T, float((fsize[pc] * w8).sum()), thick_under)
         if h < 0.05 * T:
             continue
         top = float((P @ n).max())

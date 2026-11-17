@@ -69,6 +69,10 @@ class _OffsetToolBase(ModalJobMixin):
     # The pipeline's decimation runs in parallel parts above this many faces (None: its default).
     decimate_parallel_above = None
 
+    def process_job(self, s):
+        """(qi_worker function name, extra args) to run the objects in worker processes, or None."""
+        return None
+
     @classmethod
     def poll(cls, context):
         return any(o.type == 'MESH' for o in context.selected_objects)
@@ -92,7 +96,8 @@ class _OffsetToolBase(ModalJobMixin):
             return None
         # bpy.context (not the captured one): finish may run later, from the modal handler.
         return pipeline_spec(objs, self.make_operation(s), self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             decimate_parallel_above=self.decimate_parallel_above)
+                             decimate_parallel_above=self.decimate_parallel_above,
+                             process_job=self.process_job(s))
 
     def job_finish(self, context, pr):
         s = context.scene.quick_infill_settings
@@ -205,16 +210,8 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
         return trim_thin
 
 
-# Trim Edges at the Stone tag: a mesh keeps at least this share of its volume, or it is trimmed
-# at Detail instead (see trim_edges).
-STONE_KEEPS = 2.0 / 3.0
-
-# Trim Edges decimates in parallel parts above this many faces (both its own decimation and the
-# pipeline's). Stones give 30k to 250k faces there, under the shared 200k threshold, so they were
-# decimated on one thread. In parts it is about twice as fast; the result moves by at most 0.016 BU
-# (p99 0.005), the same as today's result moves when the stone is shifted by half a voxel
-# (Ashlarize-library	rim-edges-speed, 2026-11-18).
-TRIM_EDGES_PARALLEL_FACES = 20_000
+# The Round method of Trim Edges lives in trim_round.py (pure meshlib, also run by worker processes).
+from .trim_round import STONE_KEEPS, PARALLEL_FACES as TRIM_EDGES_PARALLEL_FACES  # noqa: F401
 
 
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
@@ -230,62 +227,18 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
 
     def make_operation(self, s):
-        from .support_tools import intersect_meshes
-        distance = float(s.distance)
-        x = float(s.trim_edges_x)
-        density = float(s.trim_edges_density)
+        from .trim_round import trim_edges as round_trim
+        distance, x, density = float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)
 
-        # Grow 2d, shrink 3d (rounds off thin edges), regrow (1+x)d, decimate to the
-        # density target, then intersect with the original to clip back to its silhouette.
-        # The input mesh is never modified by these steps, so no copies are needed.
-        def trim(mesh, res, distance, x):
-            w = cuda_offset(mesh, res, 2.0 * distance)
-            w = ensure_not_collapsed(cuda_offset(w, res, -3.0 * distance))
-            w = cuda_offset(w, res, (1.0 + x) * distance)
-            current = face_count(w)
-            target = target_faces_for_density(w, faces_per_sq_unit=density, min_faces=20, max_faces=current)
-            if target < current:
-                lo, hi = bbox_of(w)
-                diag = float(np.linalg.norm(hi - lo))
-                reduction = max(0.0, 1.0 - float(target) / float(max(1, current)))
-                max_err = max(float(res) * 10.0, diag * (0.01 + 0.49 * reduction))
-                w = decimate_mesh(w, target_face_count=target, max_error=max_err,
-                                  parallel_above=TRIM_EDGES_PARALLEL_FACES)
-            return intersect_meshes(w, mesh, res)
-
-        def kept(out, mesh):
-            """Share of the mesh's volume the trimmed result still has."""
-            v0 = abs(float(mesh.volume()))
-            return abs(float(out.volume())) / v0 if v0 > 1e-12 else 1.0
-
-        # A mesh worked at Stone that is too small for it (it would lose more than a third of
-        # its volume, or vanish) is trimmed with the Detail preset instead, and comes out tagged
-        # Detail, so every later tool with Smart Res on treats it as Detail too (Alex 2026-11-17).
+        # A stone too small for Stone comes back worked at Detail: tagged Detail, so every later tool
+        # with Smart Res on treats it as Detail too (Alex 2026-11-17).
         def trim_edges(mesh, res):
-            try:
-                out = trim(mesh, res, distance, x)
-                if face_count(out) == 0:
-                    out = None
-            except MeshCollapsedError:
-                out = None
-            if nearest_resolution_tag(res) != 'STONE':
-                if out is None:
-                    raise MeshCollapsedError()
-                return out
-            share = kept(out, mesh) if out is not None else 0.0
-            if share >= STONE_KEEPS:
-                return out
-            d = OFFSET_PRESETS['DETAIL']
-            try:
-                fine = trim(mesh, d["voxel"], min(distance, d["distance"]), d["x"])
-            except MeshCollapsedError:
-                fine = None
-            if fine is None or face_count(fine) == 0 or kept(fine, mesh) <= share:
-                if out is None:
-                    raise MeshCollapsedError()
-                return out
-            return Retagged(fine, 'DETAIL')
+            out, tag = round_trim(mesh, res, distance, x, density)
+            return out if tag is None else Retagged(out, tag)
         return trim_edges
+
+    def process_job(self, s):
+        return ("trim_edges_job", (float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)))
 
 
 class QUICKINFILL_OT_create_outline(Operator):

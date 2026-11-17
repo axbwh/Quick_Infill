@@ -15,7 +15,7 @@ intersect). This module chips them FLAT instead, like a chip knocked off a stone
    findSignedDistances), the rest is decimated back on its flat parts only (meshlib decimateMesh, tiny
    max error) so the face count stays near the original.
 
-The "Thin" slider (`size`, 0.02 to 0.04 BU, default 0.03): faces thinner than 2 x size (in-sphere
+The "Thin" slider (`size`, 0.02 to 0.04 BU, default 0.03): faces thinner than 1.2 x size (in-sphere
 thickness) are chipped. Measured on 14 stones (trim-edges-flat-chip): 0.03 chips about the same area as
 today's Stone-preset Trim Edges, 0.02 lighter, 0.04 heavier. Sharp edges get a straight flat chord, not
 today's deep rounding, so less volume goes than today on 30 to 60 degree wedges.
@@ -49,7 +49,7 @@ def _ml():
     return mm, mn
 
 
-THICK_PER_SIZE = 2.0  # faces thinner than this x Thin are chipped (Thin 0.03 = today's look, see docstring)
+THICK_PER_SIZE = 1.2  # faces thinner than this x Thin are chipped (Thin 0.03 = today's look, see docstring)
 SIZE = 0.03            # BU, default of the "Thin" slider (range 0.02 to 0.04): chip face width at a 90 deg edge
 CUT_REACH = 2.0        # only-cut mode: chip within CUT_REACH x thin of a cut face's rim
 MAX_OUTSIDE = 0.002    # BU: a chip face standing further outside the original stone is refused
@@ -57,6 +57,9 @@ MIN_CHIP = 0.25        # a chip region smaller than MIN_CHIP x thin^2 (area) is 
 PIECE = 6.0          # long strips are cut into pieces this many times the thickness long
 MAX_SHARE = 0.3        # a chip region larger than this share of the stone's area is refused (thin all over)
 TILT = 8.0           # deg: chip planes lean up to this much either way along the edge (today: ~10 deg)
+BOOL_DEPTH = 0.5    # boolean method: chip plane at this share of the outline's heights
+MAX_CUT = 1.5       # boolean method: a chip goes at most this many x thickness deep
+BOX_PAD = 2.0       # boolean method: the cutter reaches this many x thickness past the chip
 PLANE_DEPTH = 0.85   # the chip plane sits at this share of its outline's heights (from inside); with the
                      # outline fixed, a lower plane folds the faces next to it (tested 0.15 / 0.5 / 0.85 / 1.0)
 METRICS = ("minarea", "universal", "plane", "circum")   # meshlib fill metrics tried in turn
@@ -385,16 +388,23 @@ def _metric(mm, m, e, name):
 
 
 def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, metric="minarea",
-              decimate=True, method="plane", tilt=TILT, seed=0, info=None):
+              decimate=True, method="boolean", tilt=TILT, seed=0, info=None):
     """Return a new meshlib mesh with the thin edges of `mesh` chipped flat.
 
-    size: the "Thin" slider, 0.02 to 0.04 BU. Faces thinner than 2 x size (meshlib in-sphere thickness)
+    size: the "Thin" slider, 0.02 to 0.04 BU. Faces thinner than 1.2 x size (meshlib in-sphere thickness)
     are chipped. unit: mesh units per BU.
     only_cut: chip only within CUT_REACH x thin of a cut face's rim. cut_faces: bool array over the
     input's faces (None: detect them when `detect`). info: dict filled with numbers for reports."""
     mm, mn = _ml()
     info = {} if info is None else info
     t0 = time.perf_counter()
+    tm = info.setdefault("timings", {})
+    _last = [t0]
+
+    def lap(name):
+        now = time.perf_counter()
+        tm[name] = tm.get(name, 0.0) + now - _last[0]
+        _last[0] = now
     T = THICK_PER_SIZE * float(size) * unit
     info["thickness"] = T / unit
     src = mm.Mesh(mesh)
@@ -406,6 +416,7 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     info["source_holes"] = holes0
     info["source_self_intersections"] = len(mm.findSelfCollidingTriangles(mm.MeshPart(src)))
 
+    lap("setup")
     cut0 = None
     if only_cut:
         if cut_faces is not None:
@@ -419,6 +430,7 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             info.update(chips=0, reason="no cut faces", seconds=time.perf_counter() - t0)
             return src
 
+    lap("cut_faces")
     # 0. sliver triangles (booleans leave many) collapsed first, shape kept within 0.00001 BU: split
     #    finely, they read as crossing faces and blocked chips next to them
     fp = mm.FixMeshDegeneraciesParams()
@@ -432,20 +444,35 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     except Exception as e:
         info["degeneracy_fix_error"] = repr(e)
 
+    try:
+        if len(mm.findMultipleEdges(m.topology)):
+            mm.fixMultipleEdges(m)         # a doubled edge (sliver collapse can leave one) blocks every boolean
+            m.pack()
+    except Exception as e:
+        info["multiple_edge_fix_error"] = repr(e)
+    lap("degeneracies")
+    base = mm.Mesh(m)                  # coarse (slivers collapsed): the boolean method cuts this one
+    multi0 = len(mm.findMultipleEdges(base.topology))
+
     # 1. fine mesh where the stone may be thin: coarse read first, then subdivide that region to thin / 5
     _subdivide(mm, mn, m, None, 2.0 * T)
+    lap("subdivide_1")
     th = _thickness(mm, m, 1.5 * T)
+    lap("thickness_1")
     V, F = _arrays(mm, mn, m)
     near = (th[F] < 2.5 * T).any(1)
     reg = _bits(mn, near, "f")
     mm.expand(m.topology, reg, 2)
     _subdivide(mm, mn, m, _np_bits(mn, reg, len(F)), T / 5.0)
+    lap("subdivide_2")
     V, F = _arrays(mm, mn, m)
     info["verts_fine"] = len(V)
     info["fine_self_intersections"] = len(mm.findSelfCollidingTriangles(mm.MeshPart(m)))
 
+    lap("fine_check")
     # 2. thickness at each vertex
     th = _thickness(mm, m, T)
+    lap("thickness_2")
     ar, nr = _face_areas(V, F)
 
     # 3. chip regions: faces whose three vertices are all thinner than T, small gaps closed
@@ -454,8 +481,10 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         cutm = _map_cut(mm, mn, src, cut0, m)
         dist = _cut_rim_distance(mm, mn, m, cutm, CUT_REACH * T)
         thin_f &= (dist[F] <= CUT_REACH * T).all(1)
+    lap("regions")
     strips = _strips(mm, mn, m, F, ar, thin_f, T, info)
 
+    lap("strips")
     srcx = info["source_self_intersections"]
     Vm, Fm = _arrays_nopack(mn, m)
 
@@ -647,14 +676,99 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
                 info["decimate_error"] = None
         return w, accepted
 
-    build = build_plane if method == "plane" else build_fill
+    CUBE = np.array([(0, 2, 3), (0, 3, 1), (4, 5, 7), (4, 7, 6), (0, 1, 5), (0, 5, 4),
+                     (2, 6, 7), (2, 7, 3), (0, 4, 6), (0, 6, 2), (1, 3, 7), (1, 7, 5)], np.int32)
+
+    def build_boolean(skip):
+        # 4. each piece is chipped by ONE plane, as a real boolean: a box whose bottom face is the chip
+        #    plane is subtracted from the stone (meshlib boolean, DifferenceAB). The box reaches well
+        #    past the chip across the edge, so the plane runs out where it meets the two faces: the chip
+        #    edge is the exact line where plane and stone meet (no re-mesh staircase). Its ends are square
+        #    to the edge at the piece's ends, its top just above the chip. Worked on the coarse mesh
+        #    (the fine one only chooses the piece and its plane); nothing can stand outside the stone.
+        w = mm.Mesh(base)
+        nrmV = np.zeros_like(Vm)
+        fnm = np.cross(Vm[Fm[:, 1]] - Vm[Fm[:, 0]], Vm[Fm[:, 2]] - Vm[Fm[:, 0]])
+        np.add.at(nrmV, Fm.ravel(), np.repeat(fnm, 3, axis=0))
+        accepted, chip_area, why = [], 0.0, {}
+        for si, g in enumerate(strips):
+            if si in skip:
+                continue
+            vi = np.unique(Fm[g].ravel())
+            ec = {}
+            for f in g:
+                a_, b_, c_ = (int(x) for x in Fm[f])
+                for e in ((a_, b_), (b_, c_), (c_, a_)):
+                    k = (min(e), max(e)); ec[k] = ec.get(k, 0) + 1
+            bv = np.array(sorted({x for k, c in ec.items() if c == 1 for x in k}))
+            if len(bv) < 3:
+                continue
+            P = Vm[bv]
+            c0 = P.mean(0)
+            ev, U = np.linalg.eigh(np.cov((P - c0).T))
+            ax = U[:, 2]
+            out = nrmV[vi].sum(0)
+            n = out - (out @ ax) * ax
+            if np.linalg.norm(n) < 1e-12:
+                continue
+            n = n / np.linalg.norm(n)
+            if tilt > 0:
+                rng = np.random.default_rng(int(abs(c0 * 1e4).sum()) % (2 ** 31) + seed)
+                ang = math.radians(rng.uniform(-tilt, tilt))
+                n = n * math.cos(ang) + np.cross(ax, n) * math.sin(ang)
+            u = np.cross(n, ax)
+            lev = float(np.percentile(P @ n, 100 * BOOL_DEPTH))
+            R = Vm[vi]
+            lev = max(lev, float((R @ n).max()) - MAX_CUT * T)   # a sharp wedge is chipped, not sliced off
+            hs = R @ n - lev
+            if hs.max() <= 0:
+                continue
+            s_ = R @ ax; u_ = R @ u
+            pad = BOX_PAD * T
+            lo = np.array([s_.min(), u_.min() - pad, lev])
+            hi = np.array([s_.max(), u_.max() + pad, lev + hs.max() + pad])
+            corners = []
+            for k in (0, 1):
+                for j in (0, 1):
+                    for i in (0, 1):
+                        x = (lo[0], hi[0])[i]; y = (lo[1], hi[1])[j]; z = (lo[2], hi[2])[k]
+                        corners.append(ax * x + u * y + n * z)
+            box = mn.meshFromFacesVerts(CUBE, np.ascontiguousarray(np.array(corners), np.float32))
+            if float(box.volume()) < 0:
+                box = mn.meshFromFacesVerts(np.ascontiguousarray(CUBE[:, ::-1]), np.ascontiguousarray(np.array(corners), np.float32))
+            try:
+                res = mm.boolean(w, box, mm.BooleanOperation.DifferenceAB)
+            except Exception:
+                why["boolean_error"] = why.get("boolean_error", 0) + 1
+                continue
+            if not res.valid():
+                why["boolean_invalid"] = why.get("boolean_invalid", 0) + 1
+                continue
+            r = res.mesh
+            if len(r.topology.findHoleRepresentiveEdges()) > holes0 or r.topology.numValidFaces() == 0:
+                why["boolean_open"] = why.get("boolean_open", 0) + 1
+                continue
+            if len(mm.findMultipleEdges(r.topology)) > multi0:
+                why["boolean_double_edge"] = why.get("boolean_double_edge", 0) + 1
+                continue
+            w = r
+            accepted.append(si)
+            chip_area += float(ar[g].sum())
+        w.pack()
+        info.update(chips=len(accepted), strips=len(strips), refused=why, chip_area=chip_area / unit ** 2)
+        return w, accepted
+
+    build = {"plane": build_plane, "boolean": build_boolean}.get(method, build_fill)
 
     # 6. the result must not cut itself more than the input did: strips next to any new crossing are
     #    left out and the result is built again
     skip = set()
     for _pass in range(4):
+        lap("before_build")
         w, accepted = build(skip)
+        lap("build")
         pairs = mm.findSelfCollidingTriangles(mm.MeshPart(w))
+        lap("crossing_check")
         if len(pairs) <= srcx or _pass == 3:
             break
         W, WF = _arrays_nopack(mn, w)
@@ -676,8 +790,9 @@ def flat_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     info["self_intersection_passes"] = _pass + 1
     info["decimated"] = decimate and not nodec[0]
     info["dropped_for_crossing"] = len(skip)
-    info["final_self_intersections"] = len(mm.findSelfCollidingTriangles(mm.MeshPart(w)))
+    info["final_self_intersections"] = len(pairs)
     w.pack()
+    lap("finish")
     info["seconds"] = time.perf_counter() - t0
     return w
 
@@ -698,3 +813,213 @@ def check_manifold(mesh):
     multi = len(mm.findMultipleEdges(mesh.topology))
     selfx = len(mm.findSelfCollidingTriangles(mm.MeshPart(mesh)))
     return holes == 0 and multi == 0 and selfx == 0, dict(holes=holes, multiple_edges=multi, self_intersections=selfx)
+
+
+# ---------------------------------------------------------------------------------------------------
+# Fast variant (speed gate, Alex 2026-11-17: "can we do this faster than trim edges?")
+#
+# No re-mesh and no thickness field. The stones are low-poly: their sharp edges ARE mesh edges, so
+# each edge's inside angle comes straight from its two face normals. An edge whose inside angle is
+# under ALPHA_MAX is chipped by one flat plane across it, as deep as the thickness rule asks for that
+# angle (a wedge of angle a is thinner than T within T / (2 tan(a/2)) of its edge: the plane through
+# those two lines lies T cos^2(a/2) / (2 sin(a/2)) under the edge), capped at MAX_CUT x T. Edges are
+# chained into pieces along the edge; the chip boxes are subtracted in a few booleans (boxes whose
+# bounds don't overlap go in together).
+
+ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
+FAST_MAX_CUT = 1.0          # fast variant: a chip goes at most this many x thickness deep
+FAST_THICK_PER_SIZE = 3.0   # fast variant: thickness = this x Thin (Thin 0.03 = today's chipped area, measured)
+CHAIN_TURN = 25.0    # deg: neighbouring edges are one piece while they turn less than this
+FAST_PIECE = 6.0     # pieces are at most this many x thickness long
+
+
+def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,
+              info=None):
+    mm, mn = _ml()
+    info = {} if info is None else info
+    tm = info.setdefault("timings", {})
+    t0 = time.perf_counter()
+    last = [t0]
+
+    def lap(name):
+        now = time.perf_counter(); tm[name] = tm.get(name, 0.0) + now - last[0]; last[0] = now
+
+    T = FAST_THICK_PER_SIZE * float(size) * unit
+    info["thickness"] = T / unit
+    m = mm.Mesh(mesh)
+    m.pack()
+    src0 = mm.Mesh(m)
+    selfx_in = len(mm.findSelfCollidingTriangles(mm.MeshPart(src0)))
+    fp = mm.FixMeshDegeneraciesParams()           # booleans next to sliver triangles leave crossings
+    fp.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
+    fp.maxDeviation = 1e-5 * unit
+    fp.tinyEdgeLength = 1e-5 * unit
+    fp.criticalTriAspectRatio = 1e4
+    try:
+        mm.fixMeshDegeneracies(m, fp)
+        if len(mm.findMultipleEdges(m.topology)):
+            mm.fixMultipleEdges(m)
+        m.pack()
+    except Exception as e:
+        info["degeneracy_fix_error"] = repr(e)
+    selfx0 = len(mm.findSelfCollidingTriangles(mm.MeshPart(m)))
+    if selfx0 > selfx_in:                     # the clean-up made crossings of its own: work on the input
+        m = mm.Mesh(src0); selfx0 = selfx_in
+        info["degeneracy_fix_reverted"] = True
+    holes0 = len(m.topology.findHoleRepresentiveEdges())
+    V0src, F0src = _arrays(mm, mn, src0)
+    V, F = _arrays(mm, mn, m)
+    cut = None
+    if only_cut:
+        if cut_faces is not None:
+            cut = np.asarray(cut_faces, bool)[:len(F0src)]
+            info["cut_source"] = "marked"
+        elif detect:
+            cut = detect_cut_faces(src0, unit)
+            info["cut_source"] = "detected"
+        if cut is None or not cut.any():
+            info.update(chips=0, reason="no cut faces", seconds=time.perf_counter() - t0)
+            return m
+    lap("setup")
+
+    # edges and their two faces
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    fid = np.tile(np.arange(len(F)), 3)
+    key = np.minimum(E[:, 0], E[:, 1]) * (len(V) + 1) + np.maximum(E[:, 0], E[:, 1])
+    order = np.argsort(key, kind="stable")
+    ks = key[order]
+    same = np.nonzero(ks[1:] == ks[:-1])[0]
+    f1, f2 = fid[order[same]], fid[order[same + 1]]
+    ev = E[order[same]]
+    ar, nr = _face_areas(V, F)
+    cosn = np.einsum("ij,ij->i", nr[f1], nr[f2])
+    cen = V[F].mean(1)
+    convex = np.einsum("ij,ij->i", cen[f2] - cen[f1], nr[f1]) < 0
+    alpha = 180.0 - np.degrees(np.arccos(np.clip(cosn, -1, 1)))
+    sharp = convex & (alpha < ALPHA_MAX)
+    if only_cut:
+        # cut flags of the (sliver-cleaned) faces next to candidate edges, from the input face each
+        # one lies on (meshlib findProjection)
+        cand = np.nonzero(sharp)[0]
+        need = np.unique(np.concatenate([f1[cand], f2[cand]]))
+        flag = np.zeros(len(F), bool)
+        mp = mm.MeshPart(src0)
+        for f in need:
+            c = cen[f]
+            flag[f] = cut[mm.findProjection(mm.Vector3f(*c), mp).proj.face.get()]
+        sharp &= flag[f1] ^ flag[f2]
+    idx = np.nonzero(sharp)[0]
+    a2 = np.radians(alpha[idx]) / 2
+    depth = np.minimum(T * np.cos(a2) ** 2 / (2 * np.sin(a2)), FAST_MAX_CUT * T)
+    lap("sharp_edges")
+
+    # chain edges into pieces
+    bis = nr[f1[idx]] + nr[f2[idx]]
+    bis /= np.linalg.norm(bis, axis=1, keepdims=True) + 1e-12
+    p0, p1 = V[ev[idx, 0]], V[ev[idx, 1]]
+    dirs = p1 - p0
+    lens = np.linalg.norm(dirs, axis=1)
+    dirs = dirs / (lens[:, None] + 1e-12)
+    at = {}
+    for k, (a, b) in enumerate(ev[idx]):
+        at.setdefault(int(a), []).append(k); at.setdefault(int(b), []).append(k)
+    used = np.zeros(len(idx), bool)
+    cos_turn = math.cos(math.radians(CHAIN_TURN))
+    pieces = []
+    for k in np.argsort(-lens):
+        if used[k]:
+            continue
+        used[k] = True
+        piece = [k]; length = lens[k]
+        for end in (int(ev[idx[k], 0]), int(ev[idx[k], 1])):
+            cur, v = k, end
+            while length < FAST_PIECE * T:
+                nxt = [j for j in at.get(v, []) if not used[j] and abs(dirs[j] @ dirs[cur]) >= cos_turn
+                       and bis[j] @ bis[cur] >= cos_turn]
+                if len(nxt) != 1 or len(at.get(v, [])) > 2:
+                    break
+                j = nxt[0]; used[j] = True; piece.append(j); length += lens[j]
+                a, b = int(ev[idx[j], 0]), int(ev[idx[j], 1])
+                v = b if a == v else a
+                cur = j
+        pieces.append(piece)
+    lap("chain")
+
+    # one box per piece
+    boxes = []
+    for pc in pieces:
+        P = np.concatenate([p0[pc], p1[pc]])
+        ax = dirs[pc[0]] if len(pc) == 1 else np.linalg.eigh(np.cov((P - P.mean(0)).T))[1][:, 2]
+        n = (bis[pc] * lens[pc, None]).sum(0)
+        n = n - (n @ ax) * ax
+        if np.linalg.norm(n) < 1e-12:
+            continue
+        n /= np.linalg.norm(n)
+        c0 = P.mean(0)
+        if tilt > 0:
+            rng = np.random.default_rng(int(abs(c0 * 1e4).sum()) % (2 ** 31) + seed)
+            ang = math.radians(rng.uniform(-tilt, tilt))
+            n = n * math.cos(ang) + np.cross(ax, n) * math.sin(ang)
+        u = np.cross(n, ax)
+        h = float((depth[pc] * lens[pc]).sum() / lens[pc].sum())
+        a_half = float((a2[pc] * lens[pc]).sum() / lens[pc].sum())
+        top = float((P @ n).max())
+        lev = top - h
+        half = h * math.tan(a_half) + T
+        s_ = P @ ax; uc = float((P @ u).mean())
+        lo = np.array([s_.min(), uc - half, lev]); hi = np.array([s_.max(), uc + half, top + T])
+        cs = np.array([ax * (lo[0], hi[0])[i] + u * (lo[1], hi[1])[j] + n * (lo[2], hi[2])[kk]
+                       for kk in (0, 1) for j in (0, 1) for i in (0, 1)])
+        boxes.append(cs)
+    info.update(sharp_edges=int(len(idx)), pieces=len(boxes))
+    lap("boxes")
+
+    # batched booleans: boxes whose bounds don't overlap are subtracted together
+    CUBE = np.array([(0, 2, 3), (0, 3, 1), (4, 5, 7), (4, 7, 6), (0, 1, 5), (0, 5, 4),
+                     (2, 6, 7), (2, 7, 3), (0, 4, 6), (0, 6, 2), (1, 3, 7), (1, 7, 5)], np.int32)
+    bb = [(c.min(0), c.max(0)) for c in boxes]
+    groups = []
+    for i in range(len(boxes)):
+        for g in groups:
+            if all(np.any(bb[i][0] > bb[j][1]) or np.any(bb[j][0] > bb[i][1]) for j in g):
+                g.append(i); break
+        else:
+            groups.append([i])
+
+    def box_mesh(ids):
+        Vb = np.concatenate([boxes[i] for i in ids]).astype(np.float32)
+        Fb = np.concatenate([CUBE + 8 * k for k in range(len(ids))]).astype(np.int32)
+        return mn.meshFromFacesVerts(np.ascontiguousarray(Fb), np.ascontiguousarray(Vb))
+
+    multi0 = len(mm.findMultipleEdges(m.topology))
+    w, done, why = m, 0, {}
+
+    def apply(w, ids):
+        try:
+            r = mm.boolean(w, box_mesh(ids), mm.BooleanOperation.DifferenceAB)
+        except Exception:
+            return None
+        if not r.valid():
+            return None
+        r = r.mesh
+        if len(r.topology.findHoleRepresentiveEdges()) > holes0 or len(mm.findMultipleEdges(r.topology)) > multi0:
+            return None
+        if len(mm.findSelfCollidingTriangles(mm.MeshPart(r))) > selfx0:
+            return None
+        return r
+
+    for g in groups:
+        r = apply(w, g)
+        if r is not None:
+            w = r; done += len(g); continue
+        for i in g:                                   # the group failed: box by box
+            r = apply(w, [i])
+            if r is None:
+                why["refused"] = why.get("refused", 0) + 1
+            else:
+                w = r; done += 1
+    info.update(chips=done, boolean_groups=len(groups), refused=why)
+    lap("booleans")
+    w.pack()
+    info["seconds"] = time.perf_counter() - t0
+    return w

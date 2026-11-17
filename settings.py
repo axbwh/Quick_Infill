@@ -182,8 +182,6 @@ class QuickInfillSettings(PropertyGroup):
                                "back to the stone exactly instead of through voxels"),
             ("CHIP", "Flat Chip", "Knock a flat chip off each sharp edge, like a chip off a stone.\n"
                                   "Fast: works on the mesh as it is, no voxels"),
-            ("VOXEL", "Round (old)", "The old way: round the thin edges off with a voxel grow, shrink and "
-                                     "regrow (X, Trim Density). Slower; kept to compare"),
         ],
         default="ROUND",
     )
@@ -191,7 +189,7 @@ class QuickInfillSettings(PropertyGroup):
         name="Thin", description="How big the flat chips are, in Blender units (cm).\n"
                                  "About the width of the chip across a square edge; sharper edges get "
                                  "bigger chips, blunt ones small or none. 0.03 matches the old Trim Edges",
-        default=0.03, min=0.005, max=0.1, soft_min=0.02, soft_max=0.04, precision=3, step=0.1,
+        default=0.04, min=0.005, max=0.2, soft_min=0.02, soft_max=0.12, precision=3, step=0.1,
     )
     trim_edges_only_cut: BoolProperty(
         name="Only Cut Edges", description="Chip only the edges where a cut face meets the stone.\n"
@@ -378,6 +376,10 @@ class QuickInfillSettings(PropertyGroup):
     show_infill_tools_menu: BoolProperty(name="Show Infill Tools", default=True)
     show_tools: BoolProperty(name="Show Offset Tools", default=False)
     show_support_tools: BoolProperty(name="Show Support Tools", default=False)
+    show_remove_scoop: BoolProperty(name="Remove Scoop",
+                                    description="Show or fold away Remove Scoop and its settings.\n"
+                                                "Take the scoop Fix Undercuts made back off a stone",
+                                    default=False)
     show_print_check: BoolProperty(name="Show Print Check", default=True)
 
 
@@ -385,11 +387,27 @@ def get_settings(context=None):
     return (context or bpy.context).scene.quick_infill_settings
 
 
+# Trim Edges' "Round (old)" was taken out (Alex 2026-11-18). A file saved with it stores the
+# method as its number (Round 0, Flat Chip 1, Round (old) 2): set those to Round when it opens.
+OLD_ROUND = 2
+
+
+@bpy.app.handlers.persistent
+def _old_round_to_round(_dummy=None):
+    for scene in bpy.data.scenes:
+        s = scene.get("quick_infill_settings")
+        if s is not None and s.get("trim_edges_method") == OLD_ROUND:
+            s["trim_edges_method"] = 0
+
+
 def register():
     bpy.utils.register_class(QuickInfillSettings)
     bpy.types.Scene.quick_infill_settings = PointerProperty(type=QuickInfillSettings)
+    bpy.app.handlers.load_post.append(_old_round_to_round)
 
 
 def unregister():
+    if _old_round_to_round in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_old_round_to_round)
     del bpy.types.Scene.quick_infill_settings
     bpy.utils.unregister_class(QuickInfillSettings)

@@ -549,10 +549,16 @@ def draw_support_tools(layout, context):
     draw_undercut_angle(col, s)
     col.separator()
     row = col.row(align=True)
+    row.scale_y = 1.4
     row.operator("quick_infill.fix_undercuts", text="Fix Undercuts", icon='MOD_SMOOTH')
     row.operator("quick_infill.fix_undercuts_from_view", text="From View", icon='HIDE_OFF')
+    if s.undercut_smart:                     # what the scoop prints like, on one line under the buttons
+        row = col.row(align=True)
+        row.active = False
+        row.alignment = 'CENTER'
+        row.label(text=stringing_status(s.undercut_stringing))
     col.separator()
-    col.prop(s, "auto_shrink", text="Auto Shrink")
+    col.prop(s, "auto_shrink", text="Auto Shrink", toggle=True)
     prop_with_suffix("shrink_amount", "Shrink Amount", "mm")
     prop_with_suffix("shrink_angle_threshold", "Shrink Angle", "°")
     col.separator()
@@ -562,18 +568,18 @@ def draw_support_tools(layout, context):
 
 
 def draw_undercut_angle(col, s):
-    """The Smart toggle, and under it the Stringing slider with what it prints like, or the Angle
-    with its presets. (Ashlarize's popup draws the same rows.)"""
-    col.prop(s, "undercut_smart", text="Smart", toggle=True)
+    """The Smart toggle, and under it the Stringing slider with its presets and the Floor, or the
+    Angle with its presets. (Ashlarize's popup draws the same rows.) What the Smart scoop prints
+    like goes under Fix Undercuts and From View."""
+    col.prop(s, "undercut_smart", text="Smart", icon='OUTLINER_OB_LIGHT', toggle=True)
     col.separator(factor=0.2)
-    if s.undercut_smart:
+    if s.undercut_smart:                     # Smart reads Stringing; the Angle is not used
         col.prop(s, "undercut_stringing", text="Stringing", slider=True)
         col.separator(factor=0.2)
         active = get_active_stringing_preset(s)
         row = col.row(align=True)
         for lip, _ in STRINGING_PRESETS:
             row.operator("quick_infill.stringing_preset", text=f"{lip:.2f}".rstrip("0"), depress=(active == lip)).lip = lip
-        col.label(text=stringing_status(s.undercut_stringing))
         row = col.row(align=True)
         row.prop(s, "undercut_floor", text="Floor")
         if s.undercut_floor == 'HEIGHT':

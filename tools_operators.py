@@ -225,7 +225,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_description = ("Take the thin, sharp edges off the selected meshes.\n"
                       "Round (default): rounds them off as the old Trim Edges did, about 5 times faster; a stone "
                       "too small for the Stone resolution is trimmed at Detail instead and tagged Detail. "
-                      "Flat Chip: a flat chip off each sharp edge, sized by Thin. Round (old): the old voxel way")
+                      "Flat Chip: a flat chip off each sharp edge, sized by Thin")
     suffix, label = "_TrimEdges", "Trim Edges"
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
@@ -234,11 +234,8 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
 
     def job_setup(self, context):
         s = context.scene.quick_infill_settings
-        method = getattr(s, "trim_edges_method", "VOXEL")
-        if method == "ROUND":
+        if getattr(s, "trim_edges_method", "ROUND") != "CHIP":
             return self._lean_round_setup(context, s)
-        if method != "CHIP":
-            return super().job_setup(context)
         objs = selected_meshes(context)
         if not objs:
             self.report({'ERROR'}, "No mesh selected.")
@@ -291,27 +288,9 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
 
     def job_estimate(self, context):
         s = context.scene.quick_infill_settings
-        method = getattr(s, "trim_edges_method", "VOXEL")
-        if method == "CHIP":
+        if getattr(s, "trim_edges_method", "ROUND") == "CHIP":
             return 0.05 * len(selected_meshes(context))
-        if method == "ROUND":
-            return 0.12 * len(selected_meshes(context))
-        return super().job_estimate(context)
-
-    def make_operation(self, s):
-        from .trim_round import trim_edges as round_trim
-        distance, x, density = float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)
-
-        # A stone too small for Stone comes back worked at Detail: tagged Detail, so every later tool
-        # with Smart Res on treats it as Detail too (Alex 2026-11-17).
-        def trim_edges(mesh, res):
-            out, tag = round_trim(mesh, res, distance, x, density)
-            return out if tag is None else Retagged(out, tag)
-        return trim_edges
-
-    def process_job(self, s):
-        """Round (old) in worker processes (used by the base job_setup only)."""
-        return ("trim_edges_job", ("voxel", float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)))
+        return 0.12 * len(selected_meshes(context))
 
 
 class QUICKINFILL_OT_create_outline(Operator):

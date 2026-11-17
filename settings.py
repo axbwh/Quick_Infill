@@ -395,7 +395,7 @@ OLD_ROUND = 2
 @bpy.app.handlers.persistent
 def _old_round_to_round(_dummy=None):
     for scene in bpy.data.scenes:
-        s = scene.get("quick_infill_settings")
+        s = getattr(scene, "quick_infill_settings", None)
         if s is not None and s.get("trim_edges_method") == OLD_ROUND:
             s["trim_edges_method"] = 0
 

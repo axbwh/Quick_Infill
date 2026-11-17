@@ -894,6 +894,16 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     if selfx0 > selfx_in:                     # the clean-up made crossings of its own: work on the input
         m = mm.Mesh(src0); selfx0 = selfx_in
         info["degeneracy_fix_reverted"] = True
+        if len(mm.findMultipleEdges(m.topology)):   # but still mend doubled edges (Blender booleans leave some)
+            mm2 = mm.Mesh(m)
+            try:
+                mm.fixMultipleEdges(mm2)
+                mm2.pack()
+                if len(mm.findSelfCollidingTriangles(mm.MeshPart(mm2))) <= selfx0:
+                    m = mm2
+                    info["multiple_edges_fixed"] = True
+            except Exception as e:
+                info["multiple_edge_fix_error"] = repr(e)
     holes0 = len(m.topology.findHoleRepresentiveEdges())
     V0src, F0src = _arrays(mm, mn, src0)
     V, F = _arrays(mm, mn, m)
@@ -994,6 +1004,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         for v in e:
             end_count[v] = end_count.get(v, 0) + 1
     boxes = []
+    planned = []
     for pi, pc in enumerate(pieces):
         P = np.concatenate([p0[pc], p1[pc]])
         ax = dirs[pc[0]] if len(pc) == 1 else np.linalg.eigh(np.cov((P - P.mean(0)).T))[1][:, 2]
@@ -1066,35 +1077,52 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         half = h * math.tan(a_half) * 1.15 + 0.05 * T
         uc = uc0
         ztop = top + 0.15 * T
-        # the chip blends out at both ends: the cutter's bottom (the chip plane) is shorter than its
-        # top, which stops at the piece's own end vertices, so the depth ramps from h to 0 over about
-        # one chip width (RAMP) and never runs past the edge's end onto a neighbouring face
         length = float(s_.max() - s_.min())
         width = max(2.0 * h * math.tan(a_half), h)            # chip width across the edge
-        ramp = min(RAMP * width, 0.3 * length)
-        # which end of the piece is a joint with another chipped piece
-        joint = [False, False]                                  # (low s end, high s end)
-        for v in ends_of[pi]:
-            sv = float(V[v] @ ax)
-            side = 0 if abs(sv - s_.min()) <= abs(sv - s_.max()) else 1
-            if end_count.get(v, 0) >= 2:
-                joint[side] = True
-        if not any(joint) and length < SHORT_CUT * width:
-            if dbg is not None:
-                dbg["skip"] = "short free piece"
-            continue                                            # a lone short cut only nicks the edge
-        overlap = JOINT_OVERLAP * width
+        planned.append(dict(pi=pi, ax=ax, u=u, n=n, smin=float(s_.min()), smax=float(s_.max()), uc=uc,
+                            half=half, lev=lev, ztop=ztop, length=length, width=width, dbg=dbg))
+
+    # second pass: a piece's end is a joint only where another piece that is really cut ends too; a
+    # piece with two free ends shorter than SHORT_CUT chip widths is dropped (it would only nick the
+    # edge), and the joints are worked out again without it
+    for _round in range(3):
+        cut_ends = {}
+        for p in planned:
+            for v in ends_of[p["pi"]]:
+                cut_ends[v] = cut_ends.get(v, 0) + 1
+        keep = []
+        for p in planned:
+            joint = [False, False]                              # (low s end, high s end)
+            for v in ends_of[p["pi"]]:
+                if cut_ends.get(v, 0) >= 2:
+                    sv = float(V[v] @ p["ax"])
+                    joint[0 if abs(sv - p["smin"]) <= abs(sv - p["smax"]) else 1] = True
+            p["joint"] = joint
+            if not any(joint) and p["length"] < SHORT_CUT * p["width"]:
+                if p["dbg"] is not None:
+                    p["dbg"]["skip"] = "short free piece"
+                continue
+            keep.append(p)
+        if len(keep) == len(planned):
+            break
+        planned = keep
+    for p in planned:
+        # the chip blends out at a free end: the cutter's bottom (the chip plane) stops short of its top,
+        # which stops at the piece's own end vertex, so the depth ramps from h to 0 over about one chip
+        # width (RAMP). At a joint both cutters run JOINT_OVERLAP chip widths past the shared vertex.
+        ramp = min(RAMP * p["width"], 0.3 * p["length"])
+        overlap = JOINT_OVERLAP * p["width"]
+        ax, u, n, joint = p["ax"], p["u"], p["n"], p["joint"]
         cs = []
-        for kk, z in ((0, lev), (1, ztop)):
-            lo_x = s_.min() - (overlap if joint[0] else (-ramp if kk == 0 else 0.0))
-            hi_x = s_.max() + (overlap if joint[1] else (-ramp if kk == 0 else 0.0))
+        for kk, z in ((0, p["lev"]), (1, p["ztop"])):
+            lo_x = p["smin"] - (overlap if joint[0] else (-ramp if kk == 0 else 0.0))
+            hi_x = p["smax"] + (overlap if joint[1] else (-ramp if kk == 0 else 0.0))
             for j in (0, 1):
-                y = (uc - half, uc + half)[j]
+                y = (p["uc"] - p["half"], p["uc"] + p["half"])[j]
                 for i in (0, 1):
-                    x = (lo_x, hi_x)[i]
-                    cs.append(ax * x + u * y + n * z)
-        if dbg is not None:
-            dbg.update(joint=joint, width=width / unit, kept=True)
+                    cs.append(ax * (lo_x, hi_x)[i] + u * y + n * z)
+        if p["dbg"] is not None:
+            p["dbg"].update(joint=joint, width=p["width"] / unit, kept=True)
         boxes.append(np.array(cs))
     info.update(sharp_edges=int(len(idx)), pieces=len(boxes))
     lap("boxes")

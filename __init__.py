@@ -27,3 +27,5 @@ def register():
 def unregister():
     for m in reversed(_modules):
         m.unregister()
+    from . import process_pool
+    process_pool.shutdown()

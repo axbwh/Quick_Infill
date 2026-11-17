@@ -64,8 +64,12 @@ class Recipe:
         # Faces kept by the decimation after each step (as the manual tools do with
         # Auto Decimation on Ratio); None = keep full resolution until the end.
         self.step_ratio = None
-        # Faces kept in the final H.
+        # Faces kept in the final H (used only when final_max_error is None).
         self.final_ratio = 0.03
+        # The final H is decimated as far as it can go without moving its surface more than this
+        # (mm). Alex 2026-11-17: "make the decimation less aggressive"; the 3% ratio moved it up to
+        # 0.22 mm and flattened the stone faces. 0.05 mm keeps about 20% of the faces.
+        self.final_max_error = 0.05
         # Windows, doors, arches and arrow slits through the wall are cut out of H (through_holes.py;
         # Alex 2026-11-17: "keep like arches and windows and arrow slits clear of any infill")
         self.clear_openings = True
@@ -235,17 +239,23 @@ def _fill_and_support(mesh, wall_dir, plate_z, recipe, timings, keep):
     Fs = step("F' shrink", lambda: cuda_offset(F, r.f_voxel, -r.f_dist), r.f_voxel)
     H = close(merged(Fs, G) if G is not None else Fs, r.h_voxel, r.h_dist, "H")
 
-    if r.final_ratio and r.final_ratio < 1.0:
+    if r.final_max_error:
+        H = step("H decimate", lambda: decimate_mesh(H, target_face_count=1, max_error=r.final_max_error),
+                 decimate=False)
+    elif r.final_ratio and r.final_ratio < 1.0:
         H = step("H decimate", lambda: decimate_mesh(H, target_face_count=max(1, int(face_count(H) * r.final_ratio)),
                                                       resolution=r.h_voxel), decimate=False)
     return H
 
 
-def join_faces(face_meshes, preset='BUILDING_ACCURATE', final_ratio=0.03, timings=None):
-    """I: all the H meshes merged and run through Cavity Infill once more, which joins the corners."""
+def join_faces(face_meshes, preset='BUILDING_ACCURATE', final_ratio=0.03, timings=None, max_error=0.05):
+    """I: all the H meshes merged and run through Cavity Infill once more, which joins the corners.
+    max_error (mm): decimated as far as that allows (as H); None = to final_ratio of its faces."""
     t0 = time.perf_counter()
     out = build_infill(merged(*face_meshes), _InfillSettings(preset))
-    if final_ratio and final_ratio < 1.0:
+    if max_error:
+        out = decimate_mesh(out, target_face_count=1, max_error=max_error)
+    elif final_ratio and final_ratio < 1.0:
         out = decimate_mesh(out, target_face_count=max(1, int(face_count(out) * final_ratio)))
     if timings is not None:
         timings.append(("I join faces", time.perf_counter() - t0))

@@ -842,6 +842,10 @@ SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone be
 SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
 MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
 DEPTH_K = 1.0        # fast variant: chip depth = this x the depth at which the wedge is Thin thick (1.0: jamb 0096 0.26% vs today 0.30%)
+LIP_UNDER = 3.0      # fast variant: material under an edge thinner than this x Thin is a thin lip: it gets chipped harder
+LIP_FRAC = 0.9       # fast variant: a lip at most Thin thick loses this share of it (the whole lip, less a hair)
+LIP_KEEP_ANGLE = True  # fast variant: on a lip the thickness cap is off: the angle depth (or the lip rule, if deeper) applies
+UNDER_MIN = 0.15     # fast variant: a thickness reading under this x Thin is the ray leaving through a neighbour face: ignored
 
 
 def chip_depth(a_half, T, face_size, thick_under):
@@ -852,15 +856,24 @@ def chip_depth(a_half, T, face_size, thick_under):
     Thin); face_size: sqrt of the area of the larger of the edge's two faces; thick_under: the stone's
     thickness straight under the edge along the chip normal (None if unknown).
     The chip goes down to where the wedge is Thin (= T / FAST_THICK_PER_SIZE) thick:
-    DEPTH_K x Thin / (2 tan(a/2)), i.e. 0.015 at 90 deg and 0.026 at 60 deg for Thin 0.03. (The earlier
-    rule, T cos^2(a/2) / (2 sin(a/2)), went about 2x deeper at 90 deg and over-chipped the jamb.) Capped at FAST_MAX_CUT x T, at
-    FACE_CAP x face_size (bumps between two small faces get small chips) and at THICK_CAP x
-    thick_under (thin stones are not sliced)."""
+    DEPTH_K x Thin / (2 tan(a/2)), i.e. 0.015 at 90 deg and 0.026 at 60 deg for Thin 0.03 (the earlier
+    T cos^2(a/2) / (2 sin(a/2)) went about 2x deeper at 90 deg and over-chipped the jamb). Capped at
+    FAST_MAX_CUT x T, at FACE_CAP x face_size (bumps between two small faces get small chips) and at
+    THICK_CAP x thick_under (thick stones are not sliced).
+    Thin lips are never sent to zero: where the material under the edge is under LIP_UNDER x Thin,
+    the chip is at least the lip rule's depth: LIP_FRAC x thick_under for a lip up to Thin thick (the
+    whole lip), falling off linearly to 0 at LIP_UNDER x Thin. A reading under UNDER_MIN x Thin
+    is a ray that left through a neighbour face, not a thickness: it is ignored."""
     thin = T / FAST_THICK_PER_SIZE
     h = min(DEPTH_K * thin / (2 * max(math.tan(a_half), 1e-6)), FAST_MAX_CUT * T, FACE_CAP * face_size)
-    if thick_under is not None:
+    if thick_under is None or thick_under < UNDER_MIN * thin:
+        return h
+    if thick_under >= LIP_UNDER * thin or not LIP_KEEP_ANGLE:
         h = min(h, THICK_CAP * thick_under)
-    return h
+    if thick_under < LIP_UNDER * thin:
+        ramp = 1.0 if thick_under <= thin else (LIP_UNDER * thin - thick_under) / ((LIP_UNDER - 1.0) * thin)
+        h = max(h, LIP_FRAC * min(thick_under, thin) * ramp)
+    return min(h, FAST_MAX_CUT * T)
 
 
 def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,

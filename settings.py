@@ -301,7 +301,7 @@ class QuickInfillSettings(PropertyGroup):
         default=True,
     )
     scoop_trim: BoolProperty(
-        name="Trim Edges", description="Round the edges off after the cut.\nRuns Trim Edges on the stone, after the damage",
+        name="Trim Edges", description="Round the edges off after the cut.\nRuns Trim Edges (Round, whatever the Trim Edges method is set to) on the stone, after the damage",
         default=True,
     )
 

@@ -463,7 +463,7 @@ class QUICKINFILL_OT_remove_scoop(Operator):
     bl_label = "Remove Scoop"
     bl_description = ("Take the scoop off the bottom of each selected stone.\n"
                       "Filled in, or cut off flat where the scoop ends (see Method), with every face above it "
-                      "left untouched. Damage Cut and Trim Edges then finish the new face")
+                      "left untouched. Damage Cut and Trim Edges (always Round) then finish the new face")
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -483,7 +483,14 @@ class QUICKINFILL_OT_remove_scoop(Operator):
         if s.scoop_damage and not damaged:
             self.report({'WARNING'}, "Stone Damage skipped: this file has no 'Stone_Damage' node group")
         if s.scoop_trim:
-            r = bpy.ops.quick_infill.trim_edges('EXEC_DEFAULT')
+            # always Round, never Flat Chip (Alex 2026-11-17: "It should use round always");
+            # the Trim Edges button keeps whichever method is picked
+            keep = s.trim_edges_method
+            s.trim_edges_method = 'ROUND'
+            try:
+                r = bpy.ops.quick_infill.trim_edges('EXEC_DEFAULT')
+            finally:
+                s.trim_edges_method = keep
             msg += ", Trim Edges " + ("done" if 'FINISHED' in r else "failed")
         self.report({'INFO'}, msg)
         return {'FINISHED'}

@@ -828,6 +828,8 @@ def check_manifold(mesh):
 
 ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
 POST_TOL = 1e-4     # fast variant: sliver clean-up after the booleans keeps the shape within this (BU)
+SHORT_CUT = 2.0      # fast variant: a piece with two free ends shorter than this x chip width gets no chip
+JOINT_OVERLAP = 0.5  # fast variant: at a joint the two cutters run this x chip width past the shared vertex
 RAMP = 0.6           # fast variant: chip ends ramp to zero depth over this x the chip width
 TAPER = 1.0          # fast variant: the chip ends slant out by this x the box height (chips fade out)
 FACE_CAP = 0.5       # fast variant: a chip is at most this x sqrt(area of the larger face) deep: bumps (two small faces) get small chips
@@ -978,8 +980,21 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     # (meshlib rayMeshIntersect, inward along the chip normal) and by the size of the smaller face.
     mp_m = mm.MeshPart(m)
     fsize = np.sqrt(np.maximum(ar[f1[idx]], ar[f2[idx]]))
-    boxes = []
+    # end vertices of each piece (a vertex used once by its edges); an end shared with another piece
+    # is a joint: the two chips overlap there instead of each ramping out (that left a peg between)
+    ends_of = []
+    end_count = {}
     for pc in pieces:
+        cnt = {}
+        for k in pc:
+            for v in ev[idx[k]]:
+                cnt[int(v)] = cnt.get(int(v), 0) + 1
+        e = [v for v, c_ in cnt.items() if c_ == 1]
+        ends_of.append(e)
+        for v in e:
+            end_count[v] = end_count.get(v, 0) + 1
+    boxes = []
+    for pi, pc in enumerate(pieces):
         P = np.concatenate([p0[pc], p1[pc]])
         ax = dirs[pc[0]] if len(pc) == 1 else np.linalg.eigh(np.cov((P - P.mean(0)).T))[1][:, 2]
         n = (bis[pc] * lens[pc, None]).sum(0)
@@ -1055,15 +1070,31 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         # top, which stops at the piece's own end vertices, so the depth ramps from h to 0 over about
         # one chip width (RAMP) and never runs past the edge's end onto a neighbouring face
         length = float(s_.max() - s_.min())
-        ramp = min(RAMP * max(2.0 * h * math.tan(a_half), h), 0.3 * length)
+        width = max(2.0 * h * math.tan(a_half), h)            # chip width across the edge
+        ramp = min(RAMP * width, 0.3 * length)
+        # which end of the piece is a joint with another chipped piece
+        joint = [False, False]                                  # (low s end, high s end)
+        for v in ends_of[pi]:
+            sv = float(V[v] @ ax)
+            side = 0 if abs(sv - s_.min()) <= abs(sv - s_.max()) else 1
+            if end_count.get(v, 0) >= 2:
+                joint[side] = True
+        if not any(joint) and length < SHORT_CUT * width:
+            if dbg is not None:
+                dbg["skip"] = "short free piece"
+            continue                                            # a lone short cut only nicks the edge
+        overlap = JOINT_OVERLAP * width
         cs = []
         for kk, z in ((0, lev), (1, ztop)):
-            ext = -ramp if kk == 0 else 0.0
+            lo_x = s_.min() - (overlap if joint[0] else (-ramp if kk == 0 else 0.0))
+            hi_x = s_.max() + (overlap if joint[1] else (-ramp if kk == 0 else 0.0))
             for j in (0, 1):
                 y = (uc - half, uc + half)[j]
                 for i in (0, 1):
-                    x = (s_.min() - ext, s_.max() + ext)[i]
+                    x = (lo_x, hi_x)[i]
                     cs.append(ax * x + u * y + n * z)
+        if dbg is not None:
+            dbg.update(joint=joint, width=width / unit, kept=True)
         boxes.append(np.array(cs))
     info.update(sharp_edges=int(len(idx)), pieces=len(boxes))
     lap("boxes")

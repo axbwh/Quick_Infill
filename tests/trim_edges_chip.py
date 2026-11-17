@@ -1,17 +1,17 @@
-"""Trim Edges test: Flat Chip, Only Cut Edges, Round (lean) and Round (old, voxel), through the real
+"""Trim Edges test: Flat Chip, Only Cut Edges, Round, through the real
 operator. Background Blender only, on copies; nothing is saved.
 
     blender -b <file with sp_cut stones>.blend --python tests/trim_edges_chip.py -- <stone> [<stone> ...]
 
 Checks: each result is closed and manifold, inside the original, changed (Flat Chip), fewer or equal
-changes with Only Cut Edges, and the old method still runs. Prints PASS / FAIL lines and times.
+changes with Only Cut Edges; Round (old) is gone and an old file opens on Round. Prints PASS / FAIL lines and times.
 """
 import bpy, sys, time, importlib, addon_utils
 import numpy as np
 
 names = sys.argv[sys.argv.index("--") + 1:]
-mod = next(m.__name__ for m in addon_utils.modules() if m.__name__.endswith("Quick_Infill"))
-if mod not in bpy.context.preferences.addons:
+if not hasattr(bpy.types.Scene, "quick_infill_settings"):   # (a copy loaded before this test is used as is)
+    mod = next(m.__name__ for m in addon_utils.modules() if m.__name__.endswith("Quick_Infill"))
     addon_utils.enable(mod, default_set=False)
 from meshlib import mrmeshpy as mm
 from meshlib import mrmeshnumpy as mn
@@ -108,7 +108,14 @@ check(any(v > 0.001 for v in chip), "Flat Chip chipped something (%s)" % ", ".jo
 cut = run("CHIP", only_cut=True)
 check(all(c <= a + 0.05 for c, a in zip(cut, chip)), "Only Cut Edges takes no more than all edges")
 lean = run("ROUND")
-old_round = run("VOXEL")
-for n, a, b in zip(names, lean, old_round):
-    print("ROUND vs Round (old) %s: volume lost %.2f %% vs %.2f %%" % (n, a, b))
+for n, a in zip(names, lean):
+    print("ROUND %s: volume lost %.2f %%" % (n, a))
+check([e.identifier for e in s.bl_rna.properties["trim_edges_method"].enum_items] == ["ROUND", "CHIP"],
+      "Trim Edges has Round and Flat Chip only (Round (old) taken out)")
+check(abs(s.bl_rna.properties["trim_edges_thin"].default - 0.04) < 1e-6
+      and s.bl_rna.properties["trim_edges_thin"].soft_max > 0.04, "Thin is 0.04 by default and goes higher")
+s["trim_edges_method"] = 2                      # a file saved with Round (old)
+settings_mod = sys.modules[type(s).__module__]
+settings_mod._old_round_to_round()
+check(s.trim_edges_method == "ROUND", "a file saved with Round (old) opens on Round")
 print("RESULT", "FAIL %d" % len(fails) if fails else "ALL PASS")

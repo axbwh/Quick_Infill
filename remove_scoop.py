@@ -491,7 +491,10 @@ class QUICKINFILL_OT_remove_scoop(Operator):
 
 def draw_remove_scoop(col, s):
     col.separator()
-    col.label(text="Remove Scoop:")
+    col.prop(s, "show_remove_scoop", text="Remove Scoop", emboss=False,
+             icon='DOWNARROW_HLT' if s.show_remove_scoop else 'RIGHTARROW')
+    if not s.show_remove_scoop:
+        return
     col.row(align=True).prop(s, "scoop_method", expand=True)
     if s.scoop_method == 'FILL':
         col.prop(s, "scoop_angle", text="View Angle")

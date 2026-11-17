@@ -19,6 +19,11 @@ from .job_runner import ModalJobMixin, JobSpec
 import numpy as np
 
 
+def RESOLUTION_PRESETS_RATIO(tag):
+    from .offset_utils import RESOLUTION_PRESETS
+    return RESOLUTION_PRESETS.get(tag, RESOLUTION_PRESETS['STONE'])[1]
+
+
 def selected_meshes(context):
     return [o for o in context.selected_objects if o.type == 'MESH']
 
@@ -221,7 +226,10 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
 
     def job_setup(self, context):
         s = context.scene.quick_infill_settings
-        if getattr(s, "trim_edges_method", "VOXEL") != "CHIP":
+        method = getattr(s, "trim_edges_method", "VOXEL")
+        if method == "ROUND":
+            return self._lean_round_setup(context, s)
+        if method != "CHIP":
             return super().job_setup(context)
         objs = selected_meshes(context)
         if not objs:
@@ -252,10 +260,39 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
                              on_prepared=on_prepared, auto_decimate=False)
 
+    def _lean_round_setup(self, context, s):
+        """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an
+        exact intersect with the stone, one decimate to the same face count. Stone -> Detail kept."""
+        objs = selected_meshes(context)
+        if not objs:
+            self.report({'ERROR'}, "No mesh selected.")
+            return None
+        from .trim_chip import lean_round
+        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        distance, x, density = float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)
+
+        def rnd(mesh, res):
+            tag = nearest_resolution_tag(res)
+            ratio = RESOLUTION_PRESETS_RATIO(tag)
+            info = {}
+            out = lean_round(mesh, unit=STL_EXPORT_SCALE, density=density, info=info, ratio=ratio,
+                             stone=dict(voxel=float(res) / STL_EXPORT_SCALE, distance=distance / STL_EXPORT_SCALE, x=x),
+                             fallback=(tag == 'STONE'))
+            if face_count(out) == 0:
+                raise MeshCollapsedError()
+            return Retagged(out, 'DETAIL') if info.get("tag") == "DETAIL" else out
+
+        # lean_round decimates to today's face count itself: no pipeline decimation afterwards
+        return pipeline_spec(objs, rnd, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
+                             auto_decimate=False)
+
     def job_estimate(self, context):
         s = context.scene.quick_infill_settings
-        if getattr(s, "trim_edges_method", "VOXEL") == "CHIP":
+        method = getattr(s, "trim_edges_method", "VOXEL")
+        if method == "CHIP":
             return 0.05 * len(selected_meshes(context))
+        if method == "ROUND":
+            return 0.12 * len(selected_meshes(context))
         return super().job_estimate(context)
 
     def make_operation(self, s):

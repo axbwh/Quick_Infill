@@ -1841,7 +1841,7 @@ def _round_once(mm, mesh, pre, density, unit, tm):
     return r.mesh, n_vox
 
 
-def lean_round(mesh, unit=1.0, density=1.0, info=None, parts=None):
+def lean_round(mesh, unit=1.0, density=1.0, info=None, parts=None, stone=None, ratio=None, fallback=True):
     """Today's Round Trim Edges result with fewer steps (see above). unit: mesh units per BU.
     The big decimate runs in parallel parts; if that leaves the result crossing itself (or open)
     more than the input, it is done again in one part."""
@@ -1852,7 +1852,7 @@ def lean_round(mesh, unit=1.0, density=1.0, info=None, parts=None):
     if parts is not None:
         ROUND_DECIMATE_PARTS = parts
     try:
-        out = _lean_round(mesh, unit, density, info)
+        out = _lean_round(mesh, unit, density, info, stone, ratio, fallback)
     finally:
         ROUND_DECIMATE_PARTS = keep
     if (parts is None and keep > 1 and out is not None):
@@ -1862,24 +1862,24 @@ def lean_round(mesh, unit=1.0, density=1.0, info=None, parts=None):
         if bad:
             t1 = info.get("seconds", 0.0)
             info2 = {}
-            out = lean_round(mesh, unit, density, info2, parts=1)
+            out = lean_round(mesh, unit, density, info2, parts=1, stone=stone, ratio=ratio, fallback=fallback)
             info2["seconds"] = info2.get("seconds", 0.0) + t1
             info2["redone_serial"] = True
             info.clear(); info.update(info2)
     return out
 
 
-def _lean_round(mesh, unit, density, info):
+def _lean_round(mesh, unit, density, info, stone=None, ratio=None, fallback=True):
     mm, mn = _ml()
     info = {} if info is None else info
     tm = info.setdefault("timings", {})
     t0 = time.perf_counter()
     src = mm.Mesh(mesh); src.pack()
     v0 = abs(float(src.volume()))
-    out, n_vox = _round_once(mm, src, ROUND_STONE, density, unit, tm)
+    out, n_vox = _round_once(mm, src, stone or ROUND_STONE, density, unit, tm)
     tag = "STONE"
     share = abs(float(out.volume())) / v0 if (out is not None and v0 > 0) else 0.0
-    if share < STONE_KEEPS:
+    if fallback and share < STONE_KEEPS:
         fine, n2 = _round_once(mm, src, ROUND_DETAIL, density, unit, tm)
         if fine is not None and abs(float(fine.volume())) / v0 > share:
             out, n_vox, tag = fine, n2, "DETAIL"
@@ -1887,12 +1887,13 @@ def _lean_round(mesh, unit, density, info):
         info["seconds"] = time.perf_counter() - t0
         return src
     t = time.perf_counter()
-    target = int(ROUND_RATIO[tag] * n_vox * 0.96)            # today's output: ratio x its voxel intersect faces
+    r_ = ratio if (ratio is not None and tag == "STONE") else ROUND_RATIO[tag]
+    target = int(r_ * n_vox * 0.96)                           # today's output: ratio x its voxel intersect faces
     cur = int(out.topology.numValidFaces())
     if target < cur:
         ds = mm.DecimateSettings()
         ds.maxDeletedFaces = cur - target
-        ds.maxError = (ROUND_STONE if tag == "STONE" else ROUND_DETAIL)["voxel"] * unit * 10.0
+        ds.maxError = ((stone or ROUND_STONE) if tag == "STONE" else ROUND_DETAIL)["voxel"] * unit * 10.0
         ds.packMesh = True
         mm.decimateMesh(out, ds)
     tm["decimate_final"] = time.perf_counter() - t

@@ -841,10 +841,12 @@ FAST_PIECE = 10.0    # pieces are at most this many x thickness long
 SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone beside the band stands this x h above it
 SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
 MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
-DEPTH_K = 1.25       # fast variant: chip depth = this x the depth at which the wedge is Thin thick (1.25 on 8894d6b: jamb 0096 0.36% vs today 0.30%; 1.5 puts it at 1.7x)
+DEPTH_K = 1.1        # fast variant: chip depth = this x the depth rule below (tuned on 8894d6b: jamb 0096 1.2x today, median 0.42x)
+DEPTH_RULE = "plane"  # fast variant: "wedge" = k x Thin / (2 tan(a/2)); "plane" = k x T cos^2(a/2) / (2 sin(a/2))
 LIP_UNDER = 3.0      # fast variant: material under an edge thinner than this x Thin is a thin lip: it gets chipped harder
 LIP_FRAC = 0.9       # fast variant: a lip at most Thin thick loses this share of it (the whole lip, less a hair)
 LIP_KEEP_ANGLE = True  # fast variant: on a lip the thickness cap is off: the angle depth (or the lip rule, if deeper) applies
+UNDER_BOGUS = "skip"   # fast variant: what such a reading gets: "angle" (the angle depth) or "skip" (no chip)
 UNDER_MIN = 0.15     # fast variant: a thickness reading under this x Thin is the ray leaving through a neighbour face: ignored
 
 
@@ -865,9 +867,16 @@ def chip_depth(a_half, T, face_size, thick_under):
     whole lip), falling off linearly to 0 at LIP_UNDER x Thin. A reading under UNDER_MIN x Thin
     is a ray that left through a neighbour face, not a thickness: it is ignored."""
     thin = T / FAST_THICK_PER_SIZE
-    h = min(DEPTH_K * thin / (2 * max(math.tan(a_half), 1e-6)), FAST_MAX_CUT * T, FACE_CAP * face_size)
-    if thick_under is None or thick_under < UNDER_MIN * thin:
+    if DEPTH_RULE == "plane":
+        s = max(math.sin(a_half), 1e-6)
+        d = DEPTH_K * T * math.cos(a_half) ** 2 / (2 * s)
+    else:
+        d = DEPTH_K * thin / (2 * max(math.tan(a_half), 1e-6))
+    h = min(d, FAST_MAX_CUT * T, FACE_CAP * face_size)
+    if thick_under is None:
         return h
+    if thick_under < UNDER_MIN * thin:
+        return h if UNDER_BOGUS == "angle" else 0.0
     if thick_under >= LIP_UNDER * thin or not LIP_KEEP_ANGLE:
         h = min(h, THICK_CAP * thick_under)
     if thick_under < LIP_UNDER * thin:

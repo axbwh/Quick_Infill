@@ -571,12 +571,69 @@ def _recheck_round_pockets(sealed, solid):
     return fill
 
 
-def seal_plugs(meshes, voxel=0.2, plate_z=None, drain_gap=0.0, overlap=2, report=None):
+VIEW_DIRS = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] +     [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+
+
+def _drop_visible(plugs, meshes):
+    """The plug mesh without the pieces that can be seen from outside the model.
+
+    A sealed cavity cannot be seen from outside. A pocket the voxel grid only
+    takes for sealed (a pit or joint whose mouth is narrower than a voxel, a
+    thin film between two overlapping meshes) can: its plug pokes out of the
+    surface (Alex 17 Nov: red dots all over the floor). From every point of
+    every plug piece rays go out in 14 directions against the model; a piece
+    any ray of which gets out without hitting the model is dropped."""
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    model = merged_mesh(meshes)
+    comps = mm.getAllComponents(mm.MeshPart(plugs))
+    if comps.size() == 0:
+        return plugs
+    pts = mn.getNumpyVerts(plugs).astype(np.float32)
+    dirs = np.array(VIEW_DIRS, dtype=np.float32)
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    n, k = len(pts), len(dirs)
+    origins = mn.fromNumpyArray(np.repeat(pts, k, axis=0))
+    rays = mn.fromNumpyArray(np.tile(dirs, (n, 1)))
+    res = mm.MultiRayMeshIntersectResult()
+    rays_hit = mm.BitSet()
+    res.intersectingRays = rays_hit      # filled only when given
+    check_cancelled()
+    mm.multiRayMeshIntersect(mm.MeshPart(model), mm.std_vector_Vector3_float(origins.vec),
+                             mm.std_vector_Vector3_float(rays.vec), res, closestIntersect=False)
+    hit = np.zeros(n * k, dtype=bool)
+    b = mn.getNumpyBitSet(rays_hit)[:n * k]
+    hit[:len(b)] = b
+    seen = ~hit.reshape(n, k).all(axis=1)              # a point that sees out
+    faces = mn.getNumpyFaces(plugs.topology)
+    keep = mm.FaceBitSet()
+    keep.resize(len(faces), False)
+    kept = 0
+    for c in comps:
+        f = np.zeros(len(faces), dtype=bool)
+        cb = mn.getNumpyBitSet(c)[:len(faces)]
+        f[:len(cb)] = cb
+        if seen[np.unique(faces[f].ravel())].any():
+            continue
+        keep |= c
+        kept += 1
+    if kept == comps.size():
+        return plugs
+    if kept == 0:
+        return None
+    out = mm.Mesh()
+    out.addMeshPart(mm.MeshPart(plugs, keep))
+    return out
+
+
+def seal_plugs(meshes, voxel=0.2, plate_z=None, drain_gap=0.0, overlap=2, report=None, hide=True):
     """Mesh that fills every sealed cavity of the model (None if there is none).
 
     The plugs reach `overlap` voxels into the surrounding walls, so the union
     with the model leaves no sliver. Sealed cavities cannot be seen from
-    outside, so filling them changes nothing visible.
+    outside, so filling them changes nothing visible. hide: a plug piece that
+    can be seen from outside is not a real cavity's and is dropped (see
+    _drop_visible); False = every piece, as before 17 Nov.
     """
     g = voxelize(meshes, voxel, plate_z, with_distance=(drain_gap * 0.5 + voxel) if drain_gap > 0 else None)
     sealed, _ = sealed_mask(g, drain_gap)
@@ -593,7 +650,10 @@ def seal_plugs(meshes, voxel=0.2, plate_z=None, drain_gap=0.0, overlap=2, report
         if report is not None:
             report["sealed_volume"] = g.volume(fill)
         fill = dilate3d(fill, overlap) & (solid0 | fill)   # never grow a plug out of the model
-        return mask_to_mesh(fill, g.origin, g.voxel)
+        plugs = mask_to_mesh(fill, g.origin, g.voxel)
+        if hide and plugs is not None:
+            plugs = _drop_visible(plugs, meshes)
+        return plugs
     fill = sealed
     for _ in range(4):
         g.solid = solid0 | dilate3d(fill, 1)

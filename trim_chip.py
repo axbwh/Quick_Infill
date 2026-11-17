@@ -840,6 +840,7 @@ JOINT_OVERLAP = 0.5  # fast variant: at a joint the two cutters run this x chip 
 RAMP = 0.6           # fast variant: chip ends ramp to zero depth over this x the chip width
 TAPER = 1.0          # fast variant: the chip ends slant out by this x the box height (chips fade out)
 FACE_CAP = 0.5       # fast variant: a chip is at most this x sqrt(area of the larger face) deep: bumps (two small faces) get small chips
+FACE_CAP_THIN = 0.04   # fast variant: the Thin (BU) at which FACE_CAP applies as is; it scales with Thin/this
 THICK_CAP = 0.15     # fast variant: a chip is at most this share of the stone's thickness under it
 FAST_MAX_CUT = 1.0          # fast variant: a chip goes at most this many x thickness deep
 FAST_THICK_PER_SIZE = 3.0   # fast variant: thickness = this x Thin (Thin 0.03 = today's chipped area, measured)
@@ -1022,6 +1023,9 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
 
     T = FAST_THICK_PER_SIZE * float(size) * unit
     info["thickness"] = T / unit
+    face_scale = float(size) / FACE_CAP_THIN
+    if abs(face_scale - 1.0) < 1e-5:   # the slider's float32 0.04: exactly today's chips
+        face_scale = 1.0
     m = mm.Mesh(mesh)
     m.pack()
     src0 = mm.Mesh(m)
@@ -1177,7 +1181,9 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
                 thick_under = float(dl() if callable(dl) else dl)
         except Exception:
             pass
-        h = chip_depth(a_half, T, float((fsize[pc] * w8).sum()), thick_under)
+        # the face-size cap grows and shrinks with Thin (FACE_CAP_THIN = no change): on stones with
+        # small faces it decided most chips, so the Thin slider did next to nothing above 0.04
+        h = chip_depth(a_half, T, float((fsize[pc] * w8).sum()) * face_scale, thick_under)
         dbg = None
         if "debug" in info:              # caller asked for per-piece numbers (diagnosis)
             dbg = dict(edges=[[int(x) for x in ev[idx[k]]] for k in pc], alpha=[float(alpha[idx[k]]) for k in pc],

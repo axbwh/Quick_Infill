@@ -77,13 +77,31 @@ def trim_edges(mesh, res, distance, x, density):
     return fine, 'DETAIL'
 
 
-def job(verts, faces, res, ratio, mode, auto_decimate, distance, x, density):
+def lean_trim(mesh, res, distance, x, density, unit):
+    """Round (lean, trim_chip.lean_round), the way the operator calls it: (mesh, tag or None).
+    It decimates to today's face count itself (no pipeline decimation afterwards)."""
+    from .trim_chip import lean_round
+    tag = nearest_resolution_tag(res)
+    ratio = RESOLUTION_PRESETS.get(tag, RESOLUTION_PRESETS['STONE'])[1]
+    info = {}
+    out = lean_round(mesh, unit=unit, density=density, info=info, ratio=ratio,
+                     stone=dict(voxel=float(res) / unit, distance=distance / unit, x=x),
+                     fallback=(tag == 'STONE'))
+    if face_count(out) == 0:
+        raise MeshCollapsedError()
+    return out, ('DETAIL' if info.get("tag") == "DETAIL" else None)
+
+
+KINDS = {"voxel": trim_edges, "lean": lean_trim}
+
+
+def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
     """One object, the way the pipeline does it (trim, then its auto-decimate), on numpy arrays.
     For worker processes: returns ("ok", verts, faces, voxel size used) | ("collapsed",) | ("error", text)."""
     try:
         mn = get_mrmeshnumpy()
         src = mn.meshFromFacesVerts(faces, verts)
-        out, tag = trim_edges(src, res, distance, x, density)
+        out, tag = KINDS[kind](src, res, *params)
         if tag is not None:
             res, ratio = RESOLUTION_PRESETS[tag]
         if face_count(out) == 0:

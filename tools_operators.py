@@ -275,24 +275,19 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         if not objs:
             self.report({'ERROR'}, "No mesh selected.")
             return None
-        from .trim_chip import lean_round
+        from .trim_round import lean_trim
         from .blender_meshlib_utils import STL_EXPORT_SCALE
         distance, x, density = float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)
 
         def rnd(mesh, res):
-            tag = nearest_resolution_tag(res)
-            ratio = RESOLUTION_PRESETS_RATIO(tag)
-            info = {}
-            out = lean_round(mesh, unit=STL_EXPORT_SCALE, density=density, info=info, ratio=ratio,
-                             stone=dict(voxel=float(res) / STL_EXPORT_SCALE, distance=distance / STL_EXPORT_SCALE, x=x),
-                             fallback=(tag == 'STONE'))
-            if face_count(out) == 0:
-                raise MeshCollapsedError()
-            return Retagged(out, 'DETAIL') if info.get("tag") == "DETAIL" else out
+            out, tag = lean_trim(mesh, res, distance, x, density, STL_EXPORT_SCALE)
+            return out if tag is None else Retagged(out, tag)
 
-        # lean_round decimates to today's face count itself: no pipeline decimation afterwards
+        # lean_round decimates to today's face count itself: no pipeline decimation afterwards.
+        # Many stones run in worker processes (the same lean_trim there).
         return pipeline_spec(objs, rnd, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             auto_decimate=False)
+                             auto_decimate=False,
+                             process_job=("trim_edges_job", ("lean", distance, x, density, STL_EXPORT_SCALE)))
 
     def job_estimate(self, context):
         s = context.scene.quick_infill_settings
@@ -315,7 +310,8 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         return trim_edges
 
     def process_job(self, s):
-        return ("trim_edges_job", (float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)))
+        """Round (old) in worker processes (used by the base job_setup only)."""
+        return ("trim_edges_job", ("voxel", float(s.distance), float(s.trim_edges_x), float(s.trim_edges_density)))
 
 
 class QUICKINFILL_OT_create_outline(Operator):

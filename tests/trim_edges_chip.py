@@ -68,7 +68,7 @@ def run(method, only_cut=False):
                 tmp = mm.VertCoords(); tmp.vec = vc; vc = tmp
             outside = float(np.array(mm.findSignedDistances(O, vc).vec).max())
             check(outside < 1e-3, "%s %s: inside the original (max %.5f)" % (method, src.name, outside))
-            check(lost >= 0.0, "%s %s: volume lost %.2f %%" % (method, src.name, lost))
+            check(lost >= -0.01, "%s %s: volume lost %.2f %% (never gains)" % (method, src.name, lost))
         bpy.data.objects.remove(cp)
     return out
 

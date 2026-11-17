@@ -893,6 +893,37 @@ def chip_depth(a_half, T, face_size, thick_under):
     return min(h, FAST_MAX_CUT * T)
 
 
+def _column_prism(ax, u, n, uc, half, prof, top, ztop):
+    """Closed mesh (V, F) of a cutter: across the edge (u) from uc - half to uc + half; along it (ax)
+    the stations of prof = [(s, depth)], bottom at top - depth (along n), top face at ztop."""
+    m = len(prof)
+    V = []
+    for s, d in prof:
+        zb = top - d
+        for y in (uc - half, uc + half):
+            V.append(ax * s + u * y + n * zb)
+            V.append(ax * s + u * y + n * ztop)
+    V = np.array(V)
+    # vertex index: station i, side j (0: u-, 1: u+), level k (0 bottom, 1 top)
+    idx = lambda i, j, k: 4 * i + 2 * j + k
+    F = []
+    for i in range(m - 1):
+        a0, a1 = i, i + 1
+        F += [(idx(a0, 0, 0), idx(a1, 0, 0), idx(a1, 1, 0)), (idx(a0, 0, 0), idx(a1, 1, 0), idx(a0, 1, 0))]   # bottom
+        F += [(idx(a0, 0, 1), idx(a0, 1, 1), idx(a1, 1, 1)), (idx(a0, 0, 1), idx(a1, 1, 1), idx(a1, 0, 1))]   # top
+        F += [(idx(a0, 0, 0), idx(a0, 0, 1), idx(a1, 0, 1)), (idx(a0, 0, 0), idx(a1, 0, 1), idx(a1, 0, 0))]   # side u-
+        F += [(idx(a0, 1, 0), idx(a1, 1, 0), idx(a1, 1, 1)), (idx(a0, 1, 0), idx(a1, 1, 1), idx(a0, 1, 1))]   # side u+
+    for i, rev in ((0, False), (m - 1, True)):                                                            # ends
+        q = [(idx(i, 0, 0), idx(i, 1, 0), idx(i, 1, 1)), (idx(i, 0, 0), idx(i, 1, 1), idx(i, 0, 1))]
+        F += [f[::-1] for f in q] if rev else q
+    F = np.array(F, np.int32)
+    # outward orientation: flip all faces if the signed volume comes out negative
+    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
+        F = F[:, ::-1].copy()
+    return V, F
+
+
 def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,
               info=None):
     mm, mn = _ml()
@@ -1112,7 +1143,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         length = float(s_.max() - s_.min())
         width = max(2.0 * h * math.tan(a_half), h)            # chip width across the edge
         planned.append(dict(pi=pi, ax=ax, u=u, n=n, smin=float(s_.min()), smax=float(s_.max()), uc=uc,
-                            half=half, lev=lev, ztop=ztop, length=length, width=width, dbg=dbg))
+                            half=half, lev=lev, top=top, ztop=ztop, length=length, width=width, dbg=dbg))
 
     # second pass: a piece's end is a joint only where another piece that is really cut ends too; a
     # piece with two free ends shorter than SHORT_CUT chip widths is dropped (it would only nick the
@@ -1138,31 +1169,59 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         if len(keep) == len(planned):
             break
         planned = keep
+    # depth of every planned chip, and which chips meet at each joint vertex
+    at_vertex = {}
     for p in planned:
-        # the chip blends out at a free end: the cutter's bottom (the chip plane) stops short of its top,
-        # which stops at the piece's own end vertex, so the depth ramps from h to 0 over about one chip
-        # width (RAMP). At a joint both cutters run JOINT_OVERLAP chip widths past the shared vertex.
-        ramp = min(RAMP * p["width"], 0.3 * p["length"])
-        overlap = JOINT_OVERLAP * p["width"]
+        p["h"] = p["top"] - p["lev"]
+        for v in ends_of[p["pi"]]:
+            at_vertex.setdefault(v, []).append(p)
+    for p in planned:
+        # one cutter per chip: a prism across the edge whose bottom follows the chip's depth along the
+        # edge. Middle: the chip plane (depth h). Free end: the depth ramps to 0 over about one chip
+        # width (RAMP), stopping at the piece's own end vertex. Joint: over about one chip width the
+        # depth moves to the mean of the chips meeting there, reached at the shared vertex, and the
+        # cutter runs JOINT_OVERLAP chip widths past it on the same slope, so neighbouring chips of
+        # different depth meet without a step.
+        h, top, W = p["h"], p["top"], p["width"]
+        ramp = min(RAMP * W, 0.3 * p["length"])
+        blend = min(W, 0.45 * p["length"])
+        overlap = JOINT_OVERLAP * W
         ax, u, n, joint = p["ax"], p["u"], p["n"], p["joint"]
-        cs = []
-        for kk, z in ((0, p["lev"]), (1, p["ztop"])):
-            lo_x = p["smin"] - (overlap if joint[0] else (-ramp if kk == 0 else 0.0))
-            hi_x = p["smax"] + (overlap if joint[1] else (-ramp if kk == 0 else 0.0))
-            for j in (0, 1):
-                y = (p["uc"] - p["half"], p["uc"] + p["half"])[j]
-                for i in (0, 1):
-                    cs.append(ax * (lo_x, hi_x)[i] + u * y + n * z)
+        prof = []                               # (s, depth) along the edge, s increasing
+        for side, s_end, inward in ((0, p["smin"], 1.0), (1, p["smax"], -1.0)):
+            if joint[side]:
+                vs = [v for v in ends_of[p["pi"]]
+                      if abs(float(V[v] @ ax) - s_end) <= abs(float(V[v] @ ax) - (p["smax"] if side == 0 else p["smin"]))]
+                others = [q for v in vs for q in at_vertex.get(v, []) if q is not p]
+                if others and vs:
+                    # one shared point for every chip meeting here: the joint vertex, lowered by the
+                    # mean depth along the mean chip normal; each chip's bottom passes through it,
+                    # so neighbouring chips meet on the edge line even when their planes tilt apart
+                    grp = [p] + others
+                    hbar = sum(q["h"] for q in grp) / len(grp)
+                    nb = sum(q["n"] for q in grp); nb = nb / (np.linalg.norm(nb) + 1e-12)
+                    Pj = V[vs[0]] - nb * hbar
+                    hm = max(top - float(Pj @ n), 0.0)
+                else:
+                    hm = h
+                slope = (h - hm) / max(blend, 1e-12)            # depth change per unit towards the end
+                past = max(hm - slope * overlap, 0.0)
+                pts = [(s_end - inward * overlap, past), (s_end, hm), (s_end + inward * blend, h)]
+            else:
+                pts = [(s_end, 0.0), (s_end + inward * ramp, h)]
+            prof.append(pts if side == 0 else pts[::-1])
+        prof = prof[0] + prof[1]
+        prof = [pt for i_, pt in enumerate(prof) if i_ == 0 or pt[0] > prof[i_ - 1][0] + 1e-9 * max(1.0, abs(pt[0]))]
         if p["dbg"] is not None:
-            p["dbg"].update(joint=joint, width=p["width"] / unit, kept=True)
-        boxes.append(np.array(cs))
+            p["dbg"].update(joint=joint, width=W / unit, kept=True, profile=[(float(s), float(d) / unit) for s, d in prof])
+        boxes.append(_column_prism(ax, u, n, p["uc"], p["half"], prof, top, p["ztop"]))
     info.update(sharp_edges=int(len(idx)), pieces=len(boxes))
     lap("boxes")
 
     # batched booleans: boxes whose bounds don't overlap are subtracted together
     CUBE = np.array([(0, 2, 3), (0, 3, 1), (4, 5, 7), (4, 7, 6), (0, 1, 5), (0, 5, 4),
                      (2, 6, 7), (2, 7, 3), (0, 4, 6), (0, 6, 2), (1, 3, 7), (1, 7, 5)], np.int32)
-    bb = [(c.min(0), c.max(0)) for c in boxes]
+    bb = [(c[0].min(0), c[0].max(0)) for c in boxes]
     groups = []
     for i in range(len(boxes)):
         for g in groups:
@@ -1172,8 +1231,12 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             groups.append([i])
 
     def box_mesh(ids):
-        Vb = np.concatenate([boxes[i] for i in ids]).astype(np.float32)
-        Fb = np.concatenate([CUBE + 8 * k for k in range(len(ids))]).astype(np.int32)
+        Vs, Fs, off = [], [], 0
+        for i in ids:
+            Vb_, Fb_ = boxes[i]
+            Vs.append(Vb_); Fs.append(Fb_ + off); off += len(Vb_)
+        Vb = np.concatenate(Vs).astype(np.float32)
+        Fb = np.concatenate(Fs).astype(np.int32)
         return mn.meshFromFacesVerts(np.ascontiguousarray(Fb), np.ascontiguousarray(Vb))
 
     multi0 = len(mm.findMultipleEdges(m.topology))

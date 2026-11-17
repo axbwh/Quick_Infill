@@ -828,6 +828,13 @@ def check_manifold(mesh):
 
 ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
 POST_TOL = 1e-4     # fast variant: sliver clean-up after the booleans keeps the shape within this (BU)
+LIP_TRIM = False     # fast variant: cut thin lips back along straight lines (_lip_boxes). OFF: on the 30 deg sliver it
+                     # took 26.6 % (today 10.4 %), and on the 0102 lip most of its booleans were refused
+LIP_SEGMENTS = 3     # ... in at most this many straight segments per lip
+MERGE_ANGLE = 12.0   # fast variant: neighbouring chips whose planes differ less than this become one cut
+LIP_MERGE_ANGLE = 35.0  # ... along a thin lip (stone under the edge thinner than LIP_THICK x T)
+LIP_THICK = 1.5
+MERGE_STRAIGHT = 0.5  # ... if the joined run stays within this x chip width of a straight line
 SHORT_CUT = 2.0      # fast variant: a piece with two free ends shorter than this x chip width gets no chip
 JOINT_OVERLAP = 0.5  # fast variant: at a joint the two cutters run this x chip width past the shared vertex
 RAMP = 0.6           # fast variant: chip ends ramp to zero depth over this x the chip width
@@ -922,6 +929,84 @@ def _column_prism(ax, u, n, uc, half, prof, top, ztop):
     if np.einsum("ij,ij->i", a, np.cross(b, c)).sum() < 0:
         F = F[:, ::-1].copy()
     return V, F
+
+
+def _lip_boxes(mm, mn, m, T, info):
+    """Cutters (V, F) that cut thin lips back. A lip = a connected region of faces whose three
+    vertices are thinner than T (meshlib computeRayThicknessAtVertices). Its plate plane comes from
+    its face normals (top and underside point opposite ways); its inner boundary (where the plate
+    reaches T) is fitted with a straight line, split at real corners into up to LIP_SEGMENTS lines;
+    each cutter takes away the part of the plate beyond its line, square to the plate."""
+    V, F = _arrays(mm, mn, m)
+    th = np.array(mm.computeRayThicknessAtVertices(m).vec, float)[:len(V)]
+    thin_v = th < T
+    thin_f = thin_v[F].all(1)
+    ar, nr = _face_areas(V, F)
+    out = []
+    regions = _edge_components(F, np.nonzero(thin_f)[0]) if thin_f.any() else []
+    for g in regions:
+        if ar[g].sum() < T * T:
+            continue
+        # plate normal: the dominant axis of the face normals (top and underside are opposite)
+        M = (nr[g] * ar[g, None]).T @ nr[g]
+        pn = np.linalg.eigh(M)[1][:, 2]
+        # inner boundary: vertices of the region's outline (edges used once inside the region)
+        ec = {}
+        for f in g:
+            a, b, c = (int(x) for x in F[f])
+            for e in ((a, b), (b, c), (c, a)):
+                k = (min(e), max(e)); ec[k] = ec.get(k, 0) + 1
+        bv = np.array(sorted({x for k, c_ in ec.items() if c_ == 1 for x in k}))
+        if len(bv) < 3:
+            continue
+        rv = np.unique(F[g].ravel())
+        R = V[rv]
+        B = V[bv] - np.outer(V[bv] @ pn, pn)                    # boundary, flattened onto the plate
+        cR = (R - np.outer(R @ pn, pn)).mean(0)
+        segs = _split_line(B, T, LIP_SEGMENTS)
+        for S in segs:
+            c0 = S.mean(0)
+            d = np.linalg.eigh(np.cov((S - c0).T) + 1e-12 * np.eye(3))[1][:, 2]
+            d = d - (d @ pn) * pn; d /= (np.linalg.norm(d) + 1e-12)
+            o = np.cross(pn, d)
+            if (cR - c0) @ o < 0:                               # o points from the line towards the rim
+                o = -o
+            line = float((S @ o).max())                         # the thickest side of the boundary
+            ro = R @ o
+            beyond = R[ro > line]
+            if len(beyond) == 0:
+                continue
+            sd = S @ d
+            lo_d, hi_d = float(sd.min()) - 0.5 * T, float(sd.max()) + 0.5 * T
+            far = float((beyond @ o).max()) + T
+            pz = R @ pn
+            uc = float(pz.mean()); half = float(np.ptp(pz)) / 2 + T
+            prof = [(lo_d, far - line), (hi_d, far - line)]
+            out.append(_column_prism(d, pn, o, uc, half, prof, far, far))
+    info["lip_regions"] = len(regions)
+    return out
+
+
+def _split_line(B, T, most):
+    """Split boundary points into up to `most` runs, each close to a straight line (within T/2)."""
+    def dev(S):
+        c0 = S.mean(0)
+        d = np.linalg.eigh(np.cov((S - c0).T) + 1e-12 * np.eye(3))[1][:, 2]
+        off = (S - c0) - np.outer((S - c0) @ d, d)
+        return float(np.linalg.norm(off, axis=1).max()), d, c0
+    runs = [B]
+    while len(runs) < most:
+        worst = max(range(len(runs)), key=lambda i: dev(runs[i])[0] if len(runs[i]) >= 4 else -1)
+        e, d, c0 = dev(runs[worst]) if len(runs[worst]) >= 4 else (0.0, None, None)
+        if e <= 0.5 * T:
+            break
+        s = (runs[worst] - c0) @ d
+        cut = np.median(s)
+        a, b = runs[worst][s <= cut], runs[worst][s > cut]
+        if len(a) < 2 or len(b) < 2:
+            break
+        runs = runs[:worst] + [a, b] + runs[worst + 1:]
+    return runs
 
 
 def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,
@@ -1143,7 +1228,59 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         length = float(s_.max() - s_.min())
         width = max(2.0 * h * math.tan(a_half), h)            # chip width across the edge
         planned.append(dict(pi=pi, ax=ax, u=u, n=n, smin=float(s_.min()), smax=float(s_.max()), uc=uc,
-                            half=half, lev=lev, top=top, ztop=ztop, length=length, width=width, dbg=dbg))
+                            half=half, lev=lev, top=top, ztop=ztop, length=length, width=width, dbg=dbg,
+                            ends=list(ends_of[pi]), P=P, a_half=a_half,
+                            thin=thick_under is not None and thick_under < LIP_THICK * T, h0=top - lev))
+        if dbg is not None:
+            dbg.update(thin=planned[-1]["thin"], n=[round(float(x), 3) for x in n], centre=[round(float(x), 3) for x in c0])
+
+    # merge neighbouring chips that should be one cut: two planned pieces meeting at a joint whose chip
+    # planes are close (MERGE_ANGLE; LIP_MERGE_ANGLE along a thin lip) and whose joined run is still
+    # nearly straight (no point further than MERGE_STRAIGHT x chip width off its line) become ONE
+    # piece with one plane fitted to the whole run, so a lip or a wavy edge is cut back in one flat
+    # face instead of a sawtooth of small chips
+    cos_m, cos_l = math.cos(math.radians(MERGE_ANGLE)), math.cos(math.radians(LIP_MERGE_ANGLE))
+    changed = True
+    while changed and len(planned) > 1:
+        changed = False
+        at_v = {}
+        for p in planned:
+            for v in p["ends"]:
+                at_v.setdefault(v, []).append(p)
+        for v, ps in at_v.items():
+            if len(ps) != 2:
+                continue
+            a, b = ps
+            lim = cos_l if (a["thin"] and b["thin"]) else cos_m
+            if float(a["n"] @ b["n"]) < lim:
+                continue
+            P = np.concatenate([a["P"], b["P"]])
+            c0 = P.mean(0)
+            axm = np.linalg.eigh(np.cov((P - c0).T))[1][:, 2]
+            off = (P - c0) - np.outer((P - c0) @ axm, axm)
+            W = max(a["width"], b["width"])
+            if float(np.linalg.norm(off, axis=1).max()) > MERGE_STRAIGHT * W:
+                continue
+            la, lb = a["length"], b["length"]
+            nm = a["n"] * la + b["n"] * lb
+            nm = nm - (nm @ axm) * axm
+            nm /= (np.linalg.norm(nm) + 1e-12)
+            um = np.cross(nm, axm)
+            top_m = float((P @ nm).max())
+            h_m = (a["h0"] * la + b["h0"] * lb) / (la + lb)
+            s_m = P @ axm
+            ends = [x for x in a["ends"] + b["ends"] if x != v]
+            merged = dict(pi=a["pi"], ax=axm, u=um, n=nm, smin=float(s_m.min()), smax=float(s_m.max()),
+                          uc=float((P @ um).mean()), half=max(a["half"], b["half"]), lev=top_m - h_m, top=top_m,
+                          ztop=top_m + 0.15 * T, length=float(s_m.max() - s_m.min()), width=W, dbg=a["dbg"],
+                          ends=ends, P=P, a_half=(a["a_half"] * la + b["a_half"] * lb) / (la + lb),
+                          thin=a["thin"] and b["thin"], h0=h_m)
+            if merged["dbg"] is not None:
+                merged["dbg"]["merged"] = merged["dbg"].get("merged", 1) + 1
+            planned = [q for q in planned if q is not a and q is not b] + [merged]
+            changed = True
+            break
+    info["pieces_after_merge"] = len(planned)
 
     # second pass: a piece's end is a joint only where another piece that is really cut ends too; a
     # piece with two free ends shorter than SHORT_CUT chip widths is dropped (it would only nick the
@@ -1151,12 +1288,12 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     for _round in range(3):
         cut_ends = {}
         for p in planned:
-            for v in ends_of[p["pi"]]:
+            for v in p["ends"]:
                 cut_ends[v] = cut_ends.get(v, 0) + 1
         keep = []
         for p in planned:
             joint = [False, False]                              # (low s end, high s end)
-            for v in ends_of[p["pi"]]:
+            for v in p["ends"]:
                 if cut_ends.get(v, 0) >= 2:
                     sv = float(V[v] @ p["ax"])
                     joint[0 if abs(sv - p["smin"]) <= abs(sv - p["smax"]) else 1] = True
@@ -1173,7 +1310,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
     at_vertex = {}
     for p in planned:
         p["h"] = p["top"] - p["lev"]
-        for v in ends_of[p["pi"]]:
+        for v in p["ends"]:
             at_vertex.setdefault(v, []).append(p)
     for p in planned:
         # one cutter per chip: a prism across the edge whose bottom follows the chip's depth along the
@@ -1190,7 +1327,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         prof = []                               # (s, depth) along the edge, s increasing
         for side, s_end, inward in ((0, p["smin"], 1.0), (1, p["smax"], -1.0)):
             if joint[side]:
-                vs = [v for v in ends_of[p["pi"]]
+                vs = [v for v in p["ends"]
                       if abs(float(V[v] @ ax) - s_end) <= abs(float(V[v] @ ax) - (p["smax"] if side == 0 else p["smin"]))]
                 others = [q for v in vs for q in at_vertex.get(v, []) if q is not p]
                 if others and vs:
@@ -1268,6 +1405,19 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
                 w = r; done += 1
     info.update(chips=done, boolean_groups=len(groups), refused=why)
     lap("booleans")
+    # thin lips (a plate thinner than the chip thickness: knife edges the per-edge chips can't reach
+    # cleanly) are cut back square to the plate along one straight line per lip segment, so the new
+    # lip edge is a straight line at about the chip thickness instead of a sawtooth of small chips
+    lips = _lip_boxes(mm, mn, m, T, info) if LIP_TRIM else []
+    for lb in lips:
+        boxes.append(lb)
+        r = apply(w, [len(boxes) - 1])
+        if r is None:
+            why["lip_refused"] = why.get("lip_refused", 0) + 1
+        else:
+            w = r; done += 1
+            info["lips_cut"] = info.get("lips_cut", 0) + 1
+    lap("lips")
     # the booleans leave near-flat sliver triangles; rounded to float32 at another scale (Quick Infill
     # works at x10 and scales back) they can cross. Collapse them, shape kept within POST_TOL.
     if done:

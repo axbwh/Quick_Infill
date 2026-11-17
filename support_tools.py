@@ -19,7 +19,8 @@ from .blender_meshlib_utils import (
 )
 from .tools_operators import selected_meshes, report_process, pipeline_spec
 from .job_runner import ModalJobMixin
-from .settings import get_active_angle_preset
+from .settings import (get_active_angle_preset, smart_angle, stringing_status, get_active_stringing_preset,
+                       STRINGING_PRESETS, SMART_LIP_60)
 
 DIAG = 0.7071067811865476  # sqrt(2)/2
 # Several directions at a positive angle are fixed on one voxel grid. False = the
@@ -218,6 +219,44 @@ def _view_rotation(context):
     return None
 
 
+class _Together:
+    """The meshes of one Fix Undercuts run, for a scoop that rests on the other objects: a copy of
+    each (the work on one object reads the others while they are being worked on themselves)."""
+
+    def __init__(self):
+        self.srcs, self.copies = [], []                  # the pipeline's own meshes, and their copies
+        self.los = self.his = np.zeros((0, 3))           # the boxes of the copies
+
+    def load(self, run):
+        mm, _ = get_meshlib()
+        los, his = [], []
+        for job in run.jobs:
+            copy = mm.copyMesh(job.src)
+            box = copy.computeBoundingBox()
+            self.srcs.append(job.src)
+            self.copies.append(copy)
+            los.append((box.min.x, box.min.y, box.min.z))
+            his.append((box.max.x, box.max.y, box.max.z))
+        self.los, self.his = np.array(los, dtype=np.float64).reshape(-1, 3), np.array(his, dtype=np.float64).reshape(-1, 3)
+
+    def others(self, mesh):
+        """The other objects as (meshes, box lows, box highs), or None when `mesh` is not one of the run's own."""
+        i = next((k for k, src in enumerate(self.srcs) if src is mesh), None)
+        if i is None:
+            return None
+        keep = np.arange(len(self.srcs)) != i
+        return [m for k, m in enumerate(self.copies) if k != i], self.los[keep], self.his[keep]
+
+
+def smart_scoop(s, view=False):
+    """(on, angle, rest) of the Smart setting: on, the angle its Stringing stands for, and whether
+    the scoops of several objects rest on each other (not from a view: that is not how it prints)."""
+    on = bool(getattr(s, "undercut_smart", False))
+    if not on:
+        return False, float(s.undercut_angle), False
+    return True, smart_angle(s.undercut_stringing), not view
+
+
 def _fix_undercuts_spec(op, context, view_rotation=None):
     s = context.scene.quick_infill_settings
     objs = selected_meshes(context)
@@ -227,11 +266,20 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
     directions = get_selected_directions(s) or [Z_UP]
     shrink_amount = float(s.shrink_amount) if s.auto_shrink else 0.0
     shrink_angle = float(s.shrink_angle_threshold)
-    angle = float(s.undercut_angle)
+    smart, angle, rest = smart_scoop(s, view=view_rotation is not None)
     up_fn = view_up_vector_fn(view_rotation) if view_rotation is not None else world_up_vector
     counts = []
+    # Smart with several objects: each scoop stops at the others and joins them. That needs the
+    # fill on one grid (several directions), and each object worked whole, not island by island
+    together = _Together() if rest and len(objs) > 1 and len(directions) > 1 and FAST_UNDERCUTS else None
 
     def operation(mesh, res):
+        others = together.others(mesh) if together is not None else None
+        if others is not None and others[0]:
+            from .undercut_volume import fix_undercuts_resting
+            ups = [up_fn(d, angle) for d in directions]
+            counts.append(len(directions))
+            return fix_undercuts_resting(mesh, others, ups, res, shrink_amount, shrink_angle)
         m, c = fix_undercuts_multi(mesh, directions, angle, res, shrink_amount, shrink_angle, up_fn)
         counts.append(c)
         return m
@@ -242,7 +290,11 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
             if sum(counts) == 0:
                 op.report({'INFO'}, f"No undercuts found on {len(pr.results)} mesh(es).")
             else:
-                op.report({'INFO'}, f"Fixed undercuts on {len(pr.results)} object(s) from {len(directions)} {where}")
+                how = (f", Smart: {s.undercut_stringing:.2f} mm per layer, {stringing_status(s.undercut_stringing)}"
+                       if smart else "")
+                if together is not None:
+                    how += ", each scoop resting on the objects around it"
+                op.report({'INFO'}, f"Fixed undercuts on {len(pr.results)} object(s) from {len(directions)} {where}{how}")
         if pr.collapsed:
             op.report({'WARNING'}, f"Fix Undercuts: {len(pr.collapsed)} object(s) produced no geometry and were left unchanged")
         if pr.errors:
@@ -250,13 +302,15 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
         select_results([r[0] for r in pr.results])
         return {'FINISHED'} if pr.results else {'CANCELLED'}
 
+    if together is not None:
+        return pipeline_spec(objs, operation, "_NoUndercuts", s, finish, on_prepared=together.load, islands=False)
     return pipeline_spec(objs, operation, "_NoUndercuts", s, finish)
 
 
 def _fix_undercuts_estimate(context):
     s = context.scene.quick_infill_settings
     dirs = get_selected_directions(s) or [Z_UP]
-    n = 1 if (abs(float(s.undercut_angle)) == 0 or dirs == [Z_UP]) else len(dirs)
+    n = 1 if (abs(smart_scoop(s)[1]) == 0 or dirs == [Z_UP]) else len(dirs)
     # scale 1.7: held-out check (13 runs) came out at 0.45-0.86x without it, median 0.58x
     cost = ToolCost(offsets=0, decimates=1, booleans=max(0, n - 1), undercut_dirs=n, scale=1.7)
     return estimate_seconds(selected_meshes(context), float(s.shared_voxel_size), cost=cost,
@@ -268,7 +322,9 @@ class QUICKINFILL_OT_fix_undercuts(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts"
     bl_label = "Fix Undercuts"
     bl_description = ("Fill the undercuts of the selected meshes, so they print without supports.\n"
-                      "Seen from every lit direction, tilted by Angle. Each object is worked on its own")
+                      "Seen from every lit direction, tilted by Angle. Each object is worked on its own.\n"
+                      "With Smart the tilt comes from Stringing, and with several objects selected each scoop "
+                      "stops at the objects around it and joins them, so it rests on the object below")
     bl_options = {'REGISTER', 'UNDO'}
 
     def job_estimate(self, context):
@@ -282,7 +338,8 @@ class QUICKINFILL_OT_fix_undercuts_from_view(ModalJobMixin, Operator):
     bl_idname = "quick_infill.fix_undercuts_from_view"
     bl_label = "From View"
     bl_description = ("Fill the undercuts of the selected meshes as seen from the current view.\n"
-                      "The lit directions are taken across the screen, tilted by Angle. Each object is worked on its own")
+                      "The lit directions are taken across the screen, tilted by Angle (with Smart: by what "
+                      "Stringing stands for). Each object is worked on its own")
     bl_options = {'REGISTER', 'UNDO'}
 
     def job_estimate(self, context):
@@ -425,6 +482,23 @@ class QUICKINFILL_OT_support_angle_preset(Operator):
         return {'FINISHED'}
 
 
+class QUICKINFILL_OT_stringing_preset(Operator):
+    bl_idname = "quick_infill.stringing_preset"
+    bl_label = "Stringing Preset"
+    bl_description = "Set Stringing, in mm per layer"
+
+    lip: FloatProperty(name="Stringing", default=SMART_LIP_60)
+
+    @classmethod
+    def description(cls, context, properties):
+        what = next((text for lip, text in STRINGING_PRESETS if abs(lip - properties.lip) < 0.005), "")
+        return f"Set Stringing to {properties.lip:.2f} mm per layer.\n{what}"
+
+    def execute(self, context):
+        context.scene.quick_infill_settings.undercut_stringing = self.lip
+        return {'FINISHED'}
+
+
 def draw_support_tools(layout, context):
     s = context.scene.quick_infill_settings
     box = layout.column(align=True).box()
@@ -452,13 +526,7 @@ def draw_support_tools(layout, context):
         for p in row_props:
             row.prop(s, p, text=s.bl_rna.properties[p].name, toggle=True)
     col.separator()
-    col.row(align=True).prop(s, "undercut_angle", text="Angle")
-    col.separator(factor=0.2)
-    active = get_active_angle_preset(s)
-    row = col.row(align=True)
-    for a in ANGLE_PRESETS:
-        op = row.operator("quick_infill.support_angle_preset", text=str(int(a)), depress=(active == str(int(a))))
-        op.angle = a
+    draw_undercut_angle(col, s)
     col.separator()
     row = col.row(align=True)
     row.operator("quick_infill.fix_undercuts", text="Fix Undercuts", icon='MOD_SMOOTH')
@@ -473,8 +541,32 @@ def draw_support_tools(layout, context):
     draw_remove_scoop(col, s)
 
 
+def draw_undercut_angle(col, s):
+    """The Smart toggle, and under it the Stringing slider with what it prints like, or the Angle
+    with its presets. (Ashlarize's popup draws the same rows.)"""
+    col.prop(s, "undercut_smart", text="Smart", toggle=True)
+    col.separator(factor=0.2)
+    if s.undercut_smart:
+        col.prop(s, "undercut_stringing", text="Stringing", slider=True)
+        col.separator(factor=0.2)
+        active = get_active_stringing_preset(s)
+        row = col.row(align=True)
+        for lip, _ in STRINGING_PRESETS:
+            row.operator("quick_infill.stringing_preset", text=f"{lip:.2f}".rstrip("0"), depress=(active == lip)).lip = lip
+        col.label(text=stringing_status(s.undercut_stringing))
+        return
+    col.row(align=True).prop(s, "undercut_angle", text="Angle")
+    col.separator(factor=0.2)
+    active = get_active_angle_preset(s)
+    row = col.row(align=True)
+    for a in ANGLE_PRESETS:
+        op = row.operator("quick_infill.support_angle_preset", text=str(int(a)), depress=(active == str(int(a))))
+        op.angle = a
+
+
 classes = (
     QUICKINFILL_OT_support_angle_preset,
+    QUICKINFILL_OT_stringing_preset,
     QUICKINFILL_OT_fix_undercuts,
     QUICKINFILL_OT_fix_undercuts_from_view,
     QUICKINFILL_OT_voxel_intersect,

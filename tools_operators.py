@@ -37,14 +37,23 @@ def report_process(op, pr, verb, label):
         op.report({'ERROR'}, f"{label} failed on {len(pr.errors)} object(s), left unchanged: {pr.error_summary()}")
 
 
-def pipeline_spec(objs, operation, suffix, s, finish, **kwargs):
+def pipeline_spec(objs, operation, suffix, s, finish, on_prepared=None, **kwargs):
     """JobSpec running `operation` on `objs` through the shared pipeline;
-    finish(ProcessResult) -> operator result set."""
+    finish(ProcessResult) -> operator result set.
+    on_prepared(run): called on the main thread once the meshes are read (run.jobs), before the
+    work starts: for a tool whose work on one object looks at the others."""
     run = PipelineRun(objs, operation, suffix,
                       resolution=kwargs.pop("resolution", float(s.shared_voxel_size)),
                       auto_decimate=kwargs.pop("auto_decimate", s.decimate_mode != "OFF"),
                       replace_original=s.replace_original, settings=s, **kwargs)
-    return JobSpec(prepare=run.prepare, compute=run.compute, finish=lambda: finish(run.finish()), items=len(objs))
+
+    def prepare():
+        out = run.prepare()
+        if on_prepared is not None:
+            on_prepared(run)
+        return out
+
+    return JobSpec(prepare=prepare, compute=run.compute, finish=lambda: finish(run.finish()), items=len(objs))
 
 
 class _OffsetToolBase(ModalJobMixin):

@@ -83,3 +83,23 @@ Sidebar > Quick Infill > Print Check. Select everything that prints as one piece
 
 `fill_support.fill_and_support(mesh, wall_dir, plate_z)` runs the whole wall-face recipe (meshes A to H of the stone
 builder notes) in memory; it has no button here, it is meant to be called by the stone packer.
+
+## Smart scoop (Fix Undercuts)
+
+Fix Undercuts builds its scoop as slopes tilted by the Angle. On a slope every printed layer steps
+out past the one below by `layer * tan(angle)`, so the angle decides how the scoop prints. **Smart**
+(Support Tools, on by default) asks for that step directly:
+
+- **Stringing** is the step in mm per layer, counted for 0.2 mm layers: 0.2 (a 45 degree scoop, all
+  green in Ashlarize's Undercuts overlay) to 0.6 (72 degrees, the outer line droops). The default,
+  0.35, is the 60 degree scoop. Four buttons under the slider set 0.2, 0.35, 0.45 and 0.6, and a
+  line under them says what the value prints like. Lower is a deeper scoop that hides more of the
+  stone; higher is shallower and rougher. (`settings.smart_lip`, `smart_angle`, `stringing_status`.)
+- **Several objects selected**: an object's scoop is the wedge under it, whatever is there, so in a
+  wall it used to run into the stone below. With Smart each scoop stops at the other selected
+  objects and goes half a voxel into what it meets, so it rests on the object below and joins it. A
+  piece that another object cuts off from the rest is dropped. Each object is then worked whole,
+  not island by island. (`undercut_volume.fix_undercuts_resting`, `rest_on_others`.)
+
+Smart off gives the Angle and its presets back, and each object is worked on its own as before.
+From View takes the angle from Stringing too, but leaves the other objects alone.

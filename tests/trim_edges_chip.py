@@ -1,5 +1,5 @@
-"""Trim Edges test: the Flat Chip method through the real operator, then Only Cut Edges, then the old
-Round (voxel) method. Background Blender only, on copies; nothing is saved.
+"""Trim Edges test: Flat Chip, Only Cut Edges, Round (lean) and Round (old, voxel), through the real
+operator. Background Blender only, on copies; nothing is saved.
 
     blender -b <file with sp_cut stones>.blend --python tests/trim_edges_chip.py -- <stone> [<stone> ...]
 
@@ -91,7 +91,7 @@ def run(method, only_cut=False):
         # sharp thin points left: convex edges sharper than 45 deg whose ends are thinner than the chip
         # thickness (3 x Thin). Reported, before -> after (the old Round way for comparison).
         print("SHARP %s only_cut=%s %s: %d -> %d" % (method, only_cut, src.name, sharp_thin(O), sharp_thin(T)))
-        if method == "CHIP":
+        if method in ("CHIP", "ROUND"):
             pts = mn.getNumpyVerts(T)
             vc = mn.fromNumpyArray(np.ascontiguousarray(pts, np.float32))
             if not isinstance(vc, mm.VertCoords):
@@ -107,5 +107,8 @@ chip = run("CHIP")
 check(any(v > 0.001 for v in chip), "Flat Chip chipped something (%s)" % ", ".join("%.2f" % v for v in chip))
 cut = run("CHIP", only_cut=True)
 check(all(c <= a + 0.05 for c, a in zip(cut, chip)), "Only Cut Edges takes no more than all edges")
-run("VOXEL")
+lean = run("ROUND")
+old_round = run("VOXEL")
+for n, a, b in zip(names, lean, old_round):
+    print("ROUND vs Round (old) %s: volume lost %.2f %% vs %.2f %%" % (n, a, b))
 print("RESULT", "FAIL %d" % len(fails) if fails else "ALL PASS")

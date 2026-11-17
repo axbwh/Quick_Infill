@@ -177,12 +177,15 @@ class QuickInfillSettings(PropertyGroup):
         name="Trim Edges Method",
         description="How Trim Edges takes off the thin, sharp edges",
         items=[
+            ("ROUND", "Round", "Round the thin edges off, as the old Trim Edges did, about 5 times faster.\n"
+                               "Same grow, shrink and regrow (Distance, X, Trim Density); the result is cut "
+                               "back to the stone exactly instead of through voxels"),
             ("CHIP", "Flat Chip", "Knock a flat chip off each sharp edge, like a chip off a stone.\n"
                                   "Fast: works on the mesh as it is, no voxels"),
             ("VOXEL", "Round (old)", "The old way: round the thin edges off with a voxel grow, shrink and "
                                      "regrow (X, Trim Density). Slower; kept to compare"),
         ],
-        default="CHIP",
+        default="ROUND",
     )
     trim_edges_thin: FloatProperty(
         name="Thin", description="How big the flat chips are, in Blender units (cm).\n"

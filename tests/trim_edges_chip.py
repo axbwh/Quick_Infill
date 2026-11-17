@@ -35,6 +35,33 @@ def ml_of(ob):
     return mn.meshFromFacesVerts(tr, co)
 
 
+def sharp_thin(m, angle=45.0):
+    """Convex edges with an inside angle under `angle` whose two ends are thinner (meshlib ray
+    thickness) than the flat chip's thickness: the sharp, fragile points a print would lose."""
+    m = mm.Mesh(m); m.pack()
+    V = np.array(mn.getNumpyVerts(m), float); F = np.array(mn.getNumpyFaces(m.topology), np.int64)
+    th = np.array(mm.computeRayThicknessAtVertices(m).vec, float)[:len(V)]
+    T = 3.0 * float(s.trim_edges_thin)
+    c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    nr = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
+    cen = V[F].mean(1)
+    faces = {}
+    for i, (a, b, c_) in enumerate(F):
+        for e in ((a, b), (b, c_), (c_, a)):
+            faces.setdefault((min(e), max(e)), []).append(i)
+    n = 0
+    for (a, b), fs in faces.items():
+        if len(fs) != 2:
+            continue
+        f1, f2 = fs
+        if (cen[f2] - cen[f1]) @ nr[f1] >= 0:      # not convex
+            continue
+        inside = 180.0 - np.degrees(np.arccos(np.clip(nr[f1] @ nr[f2], -1, 1)))
+        if inside < angle and th[a] < T and th[b] < T:
+            n += 1
+    return n
+
+
 def run(method, only_cut=False):
     s.trim_edges_method = method
     s.trim_edges_only_cut = only_cut
@@ -61,6 +88,9 @@ def run(method, only_cut=False):
         out.append(lost)
         check(holes == 0 and selfx == 0, "%s %s: closed and not self-crossing (holes %d, crossings %d)"
               % (method, src.name, holes, selfx))
+        # sharp thin points left: convex edges sharper than 45 deg whose ends are thinner than the chip
+        # thickness (3 x Thin). Reported, before -> after (the old Round way for comparison).
+        print("SHARP %s only_cut=%s %s: %d -> %d" % (method, only_cut, src.name, sharp_thin(O), sharp_thin(T)))
         if method == "CHIP":
             pts = mn.getNumpyVerts(T)
             vc = mn.fromNumpyArray(np.ascontiguousarray(pts, np.float32))

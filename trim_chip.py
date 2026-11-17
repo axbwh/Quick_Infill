@@ -827,6 +827,7 @@ def check_manifold(mesh):
 # bounds don't overlap go in together).
 
 ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
+POST_TOL = 1e-4     # fast variant: sliver clean-up after the booleans keeps the shape within this (BU)
 TAPER = 1.0          # fast variant: the chip ends slant out by this x the box height (chips fade out)
 FACE_CAP = 0.5       # fast variant: a chip is at most this x sqrt(area of the larger face) deep: bumps (two small faces) get small chips
 THICK_CAP = 0.15     # fast variant: a chip is at most this share of the stone's thickness under it
@@ -1064,6 +1065,24 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
                 w = r; done += 1
     info.update(chips=done, boolean_groups=len(groups), refused=why)
     lap("booleans")
+    # the booleans leave near-flat sliver triangles; rounded to float32 at another scale (Quick Infill
+    # works at x10 and scales back) they can cross. Collapse them, shape kept within POST_TOL.
+    if done:
+        c = mm.Mesh(w)
+        pp = mm.FixMeshDegeneraciesParams()
+        pp.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
+        pp.maxDeviation = POST_TOL * unit
+        pp.tinyEdgeLength = POST_TOL * unit
+        pp.criticalTriAspectRatio = 1e3
+        try:
+            mm.fixMeshDegeneracies(c, pp)
+            c.pack()
+            if (len(c.topology.findHoleRepresentiveEdges()) <= holes0
+                    and len(mm.findSelfCollidingTriangles(mm.MeshPart(c))) <= selfx0):
+                w = c
+        except Exception as e:
+            info["post_clean_error"] = repr(e)
+    lap("post_clean")
     w.pack()
     info["seconds"] = time.perf_counter() - t0
     return w

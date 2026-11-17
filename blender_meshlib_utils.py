@@ -177,6 +177,23 @@ def set_object_resolution_label(obj, label):
 # Blender <-> meshlib (in memory)
 # ---------------------------------------------------------------------------
 
+# Fast reads and writes. Blender's generic attributes are plain arrays: reading
+# "position" is ~10x faster than vertices.co, and writing "sharp_face" ~1000x
+# faster than shade_flat(), with exactly the same bits (measured Nov 2026, see
+# Ashlarize-library\conversion-audit). Each falls back to the old RNA route.
+_RNA_ERRORS = (KeyError, AttributeError, TypeError, RuntimeError)
+
+
+def read_positions(me):
+    """(n, 3) float32 vertex positions of a Mesh."""
+    a = np.empty(len(me.vertices) * 3, dtype=np.float32)
+    try:
+        me.attributes["position"].data.foreach_get("vector", a)
+    except _RNA_ERRORS:
+        me.vertices.foreach_get("co", a)
+    return a.reshape(-1, 3)
+
+
 def _triangles(me):
     """(tri vertex indices (n,3) int32, tri -> polygon index (n,) int32)."""
     if hasattr(me, "calc_loop_triangles"):
@@ -185,8 +202,39 @@ def _triangles(me):
     tris = np.empty(n * 3, dtype=np.int32)
     me.loop_triangles.foreach_get("vertices", tris)
     polys = np.empty(n, dtype=np.int32)
-    me.loop_triangles.foreach_get("polygon_index", polys)
+    try:
+        me.loop_triangle_polygons.foreach_get("value", polys)      # 2x faster, same values
+    except _RNA_ERRORS:
+        me.loop_triangles.foreach_get("polygon_index", polys)
     return tris.reshape(-1, 3), polys
+
+
+def new_triangle_mesh(name, verts, faces):
+    """New flat-shaded bpy Mesh from (n, 3) verts and (k, 3) triangle indices.
+    Same result, attribute for attribute, as foreach_set on vertices/loops plus
+    update(calc_edges=True) and shade_flat(); 3-6x faster."""
+    V = np.ascontiguousarray(verts, dtype=np.float32).ravel()
+    F = np.ascontiguousarray(faces, dtype=np.int32).ravel()
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(V.size // 3)
+    me.loops.add(F.size)
+    me.polygons.add(F.size // 3)
+    try:
+        me.attributes["position"].data.foreach_set("vector", V)
+        me.attributes[".corner_vert"].data.foreach_set("value", F)
+    except _RNA_ERRORS:
+        me.vertices.foreach_set("co", V)
+        me.loops.foreach_set("vertex_index", F)
+    me.polygons.foreach_set("loop_start", np.arange(0, F.size, 3, dtype=np.int32))
+    me.update(calc_edges=True)
+    # Always shade flat (meshes built this way would otherwise come in smooth-shaded):
+    # what shade_flat() does on a new mesh is set sharp_face on every face.
+    try:
+        attr = me.attributes.get("sharp_face") or me.attributes.new("sharp_face", 'BOOLEAN', 'FACE')
+        attr.data.foreach_set("value", np.ones(F.size // 3, dtype=bool))
+    except _RNA_ERRORS:
+        me.shade_flat()
+    return me
 
 
 def blender_to_meshlib(obj, apply_modifiers=False, depsgraph=None, with_face_map=False):
@@ -207,9 +255,7 @@ def blender_to_meshlib(obj, apply_modifiers=False, depsgraph=None, with_face_map
     else:
         me = obj.data
     try:
-        verts = np.empty(len(me.vertices) * 3, dtype=np.float32)
-        me.vertices.foreach_get("co", verts)
-        verts = verts.reshape(-1, 3).astype(np.float64)
+        verts = read_positions(me).astype(np.float64)
         mw = np.array(obj.matrix_world, dtype=np.float64)
         verts = (verts @ mw[:3, :3].T + mw[:3, 3]) * STL_EXPORT_SCALE
         tris, tri_polys = _triangles(me)
@@ -245,21 +291,7 @@ def meshlib_to_blender_mesh(ml_mesh, name):
     faces = mn.getNumpyFaces(ml_mesh.topology).astype(np.int32)
     if faces.size == 0:
         raise MeshCollapsedError()
-
-    me = bpy.data.meshes.new(name)
-    me.vertices.add(len(verts))
-    me.vertices.foreach_set("co", verts.ravel())
-    me.loops.add(faces.size)
-    me.loops.foreach_set("vertex_index", faces.ravel())
-    me.polygons.add(len(faces))
-    me.polygons.foreach_set("loop_start", np.arange(0, faces.size, 3, dtype=np.int32))
-    me.update(calc_edges=True)
-    # Always shade flat (meshes built this way would otherwise come in smooth-shaded).
-    if hasattr(me, "shade_flat"):
-        me.shade_flat()
-    else:
-        me.polygons.foreach_set("use_smooth", np.zeros(len(faces), dtype=bool))
-    return me
+    return new_triangle_mesh(name, verts, faces)
 
 
 def link_new_object(name, mesh, collections):

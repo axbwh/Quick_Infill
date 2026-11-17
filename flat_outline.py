@@ -412,8 +412,8 @@ def read_mesh(obj, apply_modifiers=False, depsgraph=None):
     else:
         me = obj.data
     try:
-        co = np.empty(len(me.vertices) * 3, np.float64)
-        me.vertices.foreach_get("co", co)
+        from .blender_meshlib_utils import read_positions
+        co = read_positions(me).astype(np.float64)      # same bits as a float64 foreach_get, ~10x faster
         mw = np.array(obj.matrix_world, np.float64)
         V = (co.reshape(-1, 3) @ mw[:3, :3].T + mw[:3, 3]) * SCALE
         me.calc_loop_triangles()

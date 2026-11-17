@@ -48,6 +48,10 @@ class Recipe:
         self.b_voxel, self.b_angle, self.b_dist = 0.3, 90.0, 0.7
         self.c_voxel, self.c_angle, self.c_auto_shrink, self.c_shrink_angle = 0.3, 60.0, 0.2, 70.0
         self.infill_preset = 'BUILDING_ACCURATE'
+        # E's voxel in mm (None = the preset's own, picked from the size of the face's box: a long or
+        # slanted face then got a coarser infill than a short square one). 0.32 is what a square
+        # tower's face gets from the preset.
+        self.e_voxel = 0.32
         self.f_voxel, self.f_dist = 0.2, 0.2
         self.strip_height = 4.0
         self.g_voxel, self.g_angle = 0.2, 45.0
@@ -60,9 +64,13 @@ class Recipe:
 
 
 class _InfillSettings:
-    def __init__(self, preset):
+    def __init__(self, preset, voxel=None):
         for k, v in INFILL_PRESETS[preset].items():
             setattr(self, k, v)
+        if voxel:                       # one fixed voxel, whatever the size of the mesh
+            self.voxel_mode = 'RESOLUTION'
+            self.resolution = float(voxel)
+            self.fixed_voxel = True
 
 
 def wall_view_up_fn(wall_dir):
@@ -144,7 +152,7 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
 
     D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
 
-    E = step("E cavity infill", lambda: build_infill(merged(D, A), _InfillSettings(r.infill_preset)), decimate=False)
+    E = step("E cavity infill", lambda: build_infill(merged(D, A), _InfillSettings(r.infill_preset, r.e_voxel)), decimate=False)
 
     F = close(merged(E, D), r.f_voxel, r.f_dist, "F")
 
@@ -172,4 +180,74 @@ def join_faces(face_meshes, preset='BUILDING_ACCURATE', final_ratio=0.03, timing
         out = decimate_mesh(out, target_face_count=max(1, int(face_count(out) * final_ratio)))
     if timings is not None:
         timings.append(("I join faces", time.perf_counter() - t0))
+    return out
+
+
+CORNER_GAP = 2.0        # mm: two faces whose supports come closer than this meet at a corner
+CORNER_MARGIN = 4.0     # mm of room round the part where they meet
+
+
+def _box_gap(a, b):
+    """Distance between two meshlib boxes (0 when they overlap)."""
+    d = [max(0.0, a.min.x - b.max.x, b.min.x - a.max.x), max(0.0, a.min.y - b.max.y, b.min.y - a.max.y),
+         max(0.0, a.min.z - b.max.z, b.min.z - a.max.z)]
+    return math.sqrt(sum(v * v for v in d))
+
+
+def corner_boxes(face_meshes, gap=CORNER_GAP, margin=CORNER_MARGIN):
+    """[(i, j, lo, hi)]: for every two faces whose supports come within `gap`, the box (mm, world)
+    round the points of each that are that close to the other, grown by `margin`."""
+    mm, _ = get_meshlib()
+    from .offset_utils import get_mrmeshnumpy
+    mn = get_mrmeshnumpy()
+    bbs = [m.computeBoundingBox() for m in face_meshes]
+    verts = [None] * len(face_meshes)
+    out = []
+    for i in range(len(face_meshes)):
+        for j in range(i + 1, len(face_meshes)):
+            if _box_gap(bbs[i], bbs[j]) > gap:
+                continue
+            check_cancelled()
+            near = []
+            for a, b in ((i, j), (j, i)):
+                if verts[a] is None:
+                    verts[a] = mn.getNumpyVerts(face_meshes[a]).astype(np.float64)
+                d = np.array(mm.findSignedDistances(face_meshes[b], face_meshes[a]).vec, dtype=np.float64)
+                near.append(verts[a][:len(d)][d < gap])
+            pts = np.concatenate(near)
+            if len(pts) == 0:
+                continue
+            out.append((i, j, pts.min(axis=0) - margin, pts.max(axis=0) + margin))
+    return out
+
+
+def join_corners(face_meshes, voxel=0.32, preset='BUILDING_ACCURATE', final_ratio=0.03, timings=None,
+                 gap=CORNER_GAP, margin=CORNER_MARGIN):
+    """I, corner by corner: where two faces' supports meet, both are cut to a box round the meeting
+    and run through Cavity Infill at a fixed voxel. Same job as join_faces, but the work grows with
+    the number of corners, not with the size of the whole building, and the voxel stays fine on a
+    big one (join_faces aims at 3 million voxels for everything). None when no faces meet."""
+    mm, _ = get_meshlib()
+    t0 = time.perf_counter()
+    pieces = []
+    for i, j, lo, hi in corner_boxes(face_meshes, gap, margin):
+        check_cancelled()
+        cube = mm.makeCube(mm.Vector3f(*(float(v) for v in hi - lo)), mm.Vector3f(*(float(v) for v in lo)))
+        parts = []
+        for k in (i, j):
+            res = mm.boolean(face_meshes[k], cube, mm.BooleanOperation.Intersection)
+            if res.valid() and res.mesh.topology.numValidFaces():
+                res.mesh.pack()
+                parts.append(res.mesh)
+        if len(parts) < 2:
+            continue
+        piece = build_infill(merged(*parts), _InfillSettings(preset, voxel))
+        if face_count(piece) == 0:
+            continue
+        if final_ratio and final_ratio < 1.0:
+            piece = decimate_mesh(piece, target_face_count=max(1, int(face_count(piece) * final_ratio)))
+        pieces.append(piece)
+    out = merged(*pieces) if pieces else None
+    if timings is not None:
+        timings.append((f"I join corners ({len(pieces)})", time.perf_counter() - t0))
     return out

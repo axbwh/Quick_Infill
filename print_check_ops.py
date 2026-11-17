@@ -85,7 +85,7 @@ class QUICKINFILL_OT_print_check(ModalJobMixin, Operator):
                 m = print_check.mask_to_mesh(rep.masks[key], rep.grid.origin, rep.grid.voxel)
                 if m is not None:
                     if face_count(m) > MARKER_MAX_FACES:      # a marker only has to show where
-                        decimate_mesh(m, target_face_count=MARKER_MAX_FACES, max_error=rep.grid.voxel * 2.0)
+                        m = decimate_mesh(m, target_face_count=MARKER_MAX_FACES, max_error=rep.grid.voxel * 2.0)
                     state["marker_meshes"].append((name, colour, m))
             rep.masks = {}       # free the grids
             rep.grid = None

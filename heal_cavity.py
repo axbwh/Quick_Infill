@@ -9,8 +9,7 @@ from bpy.types import Operator
 
 from .meshlib_utils import get_meshlib
 from .offset_utils import (
-    cuda_offset, carve_weighted, compute_voxel_size, decimate_mesh,
-    should_auto_decimate_cavity_faces, face_count,
+    cuda_offset, carve_weighted, compute_voxel_size, decimate_mesh, auto_decimate, face_count,
 )
 from .blender_meshlib_utils import (
     blender_to_meshlib, meshlib_to_blender_mesh, link_new_object, select_results, estimate_seconds, ToolCost,
@@ -49,10 +48,9 @@ def build_infill(src_mesh, s, report=None):
     if s.trim_thin:
         out = cuda_offset(cuda_offset(out, vox, -vox), vox, vox)
 
-    do, target = should_auto_decimate_cavity_faces(initial_faces, face_count(out))
-    if do:
-        out = decimate_mesh(out, target_face_count=target, resolution=vox)
-    return out
+    # Cavity Infill's rule is the shared Auto Decimation's Original mode: back to the source's face
+    # count if it grew (always, whatever the Auto Decimation setting says)
+    return auto_decimate(out, initial_faces, vox, "ORIGINAL", None)
 
 
 class _InfillSettingsSnapshot:

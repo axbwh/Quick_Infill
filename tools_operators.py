@@ -71,8 +71,6 @@ class _OffsetToolBase(ModalJobMixin):
     # For the run-time estimate: work per object and the grow distance used (x Distance).
     est_cost = ToolCost(offsets=1, decimates=1)
     est_grow = 1.0
-    # The pipeline's decimation runs in parallel parts above this many faces (None: its default).
-    decimate_parallel_above = None
 
     def process_job(self, s):
         """(qi_worker function name, extra args) to run the objects in worker processes, or None."""
@@ -101,7 +99,6 @@ class _OffsetToolBase(ModalJobMixin):
             return None
         # bpy.context (not the captured one): finish may run later, from the modal handler.
         return pipeline_spec(objs, self.make_operation(s), self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             decimate_parallel_above=self.decimate_parallel_above,
                              process_job=self.process_job(s))
 
     def job_finish(self, context, pr):
@@ -200,7 +197,7 @@ class QUICKINFILL_OT_remesh(_OffsetToolBase, Operator):
 
 # The Round method of Trim Edges and Trim Thin live in trim_round.py (pure meshlib, also run by worker
 # processes).
-from .trim_round import STONE_KEEPS, PARALLEL_FACES as TRIM_EDGES_PARALLEL_FACES  # noqa: F401, E402
+from .trim_round import STONE_KEEPS  # noqa: F401, E402
 
 
 class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
@@ -212,9 +209,6 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
     est_cost, est_grow = ToolCost(offsets=2, decimates=1), 0.0
     delete_collapsed = True
     collapse_hint = "too thin for current resolution"
-    # decimated in parallel parts like Trim Edges: about 3x faster, the result moves by at most
-    # ~0.55 voxel (Ashlarize-library/trim-thin-speed, Alex 2026-11-18)
-    decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
 
     def make_operation(self, s):
         from .trim_round import trim_thin
@@ -236,7 +230,6 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
-    decimate_parallel_above = TRIM_EDGES_PARALLEL_FACES
 
     def job_setup(self, context):
         s = context.scene.quick_infill_settings

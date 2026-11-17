@@ -96,13 +96,6 @@ def should_auto_decimate_faces(initial_faces: int, final_faces: int, voxel_size:
     return False, final_faces
 
 
-def should_auto_decimate_cavity_faces(initial_faces: int, final_faces: int) -> tuple:
-    """Cavity Infill's own rule: decimate back to the source face count if it grew."""
-    if final_faces > initial_faces:
-        return True, initial_faces
-    return False, final_faces
-
-
 # ---------------------------------------------------------------------------
 # Mesh helpers
 # ---------------------------------------------------------------------------
@@ -255,20 +248,35 @@ def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float
     return max(float(suggested), float(min_resolution))
 
 
-# Above this many faces, decimate in parallel parts (about 4x faster on a 16-core CPU).
-PARALLEL_DECIMATE_FACES = 200_000
+# Above this many faces, decimate in parallel parts. One setting for every Quick Infill decimation
+# (Alex 2026-11-18: all tools decimate the same way). It was 200k; stones give 30k to 250k faces after
+# an offset, so most were decimated on one thread. 20k (Trim Edges' setting since 2026-11-17): about
+# 3x faster on stones, results move by at most ~0.6 voxel (Ashlarize-library/trim-thin-speed).
+PARALLEL_DECIMATE_FACES = 20_000
+
+
+def auto_decimate(mesh, initial_faces: int, voxel_size: Optional[float], mode: str, ratio: Optional[float]):
+    """The Auto Decimation every tool uses on its result: should_auto_decimate_faces' rule, then
+    decimate_mesh (maxError 10 voxels, the shared parallel split). Returns the mesh (decimated in
+    place, or as it was)."""
+    do, target = should_auto_decimate_faces(initial_faces, face_count(mesh), voxel_size=voxel_size,
+                                            mode=mode, ratio=ratio)
+    if do:
+        mesh = decimate_mesh(mesh, target_face_count=target, resolution=voxel_size)
+    return mesh
 
 
 def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio: Optional[float] = None,
-                  max_error: Optional[float] = None, resolution: Optional[float] = None,
-                  parallel_above: Optional[int] = None):
-    """Decimate in place (and return) with meshlib.
+                  max_error: Optional[float] = None, resolution: Optional[float] = None):
+    """Decimate with meshlib and return the result: use the returned mesh (usually the same mesh,
+    decimated in place; a copy decimated on one thread if the parallel parts crossed).
 
     resolution: voxel size in meshlib units. maxError defaults to 10x the
     voxel size - the value the tools have always used, kept so results don't
     change. (An old comment claimed resolution was in Blender units; it is not.)
-    parallel_above: decimate in parallel parts above this many faces (default
-    PARALLEL_DECIMATE_FACES).
+    Above PARALLEL_DECIMATE_FACES faces it decimates in parallel parts. If that leaves triangles
+    crossing each other (the parts' seams can fold: 1 shrunk stone in 30), it is done again on one
+    thread, the way it always was.
     """
     mm, _ = get_meshlib()
     current_faces = face_count(mesh)
@@ -290,12 +298,19 @@ def decimate_mesh(mesh, target_face_count: Optional[int] = None, reduction_ratio
         lo, hi = bbox_of(mesh)
         settings.maxError = float(np.linalg.norm(hi - lo)) * 0.005
     settings.packMesh = True
-    if current_faces > (PARALLEL_DECIMATE_FACES if parallel_above is None else int(parallel_above)):
+    parallel = current_faces > PARALLEL_DECIMATE_FACES
+    backup = mm.Mesh(mesh) if parallel else None
+    if parallel:
         settings.subdivideParts = 16
 
     check_cancelled()
     mm.decimateMesh(mesh, settings)
     check_cancelled()  # a cancelled decimation stops early without raising
+    if parallel and len(mm.findSelfCollidingTriangles(mm.MeshPart(mesh))) > 0:
+        settings.subdivideParts = 1
+        mm.decimateMesh(backup, settings)
+        check_cancelled()
+        return backup
     return mesh
 
 

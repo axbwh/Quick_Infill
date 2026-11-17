@@ -39,6 +39,11 @@ from .heal_cavity import build_infill
 X_POS, X_NEG, Y_POS, Y_NEG = (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)
 DIAGONALS = [(DIAG, DIAG, 0), (DIAG, -DIAG, 0), (-DIAG, DIAG, 0), (-DIAG, -DIAG, 0)]
 
+# B and C share one voxel grid, and D is taken on it (False: three separate meshlib voxel passes, as before)
+SHARED_GRID = True
+# A face at an angle is worked on turned to run along X (False: in world axes, as before)
+FACE_FRAME = True
+
 
 class Recipe:
     """The numbers of the recipe. Defaults are Alex's manual settings."""
@@ -109,9 +114,22 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
     support wall as ONE meshlib mesh (loose shells are fine). Returns H.
 
     timings: optional list, gets (step, seconds) appended.
-    keep: optional dict, gets the intermediate meshes by letter.
+    keep: optional dict, gets the intermediate meshes by letter (in the face's own frame when
+    FACE_FRAME turned the face).
     """
     mm, _ = get_meshlib()
+    wx, wy = float(wall_dir[0]), float(wall_dir[1])
+    turn = math.atan2(wy, wx)
+    if FACE_FRAME and abs(math.sin(2.0 * turn)) > 1e-6:
+        # A face that runs at an angle is turned about Z to run along X first: the voxel grids then
+        # hug the wall (a wall at 45 degrees fills twice its own box otherwise) and the rays through
+        # the wall run along a grid axis. Turned back at the end.
+        rot = mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), -turn))
+        local = mm.copyMesh(mesh)
+        local.transform(rot)
+        H = fill_and_support(local, (1.0, 0.0, 0.0), plate_z, recipe, timings, keep)
+        H.transform(mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), turn)))
+        return H
     r = recipe or Recipe()
     up_fn = wall_view_up_fn(wall_dir)
 
@@ -134,15 +152,39 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
 
     A = close(mesh, r.a_voxel, r.a_dist, "A")
 
-    b = step("B undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG], r.b_angle, r.b_voxel,
-                                                         0.0, 70.0, up_fn)[0], r.b_voxel)
-    B = close(b, r.b_voxel, r.b_dist, "B")
+    if SHARED_GRID and r.b_voxel == r.c_voxel and r.step_ratio is None and r.b_angle > 0 and r.c_angle > 0:
+        # B and C on one grid, and D = B intersect C on that grid (a maximum of distances) in place of
+        # two more voxel conversions in meshlib's voxel boolean
+        from .undercut_volume import fix_undercuts_grids, grid_to_mesh, distance_grid_at
+        h = r.b_voxel
+        grids = {}
 
-    C = step("C undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG] + DIAGONALS, r.c_angle,
-                                                         r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn)[0],
-             r.c_voxel)
+        def bc():
+            g, org = fix_undercuts_grids(mesh, [([up_fn(d, r.b_angle) for d in (Y_POS, Y_NEG)], 0.0, 70.0),
+                                                ([up_fn(d, r.c_angle) for d in [Y_POS, Y_NEG] + DIAGONALS],
+                                                 r.c_auto_shrink, r.c_shrink_angle)], h)
+            grids.update(b=g[0], c=g[1], org=org)
+            return grid_to_mesh(g[0], org, h)
+        b = step("B undercuts", bc, h)
+        B = close(b, r.b_voxel, r.b_dist, "B")
 
-    D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
+        def d():
+            phi_b = distance_grid_at(B, h, grids["org"], grids["c"].shape)
+            return grid_to_mesh(np.maximum(phi_b, grids["c"]), grids["org"], h)
+        D = step("D intersect", d, h)
+        if keep is not None:
+            keep["C"] = grid_to_mesh(grids["c"], grids["org"], h)
+        grids.clear()
+    else:
+        b = step("B undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG], r.b_angle, r.b_voxel,
+                                                             0.0, 70.0, up_fn)[0], r.b_voxel)
+        B = close(b, r.b_voxel, r.b_dist, "B")
+
+        C = step("C undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG] + DIAGONALS, r.c_angle,
+                                                             r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn)[0],
+                 r.c_voxel)
+
+        D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
 
     E = step("E cavity infill", lambda: build_infill(merged(D, A), _InfillSettings(r.infill_preset)), decimate=False)
 

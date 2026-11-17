@@ -318,6 +318,30 @@ def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=
     return grid_to_mesh(out, org, voxel)
 
 
+def fix_undercuts_grids(mesh, groups, voxel, enclosed_gap=1.5):
+    """Several undercut fixes of the same mesh at the same voxel on ONE grid: the mesh becomes
+    distances and its sealed pockets are filled once, not once per fix.
+
+    groups: [(up_vectors, shrink_amount, shrink_angle), ...]. Returns ([grid per group], origin);
+    the grids share the lattice (grid_to_mesh(grid, origin, voxel) gives each fix's mesh). The
+    grid covers what every group's fill can reach, so a group's result can sit a fraction of a
+    voxel off what fix_undercuts_mesh gives it alone (another lattice)."""
+    mn = get_mrmeshnumpy()
+    pts = mn.getNumpyVerts(mesh)
+    box = mesh.computeBoundingBox()
+    blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
+    pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]
+    reach = [fill_reach(pts, ups) for ups, _a, _b in groups]
+    lo = np.min([r[0] for r in reach], axis=0)
+    hi = np.max([r[1] for r in reach], axis=0)
+    phi, org = distance_grid(mesh, voxel, bounds=(lo, hi))
+    if enclosed_gap is not None:
+        fill_enclosed(phi, voxel, enclosed_gap)
+    grids = [fix_undercuts_grid(phi, ups, voxel, sa, sang, origin=org, floors=r[2])
+             for (ups, sa, sang), r in zip(groups, reach)]
+    return grids, org
+
+
 # ---------------------------------------------------------------------------
 # A scoop that rests on the objects around it (Smart, several objects)
 # ---------------------------------------------------------------------------

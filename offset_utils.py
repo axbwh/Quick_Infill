@@ -156,6 +156,12 @@ def cuda_offset(mesh, resolution: float, distance: float):
 # triangle-based weighted shell, and on a wall of 150 stones the carved result
 # differs by 0.013 mm on average (0.06 mm at the 99th percentile) at a 0.34 mm voxel.
 FAST_SHELL = True
+# Only surface points whose weight is above this (mm) go into the point shell. A
+# ball of radius one voxel round a point of the closed-up mesh lies inside the
+# one-voxel skin the inward offset already took away, so a weight ~0 ball carves
+# nothing. Square tower: half the points left out, the point shell 1.2 s -> 0.6 s
+# per wall face, the carved result moves 0.001 mm on average (0.08 mm at most).
+SHELL_MIN_WEIGHT = 0.01
 
 
 def _vert_scalars(values):
@@ -224,7 +230,13 @@ def carve_weighted(mesh_to_offset, reference_mesh, voxel_size: float, shrink_mul
     # Thick part: balls of radius av + weight round the surface points.
     mn = get_mrmeshnumpy()
     check_cancelled()
-    cloud = mn.pointCloudFromPoints(mn.getNumpyVerts(working_mesh).astype(np.float32))
+    pts = mn.getNumpyVerts(working_mesh).astype(np.float32)
+    keep = weights > SHELL_MIN_WEIGHT
+    if not keep.any():
+        return thin
+    if not keep.all():
+        pts, weights = np.ascontiguousarray(pts[keep]), weights[keep]
+    cloud = mn.pointCloudFromPoints(pts)
     params = mm.WeightedShell.ParametersMetric()
     params.voxelSize = float(av)
     params.offset = float(av)

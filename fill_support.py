@@ -39,6 +39,11 @@ from .heal_cavity import build_infill
 X_POS, X_NEG, Y_POS, Y_NEG = (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)
 DIAGONALS = [(DIAG, DIAG, 0), (DIAG, -DIAG, 0), (-DIAG, DIAG, 0), (-DIAG, -DIAG, 0)]
 
+# B and C share one voxel grid, and D is taken on it (False: three separate meshlib voxel passes, as before)
+SHARED_GRID = True
+# A face at an angle is worked on turned to run along X (False: in world axes, as before)
+FACE_FRAME = True
+
 
 class Recipe:
     """The numbers of the recipe. Defaults are Alex's manual settings."""
@@ -48,6 +53,10 @@ class Recipe:
         self.b_voxel, self.b_angle, self.b_dist = 0.3, 90.0, 0.7
         self.c_voxel, self.c_angle, self.c_auto_shrink, self.c_shrink_angle = 0.3, 60.0, 0.2, 70.0
         self.infill_preset = 'BUILDING_ACCURATE'
+        # E's voxel in mm (None = the preset's own, picked from the size of the face's box: a long or
+        # slanted face then got a coarser infill than a short square one). 0.32 is what a square
+        # tower's face gets from the preset.
+        self.e_voxel = 0.32
         self.f_voxel, self.f_dist = 0.2, 0.2
         self.strip_height = 4.0
         self.g_voxel, self.g_angle = 0.2, 45.0
@@ -57,12 +66,19 @@ class Recipe:
         self.step_ratio = None
         # Faces kept in the final H.
         self.final_ratio = 0.03
+        # Windows, doors, arches and arrow slits through the wall are cut out of H (through_holes.py;
+        # Alex 2026-11-17: "keep like arches and windows and arrow slits clear of any infill")
+        self.clear_openings = True
 
 
 class _InfillSettings:
-    def __init__(self, preset):
+    def __init__(self, preset, voxel=None):
         for k, v in INFILL_PRESETS[preset].items():
             setattr(self, k, v)
+        if voxel:                       # one fixed voxel, whatever the size of the mesh
+            self.voxel_mode = 'RESOLUTION'
+            self.resolution = float(voxel)
+            self.fixed_voxel = True
 
 
 def wall_view_up_fn(wall_dir):
@@ -104,14 +120,50 @@ def bottom_strip(mesh, plate_z, height):
     return out
 
 
-def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, timings=None, keep=None):
+def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, timings=None, keep=None,
+                     openings=None):
     """Run the recipe on one wall face. `mesh` = that face's stones and its
     support wall as ONE meshlib mesh (loose shells are fine). Returns H.
 
     timings: optional list, gets (step, seconds) appended.
-    keep: optional dict, gets the intermediate meshes by letter.
+    keep: optional dict, gets the intermediate meshes by letter (in the face's own frame when
+    FACE_FRAME turned the face).
+    openings: optional list, gets the solid that fills the face's openings (windows, doors,
+    arches, arrow slits: through_holes.py) when there are any, for cutting it out of whatever
+    else is made from the faces.
     """
+    r = recipe or Recipe()
+    if not r.clear_openings:
+        return _fill_and_support(mesh, wall_dir, plate_z, r, timings, keep)
+    from .through_holes import opening_solid, cut_out
+    t0 = time.perf_counter()
+    solid = opening_solid(mesh, wall_dir, plate_z)
+    t1 = time.perf_counter()
+    H = _fill_and_support(mesh, wall_dir, plate_z, r, timings, keep)
+    t2 = time.perf_counter()
+    if solid is not None:
+        H = cut_out(H, solid)
+        if openings is not None:
+            openings.append(solid)
+    if timings is not None:
+        timings.append(("openings", (t1 - t0) + (time.perf_counter() - t2)))
+    return H
+
+
+def _fill_and_support(mesh, wall_dir, plate_z, recipe, timings, keep):
     mm, _ = get_meshlib()
+    wx, wy = float(wall_dir[0]), float(wall_dir[1])
+    turn = math.atan2(wy, wx)
+    if FACE_FRAME and abs(math.sin(2.0 * turn)) > 1e-6:
+        # A face that runs at an angle is turned about Z to run along X first: the voxel grids then
+        # hug the wall (a wall at 45 degrees fills twice its own box otherwise) and the rays through
+        # the wall run along a grid axis. Turned back at the end.
+        rot = mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), -turn))
+        local = mm.copyMesh(mesh)
+        local.transform(rot)
+        H = _fill_and_support(local, (1.0, 0.0, 0.0), plate_z, recipe, timings, keep)
+        H.transform(mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), turn)))
+        return H
     r = recipe or Recipe()
     up_fn = wall_view_up_fn(wall_dir)
 
@@ -134,24 +186,49 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
 
     A = close(mesh, r.a_voxel, r.a_dist, "A")
 
-    b = step("B undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG], r.b_angle, r.b_voxel,
-                                                         0.0, 70.0, up_fn)[0], r.b_voxel)
-    B = close(b, r.b_voxel, r.b_dist, "B")
+    if SHARED_GRID and r.b_voxel == r.c_voxel and r.step_ratio is None and r.b_angle > 0 and r.c_angle > 0:
+        # B and C on one grid, and D = B intersect C on that grid (a maximum of distances) in place of
+        # two more voxel conversions in meshlib's voxel boolean
+        from .undercut_volume import fix_undercuts_grids, grid_to_mesh, distance_grid_at
+        h = r.b_voxel
+        grids = {}
 
-    C = step("C undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG] + DIAGONALS, r.c_angle,
-                                                         r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn)[0],
-             r.c_voxel)
+        def bc():
+            g, org = fix_undercuts_grids(mesh, [([up_fn(d, r.b_angle) for d in (Y_POS, Y_NEG)], 0.0, 70.0),
+                                                ([up_fn(d, r.c_angle) for d in [Y_POS, Y_NEG] + DIAGONALS],
+                                                 r.c_auto_shrink, r.c_shrink_angle)], h, floor_z=plate_z)
+            grids.update(b=g[0], c=g[1], org=org)
+            return grid_to_mesh(g[0], org, h)
+        b = step("B undercuts", bc, h)
+        B = close(b, r.b_voxel, r.b_dist, "B")
 
-    D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
+        def d():
+            phi_b = distance_grid_at(B, h, grids["org"], grids["c"].shape)
+            return grid_to_mesh(np.maximum(phi_b, grids["c"]), grids["org"], h)
+        D = step("D intersect", d, h)
+        if keep is not None:
+            keep["C"] = grid_to_mesh(grids["c"], grids["org"], h)
+        grids.clear()
+    else:
+        b = step("B undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG], r.b_angle, r.b_voxel,
+                                                             0.0, 70.0, up_fn)[0], r.b_voxel)
+        B = close(b, r.b_voxel, r.b_dist, "B")
 
-    E = step("E cavity infill", lambda: build_infill(merged(D, A), _InfillSettings(r.infill_preset)), decimate=False)
+        C = step("C undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG] + DIAGONALS, r.c_angle,
+                                                             r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn,
+                                                             floor_z=plate_z)[0],
+                 r.c_voxel)
+
+        D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
+
+    E = step("E cavity infill", lambda: build_infill(merged(D, A), _InfillSettings(r.infill_preset, r.e_voxel)), decimate=False)
 
     F = close(merged(E, D), r.f_voxel, r.f_dist, "F")
 
     strip = step("G0 strip", lambda: bottom_strip(F, plate_z, r.strip_height), decimate=False)
     if face_count(strip) > 0:
         G = step("G undercuts", lambda: fix_undercuts_multi(strip, [X_POS, X_NEG, Y_POS, Y_NEG] + DIAGONALS, r.g_angle,
-                                                             r.g_voxel, 0.0, 70.0, up_fn)[0], r.g_voxel)
+                                                             r.g_voxel, 0.0, 70.0, up_fn, floor_z=plate_z)[0], r.g_voxel)
     else:
         G = None
 

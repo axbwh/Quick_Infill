@@ -519,6 +519,58 @@ def mask_to_mesh(mask, origin, voxel):
     return mesh if mesh.topology.numValidFaces() else None
 
 
+POCKET_BLOCK = 8        # voxels: pockets closer than about this are re-checked together
+POCKET_MARGIN = 16      # voxels of room round a pocket for the re-check
+
+
+def _pocket_boxes(mask, block=POCKET_BLOCK, margin=POCKET_MARGIN):
+    """Boxes (z0, z1, y0, y1, x0, x1) round the groups of True voxels of mask[z, y, x], with margin."""
+    nz, ny, nx = mask.shape
+    m = np.pad(mask, ((0, -nz % block), (0, -ny % block), (0, -nx % block)))
+    c = m.reshape(m.shape[0] // block, block, m.shape[1] // block, block,
+                  m.shape[2] // block, block).any(axis=(1, 3, 5))
+    c = dilate3d(c, 1)                      # neighbouring blocks are one group
+    boxes = []
+    while c.any():
+        z, y, x = (int(v[0]) for v in np.nonzero(c))
+        seed = np.zeros_like(c)
+        seed[z, y, x] = True
+        comp = flood3d(seed, c)
+        c &= ~comp
+        zs, ys, xs = np.nonzero(comp)
+        boxes.append((max(0, zs.min() * block - margin), min(nz, (zs.max() + 1) * block + margin),
+                      max(0, ys.min() * block - margin), min(ny, (ys.max() + 1) * block + margin),
+                      max(0, xs.min() * block - margin), min(nx, (xs.max() + 1) * block + margin)))
+    return boxes
+
+
+def _recheck_round_pockets(sealed, solid):
+    """sealed plus whatever the plugs (grown one voxel) close off beside them.
+
+    A crumb a plug closes off touches that plug, so it is looked for in a box
+    round each group of pockets: open where the box's sides and top are (and its
+    bottom, unless that is the plate). Same answer as flooding the whole grid
+    again, for crumbs smaller than the margin, at a fraction of the time
+    (square tower: 67 boxes in 0.3 s against 2.3 s for a second whole flood)."""
+    fill = sealed.copy()
+    for z0, z1, y0, y1, x0, x1 in _pocket_boxes(sealed):
+        sl = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+        for _ in range(4):
+            check_cancelled()
+            empty = ~(solid[sl] | dilate3d(fill[sl], 1))
+            seed = np.zeros_like(empty)
+            seed[-1] = True
+            if z0 > 0:
+                seed[0] = True
+            seed[:, 0] = seed[:, -1] = True
+            seed[:, :, 0] = seed[:, :, -1] = True
+            more = empty & ~flood3d(seed, empty) & ~fill[sl] & ~solid[sl]
+            if not more.any():
+                break
+            fill[sl] |= more
+    return fill
+
+
 def seal_plugs(meshes, voxel=0.2, plate_z=None, drain_gap=0.0, overlap=2, report=None):
     """Mesh that fills every sealed cavity of the model (None if there is none).
 
@@ -535,8 +587,14 @@ def seal_plugs(meshes, voxel=0.2, plate_z=None, drain_gap=0.0, overlap=2, report
     # A plug can itself close off a crumb of space beside it (its own surface
     # narrows the slit it sits in). Look again with the plugs in place, a few
     # times, until nothing new turns up.
-    fill = sealed
     solid0 = g.solid
+    if not drain_gap > 0:
+        fill = _recheck_round_pockets(sealed, solid0)
+        if report is not None:
+            report["sealed_volume"] = g.volume(fill)
+        fill = dilate3d(fill, overlap) & (solid0 | fill)   # never grow a plug out of the model
+        return mask_to_mesh(fill, g.origin, g.voxel)
+    fill = sealed
     for _ in range(4):
         g.solid = solid0 | dilate3d(fill, 1)
         if getattr(g, "dist", None) is not None:

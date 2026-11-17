@@ -173,6 +173,32 @@ class QuickInfillSettings(PropertyGroup):
                                           "Higher keeps more of the stone (the last grow step is 1 + X times Distance)",
         default=OFFSET_PRESETS['STONE']["x"], min=0.0, max=0.5, precision=3, subtype='FACTOR',
     )
+    trim_edges_method: EnumProperty(
+        name="Trim Edges Method",
+        description="How Trim Edges takes off the thin, sharp edges",
+        items=[
+            ("ROUND", "Round", "Round the thin edges off, as the old Trim Edges did, about 5 times faster.\n"
+                               "Same grow, shrink and regrow (Distance, X, Trim Density); the result is cut "
+                               "back to the stone exactly instead of through voxels"),
+            ("CHIP", "Flat Chip", "Knock a flat chip off each sharp edge, like a chip off a stone.\n"
+                                  "Fast: works on the mesh as it is, no voxels"),
+            ("VOXEL", "Round (old)", "The old way: round the thin edges off with a voxel grow, shrink and "
+                                     "regrow (X, Trim Density). Slower; kept to compare"),
+        ],
+        default="ROUND",
+    )
+    trim_edges_thin: FloatProperty(
+        name="Thin", description="How big the flat chips are, in Blender units (cm).\n"
+                                 "About the width of the chip across a square edge; sharper edges get "
+                                 "bigger chips, blunt ones small or none. 0.03 matches the old Trim Edges",
+        default=0.03, min=0.005, max=0.1, soft_min=0.02, soft_max=0.04, precision=3, step=0.1,
+    )
+    trim_edges_only_cut: BoolProperty(
+        name="Only Cut Edges", description="Chip only the edges where a cut face meets the stone.\n"
+                                           "Cut faces are the ones Ashlarize marked as cut (sp_cut); on a "
+                                           "mesh without marks, flat faces left by a boolean are found by shape",
+        default=False,
+    )
     trim_edges_density: FloatProperty(
         name="Trim Edges Density", description="How finely the trimmed surface is meshed.\n"
                                                 "Faces per unit of area before it is cut back to the stone",

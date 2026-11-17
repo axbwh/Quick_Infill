@@ -300,17 +300,18 @@ def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=
 
 def rest_on_others(phi, phi_o, fixed, voxel, bite=0.5):
     """The grid of an object whose scoop stops at the other objects (see fix_undercuts_resting).
-    phi: the object. phi_o: the other objects. fixed: the object with its undercuts fixed."""
-    from .print_check import dilate3d, flood3d
+    phi: the object. phi_o: the other objects. fixed: the object with its undercuts fixed.
+
+    The result is `fixed` less the other objects taken `bite` voxels smaller, as distances: both
+    sides of the surface keep their real distances, so the scoop's slope comes out as smooth as it
+    is in `fixed`. (The first version wrote a flat "empty" outside the scoop, and the surface
+    snapped to the voxels: a slope came out as stairs.)"""
+    from .print_check import flood3d
     h = float(voxel)
+    out = np.maximum(fixed, -(phi_o + bite * h))         # the scoop, up to `bite` voxels into the others
     own = phi < 0.0
-    free = phi_o > 0.0
-    fill = (fixed < 0.0) & free & ~own
-    fill = flood3d(own, fill | own) & fill               # a piece cut off behind another object goes
-    touch = dilate3d(fill, 1) & ~free & ~own             # the other objects' voxels next to the scoop
-    out = np.maximum(phi, 0.25 * h)                      # empty, but for ...
-    out[fill] = np.maximum(fixed, -(phi_o + bite * h))[fill]    # ... the scoop outside the other objects ...
-    out[touch] = -(phi_o[touch] + bite * h)              # ... which goes `bite` voxels into them, so they join
+    solid = out < 0.0
+    out[solid & ~flood3d(own, solid | own)] = 0.25 * h   # a piece cut off behind another object goes
     np.minimum(out, phi, out=out)                        # the object itself stays whole
     return out
 

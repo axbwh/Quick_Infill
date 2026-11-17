@@ -1791,3 +1791,111 @@ def local_round2(mesh, size=SIZE, unit=1.0, target_faces=None, info=None):
     info["timings"] = dict(seeds=t1 - t0, round=t2 - t1, decimate=time.perf_counter() - t2)
     info["seconds"] = time.perf_counter() - t0
     return w
+
+
+# ---------------------------------------------------------------------------------------------------
+# Lean Round: today's Round Trim Edges (grow 2d, shrink 3d, regrow (1+x)d, intersect with the stone),
+# whole stone, with fewer steps. Today's voxel intersect re-meshes the decimated offset back to
+# ~130k faces and a second decimate brings it down again; here the decimated offset is intersected
+# with the stone by an exact meshlib boolean (small output), then decimated once to today's face
+# count (today's ratio x the faces the voxel steps would give). Stone -> Detail fallback kept.
+
+ROUND_DETAIL = dict(voxel=0.005, distance=0.03, x=0.4)     # BU: Quick Infill's Detail preset
+ROUND_RATIO = dict(STONE=0.0175, DETAIL=0.03)
+STONE_KEEPS = 2.0 / 3.0
+ROUND_DECIMATE_PARTS = 8   # parallel decimation parts for the big offset mesh (1: off)
+
+
+def _round_once(mm, mesh, pre, density, unit, tm):
+    vox, d, x = pre["voxel"] * unit, pre["distance"] * unit, pre["x"]
+    t = time.perf_counter()
+    w = _offset(mesh, vox, 2 * d)
+    w = _offset(w, vox, -3 * d)
+    w = _offset(w, vox, (1 + x) * d)
+    tm["offsets"] = tm.get("offsets", 0) + time.perf_counter() - t
+    n_vox = int(w.topology.numValidFaces())
+    if n_vox == 0:
+        return None, 0
+    t = time.perf_counter()
+    # the density decimate of today's trim (faces per unit of bounding-box area, in Quick Infill units)
+    bb = w.computeBoundingBox()
+    lo = np.array([bb.min.x, bb.min.y, bb.min.z]); hi = np.array([bb.max.x, bb.max.y, bb.max.z])
+    dx, dy, dz = ((hi - lo) * (10.0 / unit)).tolist()
+    target = int(min(n_vox, max(20.0, 2.0 * (dx * dy + dy * dz + dz * dx) * density)))
+    if target < n_vox:
+        diag = float(np.linalg.norm(hi - lo))
+        red = max(0.0, 1.0 - target / max(1, n_vox))
+        ds = mm.DecimateSettings()
+        ds.maxDeletedFaces = n_vox - target
+        ds.maxError = max(vox * 10.0, diag * (0.01 + 0.49 * red))
+        ds.packMesh = True
+        if ROUND_DECIMATE_PARTS > 1:
+            ds.subdivideParts = ROUND_DECIMATE_PARTS   # meshlib decimates the parts in parallel
+        mm.decimateMesh(w, ds)
+    tm["decimate"] = tm.get("decimate", 0) + time.perf_counter() - t
+    t = time.perf_counter()
+    r = mm.boolean(w, mesh, mm.BooleanOperation.Intersection)
+    tm["intersect"] = tm.get("intersect", 0) + time.perf_counter() - t
+    if not r.valid():
+        return None, n_vox
+    return r.mesh, n_vox
+
+
+def lean_round(mesh, unit=1.0, density=1.0, info=None, parts=None):
+    """Today's Round Trim Edges result with fewer steps (see above). unit: mesh units per BU.
+    The big decimate runs in parallel parts; if that leaves the result crossing itself (or open)
+    more than the input, it is done again in one part."""
+    mm, mn = _ml()
+    info = {} if info is None else info
+    global ROUND_DECIMATE_PARTS
+    keep = ROUND_DECIMATE_PARTS
+    if parts is not None:
+        ROUND_DECIMATE_PARTS = parts
+    try:
+        out = _lean_round(mesh, unit, density, info)
+    finally:
+        ROUND_DECIMATE_PARTS = keep
+    if (parts is None and keep > 1 and out is not None):
+        src = mm.Mesh(mesh)
+        bad = (len(out.topology.findHoleRepresentiveEdges()) > len(src.topology.findHoleRepresentiveEdges())
+               or len(mm.findSelfCollidingTriangles(mm.MeshPart(out))) > len(mm.findSelfCollidingTriangles(mm.MeshPart(src))))
+        if bad:
+            t1 = info.get("seconds", 0.0)
+            info2 = {}
+            out = lean_round(mesh, unit, density, info2, parts=1)
+            info2["seconds"] = info2.get("seconds", 0.0) + t1
+            info2["redone_serial"] = True
+            info.clear(); info.update(info2)
+    return out
+
+
+def _lean_round(mesh, unit, density, info):
+    mm, mn = _ml()
+    info = {} if info is None else info
+    tm = info.setdefault("timings", {})
+    t0 = time.perf_counter()
+    src = mm.Mesh(mesh); src.pack()
+    v0 = abs(float(src.volume()))
+    out, n_vox = _round_once(mm, src, ROUND_STONE, density, unit, tm)
+    tag = "STONE"
+    share = abs(float(out.volume())) / v0 if (out is not None and v0 > 0) else 0.0
+    if share < STONE_KEEPS:
+        fine, n2 = _round_once(mm, src, ROUND_DETAIL, density, unit, tm)
+        if fine is not None and abs(float(fine.volume())) / v0 > share:
+            out, n_vox, tag = fine, n2, "DETAIL"
+    if out is None:
+        info["seconds"] = time.perf_counter() - t0
+        return src
+    t = time.perf_counter()
+    target = int(ROUND_RATIO[tag] * n_vox * 0.96)            # today's output: ratio x its voxel intersect faces
+    cur = int(out.topology.numValidFaces())
+    if target < cur:
+        ds = mm.DecimateSettings()
+        ds.maxDeletedFaces = cur - target
+        ds.maxError = (ROUND_STONE if tag == "STONE" else ROUND_DETAIL)["voxel"] * unit * 10.0
+        ds.packMesh = True
+        mm.decimateMesh(out, ds)
+    tm["decimate_final"] = time.perf_counter() - t
+    out.pack()
+    info.update(tag=tag, faces=int(out.topology.numValidFaces()), target_faces=target, seconds=time.perf_counter() - t0)
+    return out

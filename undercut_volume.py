@@ -22,6 +22,7 @@ from .meshlib_utils import get_meshlib, get_mrmeshnumpy, CUDA_LOCK, check_cancel
 
 BAND = 4.0          # distances are exact up to this many voxels from the surface
 PAD = 3             # empty voxels kept around the model
+DIRECTION_THREADS = 8   # undercut directions worked out side by side (1 = one after another)
 
 
 def distance_grid(mesh, voxel, pad=PAD, band=BAND, slab_voxels=24e6, bounds=None):
@@ -181,11 +182,17 @@ def _shrink_tops(phi, up, amount, angle_deg, voxel):
     """Auto Shrink on the grid: move the surface in by `amount` where it faces
     within angle_deg of up (what Shrink Amount / Shrink Angle do on the mesh)."""
     gz, gy, gx = np.gradient(phi, voxel)
-    dot = gx * up[0] + gy * up[1] + gz * up[2]
     norm = np.sqrt(gx * gx + gy * gy + gz * gz)
-    mask = dot >= np.cos(np.radians(angle_deg)) * np.maximum(norm, 1e-6)
-    mask &= norm > 0.3            # flat (clamped) regions have no direction
-    return np.where(mask, phi + amount, phi)
+    # flat (clamped) regions have no direction: only the band near the surface is tested
+    # (the same sums as on the whole grid, so the result is the same to the bit)
+    band = np.flatnonzero(norm > 0.3)
+    gx, gy, gz, nb = gx.ravel()[band], gy.ravel()[band], gz.ravel()[band], norm.ravel()[band]
+    dot = gx * up[0] + gy * up[1] + gz * up[2]
+    hit = band[dot >= np.cos(np.radians(angle_deg)) * np.maximum(nb, 1e-6)]
+    out = np.array(phi, dtype=phi.dtype, order="C", copy=True)
+    flat = out.reshape(-1)
+    flat[hit] = flat[hit] + amount
+    return out
 
 
 def fill_reach(points, up_vectors):
@@ -259,17 +266,34 @@ def fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount=0.0, shrink_angle=7
     origin + floors (from fill_reach): each direction's fill stops at the
     model's lowest point along it, as meshlib's own fix does."""
     fill = float(BAND * voxel)
-    result = None
-    for n_up, up in enumerate(up_vectors):
+
+    def one(n_up):
         check_cancelled()
-        up = np.asarray(up, dtype=np.float64)
+        up = np.asarray(up_vectors[n_up], dtype=np.float64)
         up = up / np.linalg.norm(up)
         f = sweep_min(phi, up, fill)
         if origin is not None and floors is not None:
             _clip_below(f, up, floors[n_up] - 2.0 * float(voxel), origin, voxel, fill)
         if shrink_amount > 0:
             f = _shrink_tops(f, up, float(shrink_amount), float(shrink_angle), float(voxel))
-        result = f if result is None else np.maximum(result, f, out=result)
+        return f
+
+    # The directions do not depend on each other and numpy lets go of the GIL inside its loops,
+    # so they run side by side. A maximum is exact in any order: the result is the same to the bit.
+    n = len(up_vectors)
+    workers = min(n, DIRECTION_THREADS)
+    if workers <= 1:
+        result = None
+        for i in range(n):
+            f = one(i)
+            result = f if result is None else np.maximum(result, f, out=result)
+        return result
+    import concurrent.futures as cf
+    result = None
+    with cf.ThreadPoolExecutor(workers) as ex:
+        for fut in cf.as_completed([ex.submit(one, i) for i in range(n)]):
+            f = fut.result()
+            result = np.ascontiguousarray(f) if result is None else np.maximum(result, f, out=result)
     return result
 
 

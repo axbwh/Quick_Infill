@@ -827,6 +827,9 @@ def check_manifold(mesh):
 # bounds don't overlap go in together).
 
 ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
+TAPER = 1.0          # fast variant: the chip ends slant out by this x the box height (chips fade out)
+FACE_CAP = 0.5       # fast variant: a chip is at most this x sqrt(area of the larger face) deep: bumps (two small faces) get small chips
+THICK_CAP = 0.15     # fast variant: a chip is at most this share of the stone's thickness under it
 FAST_MAX_CUT = 1.0          # fast variant: a chip goes at most this many x thickness deep
 FAST_THICK_PER_SIZE = 3.0   # fast variant: thickness = this x Thin (Thin 0.03 = today's chipped area, measured)
 CHAIN_TURN = 25.0    # deg: neighbouring edges are one piece while they turn less than this
@@ -945,7 +948,13 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         pieces.append(piece)
     lap("chain")
 
-    # one box per piece
+    # one cutter per piece: a box in the piece's frame whose bottom is the chip plane, only as wide as
+    # the chip band (so it can't bite bumps beside the edge), barely above the edge, with its two ends
+    # slanted (TAPER) so the chip fades out along the edge instead of stopping at a wall; pieces
+    # overlap by those slants. The depth is capped by the stone's own thickness under the edge
+    # (meshlib rayMeshIntersect, inward along the chip normal) and by the size of the smaller face.
+    mp_m = mm.MeshPart(m)
+    fsize = np.sqrt(np.maximum(ar[f1[idx]], ar[f2[idx]]))
     boxes = []
     for pc in pieces:
         P = np.concatenate([p0[pc], p1[pc]])
@@ -961,16 +970,35 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             ang = math.radians(rng.uniform(-tilt, tilt))
             n = n * math.cos(ang) + np.cross(ax, n) * math.sin(ang)
         u = np.cross(n, ax)
-        h = float((depth[pc] * lens[pc]).sum() / lens[pc].sum())
-        a_half = float((a2[pc] * lens[pc]).sum() / lens[pc].sum())
+        w8 = lens[pc] / lens[pc].sum()
+        h = float((depth[pc] * w8).sum())
+        a_half = float((a2[pc] * w8).sum())
+        h = min(h, FACE_CAP * float((fsize[pc] * w8).sum()))
+        try:
+            hit = mm.rayMeshIntersect(mp_m, mm.Line3f(mm.Vector3f(*(c0 - n * 1e-4 * unit)), mm.Vector3f(*(-n))))
+            if hit:
+                dl = hit.distanceAlongLine
+                dl = dl() if callable(dl) else dl
+                h = min(h, THICK_CAP * float(dl))
+        except Exception:
+            pass
+        if h < 0.05 * T:
+            continue
         top = float((P @ n).max())
         lev = top - h
-        half = h * math.tan(a_half) + T
+        half = h * math.tan(a_half) * 1.15 + 0.05 * T
         s_ = P @ ax; uc = float((P @ u).mean())
-        lo = np.array([s_.min(), uc - half, lev]); hi = np.array([s_.max(), uc + half, top + T])
-        cs = np.array([ax * (lo[0], hi[0])[i] + u * (lo[1], hi[1])[j] + n * (lo[2], hi[2])[kk]
-                       for kk in (0, 1) for j in (0, 1) for i in (0, 1)])
-        boxes.append(cs)
+        ztop = top + 0.15 * T
+        slant = TAPER * (ztop - lev)
+        cs = []
+        for kk, z in ((0, lev), (1, ztop)):
+            ext = 0.0 if kk == 0 else slant
+            for j in (0, 1):
+                y = (uc - half, uc + half)[j]
+                for i in (0, 1):
+                    x = (s_.min() - ext, s_.max() + ext)[i]
+                    cs.append(ax * x + u * y + n * z)
+        boxes.append(np.array(cs))
     info.update(sharp_edges=int(len(idx)), pieces=len(boxes))
     lap("boxes")
 

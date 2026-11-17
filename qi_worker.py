@@ -29,4 +29,4 @@ def ping(_=None):
 
 
 def trim_edges_job(args):
-    return _trim.job(*args)
+    return _trim.job(*args)   # kind: "voxel" (Round (old)) or "lean" (Round)

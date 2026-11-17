@@ -153,12 +153,15 @@ def diff_meshes(mesh_a, mesh_b, voxel_size):
     return mm.voxelBooleanSubtract(mesh_a, mesh_b, voxel_size)
 
 
-def fix_undercuts_multi(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle, up_fn=world_up_vector):
+def fix_undercuts_multi(mesh, directions, angle, voxel_size, shrink_amount, shrink_angle, up_fn=world_up_vector,
+                        floor_z=None):
     """Fix undercuts from every direction and combine the results.
 
     Positive angle: per-direction results are voxel-intersected. Negative angle:
     they are voxel-unioned and the straight-on Z direction is applied to the
     merged result afterwards. Returns (mesh, total_undercuts).
+    floor_z: a floor (mm) the fill goes down to and stops at, on the one-grid route
+    (undercut_volume.floor_in_reach); None: no floor.
     """
     mm, _ = get_meshlib()
     abs_angle = abs(float(angle))
@@ -172,7 +175,7 @@ def fix_undercuts_multi(mesh, directions, angle, voxel_size, shrink_amount, shri
         # faster than fixing each direction with meshlib and voxel-intersecting the meshes.
         from .undercut_volume import fix_undercuts_mesh
         ups = [up_fn(d, abs_angle) for d in directions]
-        return fix_undercuts_mesh(mesh, ups, voxel_size, shrink_amount, shrink_angle), len(directions)
+        return fix_undercuts_mesh(mesh, ups, voxel_size, shrink_amount, shrink_angle, floor_z=floor_z), len(directions)
 
     apply_z_after = union_mode and Z_UP in directions
     process_dirs = [d for d in directions if d != Z_UP] if apply_z_after else list(directions)
@@ -248,6 +251,21 @@ class _Together:
         return [m for k, m in enumerate(self.copies) if k != i], self.los[keep], self.his[keep]
 
 
+def undercut_floor_z(s, objs):
+    """The floor (mm, meshlib space) Smart scoops go down to, or None (Alex 2026-11-17: "treat the
+    ground floor or ... an arbitrary plane in Z, such as the bottom of a blank, as ... a floor"):
+    Ground = Z 0 (or the lowest point of the selected objects if they go below it), Height = Floor Height."""
+    from .blender_meshlib_utils import STL_EXPORT_SCALE
+    mode = getattr(s, "undercut_floor", 'NONE')
+    if mode == 'HEIGHT':
+        return float(s.undercut_floor_z) * STL_EXPORT_SCALE
+    if mode == 'GROUND' and objs:
+        from mathutils import Vector
+        low = min(min((o.matrix_world @ Vector(c)).z for c in o.bound_box) for o in objs)
+        return min(0.0, low) * STL_EXPORT_SCALE        # the world floor, or lower if the objects go below it
+    return None
+
+
 def smart_scoop(s, view=False):
     """(on, angle, rest) of the Smart setting: on, the angle its Stringing stands for, and whether
     the scoops of several objects rest on each other (not from a view: that is not how it prints)."""
@@ -272,6 +290,7 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
     # Smart with several objects: each scoop stops at the others and joins them. That needs the
     # fill on one grid (several directions), and each object worked whole, not island by island
     together = _Together() if rest and len(objs) > 1 and len(directions) > 1 and FAST_UNDERCUTS else None
+    floor_z = undercut_floor_z(s, objs) if smart and view_rotation is None else None
 
     def operation(mesh, res):
         others = together.others(mesh) if together is not None else None
@@ -279,8 +298,9 @@ def _fix_undercuts_spec(op, context, view_rotation=None):
             from .undercut_volume import fix_undercuts_resting
             ups = [up_fn(d, angle) for d in directions]
             counts.append(len(directions))
-            return fix_undercuts_resting(mesh, others, ups, res, shrink_amount, shrink_angle)
-        m, c = fix_undercuts_multi(mesh, directions, angle, res, shrink_amount, shrink_angle, up_fn)
+            return fix_undercuts_resting(mesh, others, ups, res, shrink_amount, shrink_angle, floor_z=floor_z)
+        m, c = fix_undercuts_multi(mesh, directions, angle, res, shrink_amount, shrink_angle, up_fn,
+                                   floor_z=floor_z if smart else None)
         counts.append(c)
         return m
 
@@ -554,6 +574,10 @@ def draw_undercut_angle(col, s):
         for lip, _ in STRINGING_PRESETS:
             row.operator("quick_infill.stringing_preset", text=f"{lip:.2f}".rstrip("0"), depress=(active == lip)).lip = lip
         col.label(text=stringing_status(s.undercut_stringing))
+        row = col.row(align=True)
+        row.prop(s, "undercut_floor", text="Floor")
+        if s.undercut_floor == 'HEIGHT':
+            row.prop(s, "undercut_floor_z", text="")
         return
     col.row(align=True).prop(s, "undercut_angle", text="Angle")
     col.separator(factor=0.2)

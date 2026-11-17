@@ -195,7 +195,7 @@ def _shrink_tops(phi, up, amount, angle_deg, voxel):
     return out
 
 
-def fill_reach(points, up_vectors):
+def fill_reach(points, up_vectors, floor_z=None):
     """How far the fill of fix_undercuts_grid can reach: (lo, hi, floors).
 
     The fill for one direction is the model's shadow along -up, down to the
@@ -215,9 +215,17 @@ def fill_reach(points, up_vectors):
         u = np.asarray(up, dtype=np.float64)
         u = u / np.linalg.norm(u)
         d = P @ u
-        floors.append(float(d.min()))
+        low = float(d.min())
+        if floor_z is not None and u[2] > 1e-6:
+            # with a floor the fill runs on down to it: the lowest point along u is then where the
+            # model's points land on the floor going down u (only this cap moves, not the sides)
+            above = P[P[:, 2] > floor_z]
+            if len(above):
+                t = (above[:, 2] - floor_z) / u[2]
+                low = min(low, float(((above - t[:, None] * u[None, :]) @ u).min()))
+        floors.append(low)
         normals += [u, -u]
-        limits += [float(d.max()), -float(d.min())]
+        limits += [float(d.max()), -low]
         for e in np.eye(3):
             n = np.cross(e, u)
             ln = np.linalg.norm(n)
@@ -297,28 +305,33 @@ def fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount=0.0, shrink_angle=7
     return result
 
 
-def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0, enclosed_gap=1.5):
+def fix_undercuts_mesh(mesh, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0, enclosed_gap=1.5, floor_z=None):
     """Mesh in, mesh out: undercuts fixed for every up vector and intersected.
 
     enclosed_gap: pockets closed off by openings narrower than this many voxels
     are filled first (None = leave them). 1.5 matches what meshlib's own
     undercut fix does (measured on a wall of 150 stones: surfaces agree within
     one voxel on 99% of the points).
+    floor_z: a floor (mm) the fill goes down to and stops at (floor_in_reach decides whether it is
+    near enough); None: no floor.
     """
     mn = get_mrmeshnumpy()
     pts = mn.getNumpyVerts(mesh)
     box = mesh.computeBoundingBox()
     blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
     pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]      # (not the unused points of a boolean's inputs)
-    lo, hi, floors = fill_reach(pts, up_vectors)
+    floor_z = floor_in_reach(pts, floor_z)
+    lo, hi, floors = _reach_with_floor(pts, up_vectors, floor_z)
     phi, org = distance_grid(mesh, voxel, bounds=(lo, hi))
     if enclosed_gap is not None:
         fill_enclosed(phi, voxel, enclosed_gap)
     out = fix_undercuts_grid(phi, up_vectors, voxel, shrink_amount, shrink_angle, origin=org, floors=floors)
+    if floor_z is not None:
+        clip_floor(out, org, voxel, floor_z)
     return grid_to_mesh(out, org, voxel)
 
 
-def fix_undercuts_grids(mesh, groups, voxel, enclosed_gap=1.5):
+def fix_undercuts_grids(mesh, groups, voxel, enclosed_gap=1.5, floor_z=None):
     """Several undercut fixes of the same mesh at the same voxel on ONE grid: the mesh becomes
     distances and its sealed pockets are filled once, not once per fix.
 
@@ -331,7 +344,8 @@ def fix_undercuts_grids(mesh, groups, voxel, enclosed_gap=1.5):
     box = mesh.computeBoundingBox()
     blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
     pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]
-    reach = [fill_reach(pts, ups) for ups, _a, _b in groups]
+    floor_z = floor_in_reach(pts, floor_z)
+    reach = [_reach_with_floor(pts, ups, floor_z) for ups, _a, _b in groups]
     lo = np.min([r[0] for r in reach], axis=0)
     hi = np.max([r[1] for r in reach], axis=0)
     phi, org = distance_grid(mesh, voxel, bounds=(lo, hi))
@@ -339,7 +353,37 @@ def fix_undercuts_grids(mesh, groups, voxel, enclosed_gap=1.5):
         fill_enclosed(phi, voxel, enclosed_gap)
     grids = [fix_undercuts_grid(phi, ups, voxel, sa, sang, origin=org, floors=r[2])
              for (ups, sa, sang), r in zip(groups, reach)]
+    if floor_z is not None:
+        for g in grids:
+            clip_floor(g, org, voxel, floor_z)
     return grids, org
+
+
+# ---------------------------------------------------------------------------
+# A floor (the print plate, the bottom of a blank) the scoops may go down to
+# ---------------------------------------------------------------------------
+FLOOR_DROP = 8.0     # mm: a floor further below the object than this is not looked at (arc_scoop's DROP_MAX)
+
+
+def floor_in_reach(pts, floor_z):
+    """The floor height to use for an object with these points, or None (no floor given, or it is
+    above the object's top or more than FLOOR_DROP below its bottom, like arc_scoop's floor_z)."""
+    if floor_z is None or len(pts) == 0:
+        return None
+    z = np.asarray(pts)[:, 2]
+    return float(floor_z) if float(z.min()) - FLOOR_DROP <= float(floor_z) <= float(z.max()) else None
+
+
+def clip_floor(grid, origin, voxel, floor_z):
+    """Nothing below the floor (in place): the grid intersected with the half space above it."""
+    z = (np.asarray(origin, dtype=np.float64)[2] + np.arange(grid.shape[0]) * float(voxel)).astype(np.float32)
+    np.maximum(grid, (np.float32(floor_z) - z)[:, None, None], out=grid)
+    return grid
+
+
+def _reach_with_floor(pts, up_vectors, floor_z):
+    """fill_reach, reaching down to the floor when there is one."""
+    return fill_reach(pts, up_vectors, floor_z)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +409,7 @@ def rest_on_others(phi, phi_o, fixed, voxel, bite=0.5):
 
 
 def fix_undercuts_resting(mesh, others, up_vectors, voxel, shrink_amount=0.0, shrink_angle=70.0, enclosed_gap=1.5,
-                          bite=0.5):
+                          bite=0.5, floor_z=None):
     """fix_undercuts_mesh for one object of several that print together (Alex 2026-11-17: "if
     multiple loose objects are selected, it will automatically create the scoop to rest on the
     object below").
@@ -377,6 +421,9 @@ def fix_undercuts_resting(mesh, others, up_vectors, voxel, shrink_amount=0.0, sh
 
     others: the other objects as (meshes, box lows [n, 3], box highs [n, 3]), in the same space
     as `mesh`. Only the ones whose box reaches this object's scoop are looked at.
+    floor_z: a floor (mm), the print plate or the bottom of a blank, that the scoop goes down to and
+    rests on like on another object when it is near (Alex 2026-11-17: "treat the ground floor or
+    ... an arbitrary plane in Z, such as the bottom of a blank, as ... a floor"). None: no floor.
     """
     mm, _ = get_meshlib()
     mn = get_mrmeshnumpy()
@@ -385,7 +432,8 @@ def fix_undercuts_resting(mesh, others, up_vectors, voxel, shrink_amount=0.0, sh
     box = mesh.computeBoundingBox()
     blo = np.array([box.min.x, box.min.y, box.min.z]); bhi = np.array([box.max.x, box.max.y, box.max.z])
     pts = pts[((pts >= blo - 1e-6) & (pts <= bhi + 1e-6)).all(1)]      # (not the unused points of a boolean's inputs)
-    lo, hi, floors = fill_reach(pts, up_vectors)
+    floor_z = floor_in_reach(pts, floor_z)
+    lo, hi, floors = _reach_with_floor(pts, up_vectors, floor_z)
     phi, org = distance_grid(mesh, h, bounds=(lo, hi))
     if enclosed_gap is not None:
         fill_enclosed(phi, h, enclosed_gap)
@@ -399,4 +447,6 @@ def fix_undercuts_resting(mesh, others, up_vectors, voxel, shrink_amount=0.0, sh
             rest.addMesh(m)
         check_cancelled()
         fixed = rest_on_others(phi, distance_grid_at(rest, h, org, phi.shape), fixed, h, bite)
+    if floor_z is not None:
+        clip_floor(fixed, org, h, floor_z)
     return grid_to_mesh(fixed, org, h)

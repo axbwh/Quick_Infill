@@ -195,6 +195,20 @@ class QuickInfillSettings(PropertyGroup):
                     "so it rests on the object below",
         default=True,
     )
+    undercut_floor: EnumProperty(
+        name="Floor",
+        description="A floor a Smart scoop goes down to and rests on, like the top of an object below, when it is "
+                    "within 0.8 units (8 mm) under the object",
+        items=[('GROUND', "Ground", "Z = 0 (the print plate), or the lowest point of the selected objects if they go below it"),
+               ('HEIGHT', "Height", "A height you set, such as the bottom of a blank"),
+               ('NONE', "None", "No floor: a scoop only rests on other objects")],
+        default='GROUND',
+    )
+    undercut_floor_z: FloatProperty(
+        name="Floor Height",
+        description="Height of the floor (Floor: Height), such as the bottom of a blank",
+        default=0.0, subtype='DISTANCE', unit='LENGTH',
+    )
     undercut_stringing: FloatProperty(
         name="Stringing",
         description="How far each printed layer of the scoop may stick out past the one below, in mm "

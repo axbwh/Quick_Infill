@@ -62,6 +62,9 @@ class Recipe:
         self.step_ratio = None
         # Faces kept in the final H.
         self.final_ratio = 0.03
+        # Windows, doors, arches and arrow slits through the wall are cut out of H (through_holes.py;
+        # Alex 2026-11-17: "keep like arches and windows and arrow slits clear of any infill")
+        self.clear_openings = True
 
 
 class _InfillSettings:
@@ -109,14 +112,37 @@ def bottom_strip(mesh, plate_z, height):
     return out
 
 
-def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, timings=None, keep=None):
+def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, timings=None, keep=None,
+                     openings=None):
     """Run the recipe on one wall face. `mesh` = that face's stones and its
     support wall as ONE meshlib mesh (loose shells are fine). Returns H.
 
     timings: optional list, gets (step, seconds) appended.
     keep: optional dict, gets the intermediate meshes by letter (in the face's own frame when
     FACE_FRAME turned the face).
+    openings: optional list, gets the solid that fills the face's openings (windows, doors,
+    arches, arrow slits: through_holes.py) when there are any, for cutting it out of whatever
+    else is made from the faces.
     """
+    r = recipe or Recipe()
+    if not r.clear_openings:
+        return _fill_and_support(mesh, wall_dir, plate_z, r, timings, keep)
+    from .through_holes import opening_solid, cut_out
+    t0 = time.perf_counter()
+    solid = opening_solid(mesh, wall_dir, plate_z)
+    t1 = time.perf_counter()
+    H = _fill_and_support(mesh, wall_dir, plate_z, r, timings, keep)
+    t2 = time.perf_counter()
+    if solid is not None:
+        H = cut_out(H, solid)
+        if openings is not None:
+            openings.append(solid)
+    if timings is not None:
+        timings.append(("openings", (t1 - t0) + (time.perf_counter() - t2)))
+    return H
+
+
+def _fill_and_support(mesh, wall_dir, plate_z, recipe, timings, keep):
     mm, _ = get_meshlib()
     wx, wy = float(wall_dir[0]), float(wall_dir[1])
     turn = math.atan2(wy, wx)
@@ -127,7 +153,7 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
         rot = mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), -turn))
         local = mm.copyMesh(mesh)
         local.transform(rot)
-        H = fill_and_support(local, (1.0, 0.0, 0.0), plate_z, recipe, timings, keep)
+        H = _fill_and_support(local, (1.0, 0.0, 0.0), plate_z, recipe, timings, keep)
         H.transform(mm.AffineXf3f.linear(mm.Matrix3f.rotation(mm.Vector3f(0.0, 0.0, 1.0), turn)))
         return H
     r = recipe or Recipe()
@@ -162,7 +188,7 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
         def bc():
             g, org = fix_undercuts_grids(mesh, [([up_fn(d, r.b_angle) for d in (Y_POS, Y_NEG)], 0.0, 70.0),
                                                 ([up_fn(d, r.c_angle) for d in [Y_POS, Y_NEG] + DIAGONALS],
-                                                 r.c_auto_shrink, r.c_shrink_angle)], h)
+                                                 r.c_auto_shrink, r.c_shrink_angle)], h, floor_z=plate_z)
             grids.update(b=g[0], c=g[1], org=org)
             return grid_to_mesh(g[0], org, h)
         b = step("B undercuts", bc, h)
@@ -181,7 +207,8 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
         B = close(b, r.b_voxel, r.b_dist, "B")
 
         C = step("C undercuts", lambda: fix_undercuts_multi(mm.copyMesh(mesh), [Y_POS, Y_NEG] + DIAGONALS, r.c_angle,
-                                                             r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn)[0],
+                                                             r.c_voxel, r.c_auto_shrink, r.c_shrink_angle, up_fn,
+                                                             floor_z=plate_z)[0],
                  r.c_voxel)
 
         D = step("D intersect", lambda: intersect_meshes(B, C, r.b_voxel), r.b_voxel)
@@ -193,7 +220,7 @@ def fill_and_support(mesh, wall_dir=(1.0, 0.0, 0.0), plate_z=0.0, recipe=None, t
     strip = step("G0 strip", lambda: bottom_strip(F, plate_z, r.strip_height), decimate=False)
     if face_count(strip) > 0:
         G = step("G undercuts", lambda: fix_undercuts_multi(strip, [X_POS, X_NEG, Y_POS, Y_NEG] + DIAGONALS, r.g_angle,
-                                                             r.g_voxel, 0.0, 70.0, up_fn)[0], r.g_voxel)
+                                                             r.g_voxel, 0.0, 70.0, up_fn, floor_z=plate_z)[0], r.g_voxel)
     else:
         G = None
 

@@ -828,13 +828,17 @@ def check_manifold(mesh):
 
 ALPHA_MAX = 140.0    # deg: edges with a smaller inside angle get a chip (the depth rule keeps obtuse ones shallow)
 POST_TOL = 1e-4     # fast variant: sliver clean-up after the booleans keeps the shape within this (BU)
+RAMP = 0.6           # fast variant: chip ends ramp to zero depth over this x the chip width
 TAPER = 1.0          # fast variant: the chip ends slant out by this x the box height (chips fade out)
 FACE_CAP = 0.5       # fast variant: a chip is at most this x sqrt(area of the larger face) deep: bumps (two small faces) get small chips
 THICK_CAP = 0.15     # fast variant: a chip is at most this share of the stone's thickness under it
 FAST_MAX_CUT = 1.0          # fast variant: a chip goes at most this many x thickness deep
 FAST_THICK_PER_SIZE = 3.0   # fast variant: thickness = this x Thin (Thin 0.03 = today's chipped area, measured)
-CHAIN_TURN = 25.0    # deg: neighbouring edges are one piece while they turn less than this
-FAST_PIECE = 6.0     # pieces are at most this many x thickness long
+CHAIN_TURN = 35.0    # deg: neighbouring edges are one piece while they turn less than this
+FAST_PIECE = 10.0    # pieces are at most this many x thickness long
+SIDE_TOL = 0.1       # fast variant: the plane is lifted only where the stone beside the band stands this x h above it
+SIDE_LIFT = 0.5      # fast variant: ... and by at most this share of the chip depth
+MIN_PIECE = 1.5      # fast variant: pieces shorter than this x their depth get no chip (they'd only nick)
 
 
 def chip_depth(a_half, T, face_size, thick_under):
@@ -957,9 +961,10 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             while length < FAST_PIECE * T:
                 nxt = [j for j in at.get(v, []) if not used[j] and abs(dirs[j] @ dirs[cur]) >= cos_turn
                        and bis[j] @ bis[cur] >= cos_turn]
-                if len(nxt) != 1 or len(at.get(v, [])) > 2:
+                if not nxt:
                     break
-                j = nxt[0]; used[j] = True; piece.append(j); length += lens[j]
+                j = max(nxt, key=lambda q: abs(dirs[q] @ dirs[cur]))   # through junctions: the straightest
+                used[j] = True; piece.append(j); length += lens[j]
                 a, b = int(ev[idx[j], 0]), int(ev[idx[j], 1])
                 v = b if a == v else a
                 cur = j
@@ -999,17 +1004,61 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         except Exception:
             pass
         h = chip_depth(a_half, T, float((fsize[pc] * w8).sum()), thick_under)
+        dbg = None
+        if "debug" in info:              # caller asked for per-piece numbers (diagnosis)
+            dbg = dict(edges=[[int(x) for x in ev[idx[k]]] for k in pc], alpha=[float(alpha[idx[k]]) for k in pc],
+                       a_half_deg=math.degrees(a_half), face_size=float((fsize[pc] * w8).sum()) / unit,
+                       thick_under=None if thick_under is None else thick_under / unit, T=T / unit,
+                       depth=h / unit, length=float(lens[pc].sum()) / unit)
+            info["debug"].append(dbg)
         if h < 0.05 * T:
+            if dbg is not None:
+                dbg["skip"] = "depth < 0.05 T"
             continue
         top = float((P @ n).max())
         lev = top - h
+        s_ = P @ ax
+        if float(s_.max() - s_.min()) < MIN_PIECE * max(h, 1e-9):
+            if dbg is not None:
+                dbg["skip"] = "too short"
+            continue                      # too short to show a chip: it would only leave a nick
+        # the chip plane must run out inside its band: where the stone just outside the band stands
+        # above the plane (the rim of a pit, a bump), the cutter's side would leave a wall. Rays
+        # straight down just outside both sides (meshlib rayMeshIntersect) raise the plane to it.
+        half0 = h * math.tan(a_half) * 1.15 + 0.05 * T
+        uc0 = float((P @ u).mean())
+        for sf in (0.3, 0.5, 0.7):
+            sx = float(s_.min() + sf * (s_.max() - s_.min()))
+            for side in (-1.0, 1.0):
+                o = ax * sx + u * (uc0 + side * half0 * 1.05) + n * (top + T)
+                try:
+                    hit2 = mm.rayMeshIntersect(mp_m, mm.Line3f(mm.Vector3f(*o), mm.Vector3f(*(-n))))
+                except Exception:
+                    hit2 = None
+                if hit2:
+                    d2 = hit2.distanceAlongLine
+                    d2 = float(d2() if callable(d2) else d2)
+                    zh = top + T - d2
+                    if zh > lev + SIDE_TOL * h:
+                        lev = min(max(lev, zh), top - (1.0 - SIDE_LIFT) * h)
+        h = top - lev
+        if dbg is not None:
+            dbg["depth_after_side_clamp"] = h / unit
+        if h < 0.05 * T:
+            if dbg is not None:
+                dbg["skip"] = "side clamp"
+            continue
         half = h * math.tan(a_half) * 1.15 + 0.05 * T
-        s_ = P @ ax; uc = float((P @ u).mean())
+        uc = uc0
         ztop = top + 0.15 * T
-        slant = TAPER * (ztop - lev)
+        # the chip blends out at both ends: the cutter's bottom (the chip plane) is shorter than its
+        # top, which stops at the piece's own end vertices, so the depth ramps from h to 0 over about
+        # one chip width (RAMP) and never runs past the edge's end onto a neighbouring face
+        length = float(s_.max() - s_.min())
+        ramp = min(RAMP * max(2.0 * h * math.tan(a_half), h), 0.3 * length)
         cs = []
         for kk, z in ((0, lev), (1, ztop)):
-            ext = 0.0 if kk == 0 else slant
+            ext = -ramp if kk == 0 else 0.0
             for j in (0, 1):
                 y = (uc - half, uc + half)[j]
                 for i in (0, 1):
@@ -1078,6 +1127,7 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
             mm.fixMeshDegeneracies(c, pp)
             c.pack()
             if (len(c.topology.findHoleRepresentiveEdges()) <= holes0
+                    and len(mm.findMultipleEdges(c.topology)) <= multi0
                     and len(mm.findSelfCollidingTriangles(mm.MeshPart(c))) <= selfx0):
                 w = c
         except Exception as e:

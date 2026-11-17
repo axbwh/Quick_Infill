@@ -1639,3 +1639,155 @@ def local_round(mesh, size=SIZE, unit=1.0, target_faces=None, info=None):
     w.pack()
     info["seconds"] = time.perf_counter() - t0
     return w
+
+
+LOCAL_EDGE_ANGLE = 125.0  # deg: Local Round rounds round every convex edge sharper than this
+LOCAL_MAX_ANGLE = 140.0   # deg: Local Round looks at convex edges up to this inside angle ...
+LOCAL_THIN = 2.0          # ... whose stone is thinner than this x d there (today's Round changes nothing thicker)
+LOCAL_PAD = 2.0           # each run's box is padded by this x d
+LOCAL_RUN = 10.0          # runs longer than this x d are split into boxes of about that length
+
+
+def _boxes_mesh(boxes):
+    Vs, Fs, off = [], [], 0
+    for lo, hi in boxes:
+        Vb, Fb = _box(lo, hi)
+        Vs.append(Vb); Fs.append(Fb + off); off += len(Vb)
+    mm, mn = _ml()
+    return mn.meshFromFacesVerts(np.ascontiguousarray(np.concatenate(Fs), np.int32),
+                                 np.ascontiguousarray(np.concatenate(Vs), np.float32))
+
+
+def _splice_round_group(w, boxes, unit, base, info):
+    """_splice_round for several boxes at once (their 4d-padded crops must not overlap): one crop,
+    one Round (Stone preset), one splice."""
+    mm, mn = _ml()
+    vox, d, x = ROUND_STONE["voxel"] * unit, ROUND_STONE["distance"] * unit, ROUND_STONE["x"]
+    outer = [(lo - 4 * d, hi + 4 * d) for lo, hi in boxes]
+    piece = mm.boolean(w, _boxes_mesh(outer), mm.BooleanOperation.Intersection)
+    if not piece.valid():
+        return None
+    piece = piece.mesh
+    r = _offset(_offset(_offset(piece, vox, 2 * d), vox, -3 * d), vox, (1 + x) * d)
+    r = mm.boolean(r, piece, mm.BooleanOperation.Intersection)
+    if not r.valid():
+        return None
+    cut = mm.boolean(_boxes_mesh(boxes), r.mesh, mm.BooleanOperation.DifferenceAB)
+    if not cut.valid():
+        return None
+    res = mm.boolean(w, cut.mesh, mm.BooleanOperation.DifferenceAB)
+    if not res.valid():
+        return None
+    res = res.mesh
+    pp = mm.FixMeshDegeneraciesParams()
+    pp.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
+    pp.maxDeviation = POST_TOL * unit
+    pp.tinyEdgeLength = POST_TOL * unit
+    pp.criticalTriAspectRatio = 1e3
+    try:
+        c = mm.Mesh(res); mm.fixMeshDegeneracies(c, pp); c.pack(); res = c
+    except Exception:
+        pass
+    holes0, multi0, selfx0 = base
+    if (len(res.topology.findHoleRepresentiveEdges()) > holes0 or len(mm.findMultipleEdges(res.topology)) > multi0
+            or len(mm.findSelfCollidingTriangles(mm.MeshPart(res))) > selfx0):
+        info["round_refused"] = info.get("round_refused", 0) + 1
+        return None
+    return res
+
+
+def local_round2(mesh, size=SIZE, unit=1.0, target_faces=None, info=None):
+    """Local Round, round 9: today's Round trim only round the edges it would change, then decimated
+    to today's face count. Seeds follow today's effective rule (measured on 14 stones: nothing thicker
+    than about 2d changes): convex edges up to LOCAL_MAX_ANGLE whose stone (meshlib ray thickness) is
+    thinner than LOCAL_THIN x d at either end, plus edges whose two ends are thinner than d (plates,
+    lips). One box per edge run (runs split every LOCAL_RUN x d), padded LOCAL_PAD x d; boxes whose
+    crops don't overlap are rounded in one go."""
+    mm, mn = _ml()
+    info = {} if info is None else info
+    t0 = time.perf_counter()
+    d = ROUND_STONE["distance"] * unit
+    w = mm.Mesh(mesh); w.pack()
+    V, F = _arrays(mm, mn, w)
+    th = np.array(mm.computeRayThicknessAtVertices(w).vec, float)[:len(V)]
+    ar, nr = _face_areas(V, F)
+    cen = V[F].mean(1)
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    fid = np.tile(np.arange(len(F)), 3)
+    key = np.minimum(E[:, 0], E[:, 1]) * (len(V) + 1) + np.maximum(E[:, 0], E[:, 1])
+    order = np.argsort(key, kind="stable"); ks = key[order]
+    same = np.nonzero(ks[1:] == ks[:-1])[0]
+    f1, f2 = fid[order[same]], fid[order[same + 1]]; ev = E[order[same]]
+    convex = np.einsum("ij,ij->i", cen[f2] - cen[f1], nr[f1]) < 0
+    inside = 180.0 - np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", nr[f1], nr[f2]), -1, 1)))
+    tmin = np.minimum(th[ev[:, 0]], th[ev[:, 1]]); tmax = np.maximum(th[ev[:, 0]], th[ev[:, 1]])
+    pick = (convex & (inside < LOCAL_EDGE_ANGLE)) | (tmax < d)
+    se = ev[pick]
+    info["round_seed_edges"] = int(len(se))
+    t1 = time.perf_counter()
+    # runs: edges joined through shared vertices
+    parent = {}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]; a = parent[a]
+        return a
+    for a, b in se:
+        a, b = int(a), int(b)
+        parent.setdefault(a, a); parent.setdefault(b, b)
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    runs = {}
+    for v in parent:
+        runs.setdefault(find(v), []).append(v)
+    boxes = []
+    pad = LOCAL_PAD * d
+    for vs in runs.values():
+        P = V[vs]
+        stack = [P]
+        while stack:
+            Q = stack.pop()
+            if len(Q) > 2 and np.linalg.norm(Q.max(0) - Q.min(0)) > LOCAL_RUN * d:
+                c0 = Q.mean(0)
+                ax = np.linalg.eigh(np.cov((Q - c0).T) + 1e-12 * np.eye(3))[1][:, 2]
+                s = (Q - c0) @ ax
+                stack += [Q[s <= np.median(s)], Q[s > np.median(s)]]
+            else:
+                boxes.append((Q.min(0) - pad, Q.max(0) + pad))
+    # boxes whose 4d-padded crops overlap are merged (one region each); the regions are then disjoint
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if np.all(a[0] - 4 * d <= b[1] + 4 * d) and np.all(b[0] - 4 * d <= a[1] + 4 * d):
+                    boxes[i] = (np.minimum(a[0], b[0]), np.maximum(a[1], b[1]))
+                    del boxes[j]; merged = True; break
+            if merged:
+                break
+    groups = [[i] for i in range(len(boxes))]
+    info.update(round_boxes=len(boxes), round_groups=len(groups))
+    done = 0
+    for g in groups:
+        try:
+            r = _splice_round_group(w, [boxes[i] for i in g], unit, _base(w), info)
+        except Exception as ex:
+            info.setdefault("round_errors", []).append(repr(ex)); r = None
+        if r is not None:
+            w = r; done += 1
+    info["rounded_groups"] = done
+    t2 = time.perf_counter()
+    if target_faces:
+        cur = int(w.topology.numValidFaces())
+        if cur > target_faces:
+            ds = mm.DecimateSettings()
+            ds.maxDeletedFaces = cur - int(target_faces)
+            ds.maxError = 1e9
+            ds.packMesh = True
+            mm.decimateMesh(w, ds)
+    w.pack()
+    info["timings"] = dict(seeds=t1 - t0, round=t2 - t1, decimate=time.perf_counter() - t2)
+    info["seconds"] = time.perf_counter() - t0
+    return w

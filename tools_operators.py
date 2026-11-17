@@ -223,9 +223,9 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
     bl_label = "Trim Edges"
     bl_description = ("Take the thin, sharp edges off the selected meshes.\n"
-                      "Flat Chip (default): a flat chip off each sharp edge, sized by Thin; Only Cut Edges "
-                      "keeps it to where a cut face meets the stone. Round (old): the voxel way; a stone too "
-                      "small for the Stone resolution is trimmed at Detail instead and tagged Detail")
+                      "Round (default): rounds them off as the old Trim Edges did, about 5 times faster; a stone "
+                      "too small for the Stone resolution is trimmed at Detail instead and tagged Detail. "
+                      "Flat Chip: a flat chip off each sharp edge, sized by Thin. Round (old): the old voxel way")
     suffix, label = "_TrimEdges", "Trim Edges"
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True

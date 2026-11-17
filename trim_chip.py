@@ -1010,7 +1010,7 @@ def _split_line(B, T, most):
 
 
 def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, detect=True, tilt=TILT, seed=0,
-              info=None):
+              info=None, lip_round=False):
     mm, mn = _ml()
     info = {} if info is None else info
     tm = info.setdefault("timings", {})
@@ -1437,6 +1437,205 @@ def fast_chip(mesh, size=SIZE, *, unit=1.0, only_cut=False, cut_faces=None, dete
         except Exception as e:
             info["post_clean_error"] = repr(e)
     lap("post_clean")
+    if lip_round:
+        w = round_lips(w, size, unit, info)
+        lap("lip_round")
+    w.pack()
+    info["seconds"] = time.perf_counter() - t0
+    return w
+
+
+# ---------------------------------------------------------------------------------------------------
+# Lip hybrid (prototype, off by default): flat chips everywhere, today's Round trim only where sharp,
+# thin points are left (knife lips the edge-by-edge chips can't cut cleanly).
+
+LIP_ROUND_ANGLE = 60.0    # deg: a convex edge sharper than this, with both ends thinner than T, is a seed
+LIP_ROUND_MARGIN = 3.0    # the Round box reaches this many x Thin past the seeds
+ROUND_STONE = dict(voxel=0.0075, distance=0.07, x=0.25)   # BU: Quick Infill's Stone preset
+
+
+def _offset(mesh, voxel, dist):
+    """Quick Infill's voxel offset (GPU winding number when there is one)."""
+    try:
+        from .offset_utils import cuda_offset
+        return cuda_offset(mesh, voxel, dist)
+    except ImportError:
+        pass
+    mm, _ = _ml()
+    p = mm.GeneralOffsetParameters()
+    p.voxelSize = float(voxel)
+    p.signDetectionMode = mm.SignDetectionMode.HoleWindingRule
+    try:
+        import meshlib.mrcudapy as mc
+        p.fwn = mc.FastWindingNumber(mesh)
+    except Exception:
+        pass
+    return mm.generalOffsetMesh(mp=mesh, offset=float(dist), params=p)
+
+
+def _box(lo, hi):
+    ax, u, n = np.eye(3)
+    prof = [(float(lo[0]), float(hi[2] - lo[2])), (float(hi[0]), float(hi[2] - lo[2]))]
+    return _column_prism(ax, u, n, float(lo[1] + hi[1]) / 2, float(hi[1] - lo[1]) / 2, prof, float(hi[2]), float(hi[2]))
+
+
+def sharp_thin_points(m, T, angle=LIP_ROUND_ANGLE):
+    """Midpoints of convex edges sharper than `angle` whose two ends are thinner than T (meshlib
+    computeRayThicknessAtVertices): the sharp, fragile points."""
+    mm, mn = _ml()
+    V, F = _arrays(mm, mn, mm.Mesh(m))
+    th = np.array(mm.computeRayThicknessAtVertices(m).vec, float)[:len(V)]
+    ar, nr = _face_areas(V, F)
+    cen = V[F].mean(1)
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    fid = np.tile(np.arange(len(F)), 3)
+    key = np.minimum(E[:, 0], E[:, 1]) * (len(V) + 1) + np.maximum(E[:, 0], E[:, 1])
+    order = np.argsort(key, kind="stable"); ks = key[order]
+    same = np.nonzero(ks[1:] == ks[:-1])[0]
+    f1, f2 = fid[order[same]], fid[order[same + 1]]; ev = E[order[same]]
+    convex = np.einsum("ij,ij->i", cen[f2] - cen[f1], nr[f1]) < 0
+    inside = 180.0 - np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", nr[f1], nr[f2]), -1, 1)))
+    pick = convex & (inside < angle) & (th[ev[:, 0]] < T) & (th[ev[:, 1]] < T)
+    return (V[ev[pick, 0]] + V[ev[pick, 1]]) / 2
+
+
+def _splice_round(w, lo, hi, unit, base, info):
+    """Today's Round trim (Stone preset) on the box lo..hi of mesh w only, spliced in:
+    cutter = box - Round(piece), result = w - cutter (piece cropped with a 4d margin so its own cut
+    faces never round inside the box). The splice's slivers are collapsed (POST_TOL); refused (None)
+    if the result opens, doubles an edge or crosses itself more than `base` = (holes, multi, selfx)."""
+    mm, mn = _ml()
+    vox, d, x = ROUND_STONE["voxel"] * unit, ROUND_STONE["distance"] * unit, ROUND_STONE["x"]
+    ob = _box(lo - 4 * d, hi + 4 * d)
+    piece = mm.boolean(w, mn.meshFromFacesVerts(ob[1], ob[0].astype(np.float32)), mm.BooleanOperation.Intersection)
+    if not piece.valid():
+        return None
+    piece = piece.mesh
+    r = _offset(_offset(_offset(piece, vox, 2 * d), vox, -3 * d), vox, (1 + x) * d)
+    r = mm.boolean(r, piece, mm.BooleanOperation.Intersection)
+    if not r.valid():
+        return None
+    ib = _box(lo, hi)
+    cut = mm.boolean(mn.meshFromFacesVerts(ib[1], ib[0].astype(np.float32)), r.mesh, mm.BooleanOperation.DifferenceAB)
+    if not cut.valid():
+        return None
+    res = mm.boolean(w, cut.mesh, mm.BooleanOperation.DifferenceAB)
+    if not res.valid():
+        return None
+    res = res.mesh
+    pp = mm.FixMeshDegeneraciesParams()
+    pp.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
+    pp.maxDeviation = POST_TOL * unit
+    pp.tinyEdgeLength = POST_TOL * unit
+    pp.criticalTriAspectRatio = 1e3
+    try:
+        c = mm.Mesh(res); mm.fixMeshDegeneracies(c, pp); c.pack(); res = c
+    except Exception:
+        pass
+    holes0, multi0, selfx0 = base
+    if (len(res.topology.findHoleRepresentiveEdges()) > holes0 or len(mm.findMultipleEdges(res.topology)) > multi0
+            or len(mm.findSelfCollidingTriangles(mm.MeshPart(res))) > selfx0):
+        info["round_refused"] = info.get("round_refused", 0) + 1
+        return None
+    return res
+
+
+def _clusters(points, reach):
+    """Groups of points, each point within `reach` of another of its group; returns their boxes
+    (lo, hi) grown by reach, overlapping boxes merged."""
+    clusters = []
+    for p in points:
+        for c in clusters:
+            if np.min(np.linalg.norm(np.array(c) - p, axis=1)) < reach:
+                c.append(p); break
+        else:
+            clusters.append([p])
+    boxes = [[np.array(c).min(0) - reach, np.array(c).max(0) + reach] for c in clusters]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if np.all(a[0] <= b[1]) and np.all(b[0] <= a[1]):
+                    boxes[i] = [np.minimum(a[0], b[0]), np.maximum(a[1], b[1])]
+                    del boxes[j]; merged = True; break
+            if merged:
+                break
+    return boxes
+
+
+def _base(w):
+    mm, _ = _ml()
+    return (len(w.topology.findHoleRepresentiveEdges()), len(mm.findMultipleEdges(w.topology)),
+            len(mm.findSelfCollidingTriangles(mm.MeshPart(w))))
+
+
+def round_lips(w, size, unit=1.0, info=None):
+    """Today's Round trim only in small boxes round the clusters of sharp thin points left on the
+    chipped stone w (see _splice_round)."""
+    info = {} if info is None else info
+    t0 = time.perf_counter()
+    T = FAST_THICK_PER_SIZE * float(size) * unit
+    seeds = sharp_thin_points(w, T)
+    info["lip_seeds"] = int(len(seeds))
+    boxes = _clusters(seeds, LIP_ROUND_MARGIN * float(size) * unit) if len(seeds) else []
+    done = 0
+    for lo, hi in boxes:
+        try:
+            r = _splice_round(w, lo, hi, unit, _base(w), info)
+        except Exception as ex:
+            info.setdefault("lip_round_errors", []).append(repr(ex)); r = None
+        if r is not None:
+            w = r; done += 1
+    clusters = boxes
+    info.update(lip_boxes=len(clusters), lip_rounded=done, lip_round_seconds=time.perf_counter() - t0)
+    return w
+
+
+LOCAL_ALPHA = 110.0       # deg: Local Round rounds every convex edge sharper than this (today's Round: < ~106)
+
+
+def local_round(mesh, size=SIZE, unit=1.0, target_faces=None, info=None):
+    """'Local Round' (Alex 2026-11-17: "they don't try too hard to make it flat ... just make it round
+    and decimate it to the same amount doing trim edges would be"): today's Round trim (Stone preset)
+    only in boxes round the stone's sharp edges (no flat planes), spliced in, then the whole stone
+    decimated (meshlib decimateMesh) to target_faces (today's Trim Edges face count)."""
+    mm, mn = _ml()
+    info = {} if info is None else info
+    t0 = time.perf_counter()
+    w = mm.Mesh(mesh); w.pack()
+    V, F = _arrays(mm, mn, w)
+    ar, nr = _face_areas(V, F)
+    cen = V[F].mean(1)
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    fid = np.tile(np.arange(len(F)), 3)
+    key = np.minimum(E[:, 0], E[:, 1]) * (len(V) + 1) + np.maximum(E[:, 0], E[:, 1])
+    order = np.argsort(key, kind="stable"); ks = key[order]
+    same = np.nonzero(ks[1:] == ks[:-1])[0]
+    f1, f2 = fid[order[same]], fid[order[same + 1]]; ev = E[order[same]]
+    convex = np.einsum("ij,ij->i", cen[f2] - cen[f1], nr[f1]) < 0
+    inside = 180.0 - np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", nr[f1], nr[f2]), -1, 1)))
+    pick = convex & (inside < LOCAL_ALPHA)
+    seeds = (V[ev[pick, 0]] + V[ev[pick, 1]]) / 2
+    boxes = _clusters(seeds, LIP_ROUND_MARGIN * float(size) * unit) if len(seeds) else []
+    done = 0
+    for lo, hi in boxes:
+        try:
+            r = _splice_round(w, lo, hi, unit, _base(w), info)
+        except Exception as ex:
+            info.setdefault("round_errors", []).append(repr(ex)); r = None
+        if r is not None:
+            w = r; done += 1
+    info.update(round_boxes=len(boxes), rounded=done)
+    if target_faces:
+        cur = int(w.topology.numValidFaces())
+        if cur > target_faces:
+            ds = mm.DecimateSettings()
+            ds.maxDeletedFaces = cur - int(target_faces)
+            ds.maxError = 1e9
+            ds.packMesh = True
+            mm.decimateMesh(w, ds)
     w.pack()
     info["seconds"] = time.perf_counter() - t0
     return w

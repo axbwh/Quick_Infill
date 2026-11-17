@@ -1,5 +1,5 @@
 """
-Worker processes for Quick Infill tools that work on many objects one by one (Trim Edges).
+Worker processes for Quick Infill tools that work on many objects one by one (Trim Edges, Trim Thin).
 
 Why: meshlib holds Python's lock for the whole of a call, so threads can't run two objects at
 once (measured: 4 threads = 1 thread). Separate processes can: on 140 stones Trim Edges ran

@@ -1890,12 +1890,10 @@ def _lean_round(mesh, unit, density, info, stone=None, ratio=None, fallback=True
     r_ = ratio if (ratio is not None and tag == "STONE") else ROUND_RATIO[tag]
     target = int(r_ * n_vox * 0.96)                           # today's output: ratio x its voxel intersect faces
     cur = int(out.topology.numValidFaces())
-    if target < cur:
-        ds = mm.DecimateSettings()
-        ds.maxDeletedFaces = cur - target
-        ds.maxError = ((stone or ROUND_STONE) if tag == "STONE" else ROUND_DETAIL)["voxel"] * unit * 10.0
-        ds.packMesh = True
-        mm.decimateMesh(out, ds)
+    if target < cur:   # the shared decimation (its parallel split too), maxError 10 voxels
+        from .offset_utils import decimate_mesh
+        out = decimate_mesh(out, target_face_count=target,
+                            max_error=((stone or ROUND_STONE) if tag == "STONE" else ROUND_DETAIL)["voxel"] * unit * 10.0)
     tm["decimate_final"] = time.perf_counter() - t
     out.pack()
     info.update(tag=tag, faces=int(out.topology.numValidFaces()), target_faces=target, seconds=time.perf_counter() - t0)

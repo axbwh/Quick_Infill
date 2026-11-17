@@ -1,6 +1,6 @@
 """
-Trim Edges, Round method (the voxel way), in pure meshlib: no bpy, so the same code runs in
-Blender and in Quick Infill's worker processes (process_pool.py, qi_worker.py).
+Trim Edges, Round method (the voxel way), and Trim Thin, in pure meshlib: no bpy, so the same code
+runs in Blender and in Quick Infill's worker processes (process_pool.py, qi_worker.py).
 
 Grow 2d, shrink 3d (rounds off thin edges), regrow (1+x)d, decimate to the density target,
 then intersect with the original to clip back to its silhouette. A stone worked at Stone that
@@ -12,19 +12,17 @@ import numpy as np
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
-    should_auto_decimate_faces, OFFSET_PRESETS, RESOLUTION_PRESETS, nearest_resolution_tag, MeshCollapsedError,
+    auto_decimate as shared_auto_decimate, PARALLEL_DECIMATE_FACES, OFFSET_PRESETS, RESOLUTION_PRESETS,
+    nearest_resolution_tag, MeshCollapsedError,
 )
 
 # At the Stone tag a mesh keeps at least this share of its volume, or it is trimmed at Detail
 # instead (Alex 2026-11-17).
 STONE_KEEPS = 2.0 / 3.0
 
-# Trim Edges decimates in parallel parts above this many faces (its own decimation and the
-# pipeline's). Stones give 30k to 250k faces there, under the shared 200k threshold, so they were
-# decimated on one thread. In parts it is about twice as fast; the result moves by at most 0.016 BU
-# (p99 0.008), the same as today's result moves when the stone is shifted by half a voxel
-# (Ashlarize-library/trim-edges-speed, 2026-11-18).
-PARALLEL_FACES = 20_000
+# Every decimation decimates in parallel parts above this many faces: the one shared setting
+# (offset_utils.PARALLEL_DECIMATE_FACES; it was Trim Edges' own, Ashlarize-library/trim-edges-speed).
+PARALLEL_FACES = PARALLEL_DECIMATE_FACES
 
 
 def trim(mesh, res, distance, x, density):
@@ -40,7 +38,7 @@ def trim(mesh, res, distance, x, density):
         diag = float(np.linalg.norm(hi - lo))
         reduction = max(0.0, 1.0 - float(target) / float(max(1, current)))
         max_err = max(float(res) * 10.0, diag * (0.01 + 0.49 * reduction))
-        w = decimate_mesh(w, target_face_count=target, max_error=max_err, parallel_above=PARALLEL_FACES)
+        w = decimate_mesh(w, target_face_count=target, max_error=max_err)
     return mm.voxelBooleanIntersect(w, mesh, res)
 
 
@@ -92,7 +90,14 @@ def lean_trim(mesh, res, distance, x, density, unit):
     return out, ('DETAIL' if info.get("tag") == "DETAIL" else None)
 
 
-KINDS = {"voxel": trim_edges, "lean": lean_trim}
+def trim_thin(mesh, res):
+    """Trim Thin: shrink by one voxel, grow back by one voxel; anything thinner than two voxels goes.
+    (mesh, None). Raises MeshCollapsedError when nothing is left."""
+    shrunk = ensure_not_collapsed(cuda_offset(mesh, res, -res))
+    return cuda_offset(shrunk, res, res), None
+
+
+KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin}
 
 
 def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
@@ -107,10 +112,7 @@ def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
         if face_count(out) == 0:
             return ("collapsed",)
         if auto_decimate:   # the same as blender_meshlib_utils._decimate
-            do, target = should_auto_decimate_faces(face_count(src), face_count(out), voxel_size=res,
-                                                    mode=mode, ratio=ratio)
-            if do:
-                out = decimate_mesh(out, target_face_count=target, resolution=res, parallel_above=PARALLEL_FACES)
+            out = shared_auto_decimate(out, face_count(src), res, mode, ratio)
         if out.topology.numValidFaces() != out.topology.faceSize():
             out.pack()
         return ("ok", np.asarray(mn.getNumpyVerts(out), np.float32),

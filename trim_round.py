@@ -97,7 +97,13 @@ def trim_thin(mesh, res):
     return cuda_offset(shrunk, res, res), None
 
 
-KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin}
+def chip_trim(mesh, res, dents, size, amount, unit):
+    """Trim Edges, Chip: the stone damage chips (trim_dent), then Trim Thin. (mesh, None)."""
+    from .trim_dent import dent_trim
+    return dent_trim(mesh, res, dents, size, amount, unit)
+
+
+KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin, "chip": chip_trim}
 
 
 def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):

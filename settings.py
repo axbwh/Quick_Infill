@@ -180,16 +180,34 @@ class QuickInfillSettings(PropertyGroup):
             ("ROUND", "Round", "Round the thin edges off, as the old Trim Edges did, about 5 times faster.\n"
                                "Same grow, shrink and regrow (Distance, X, Trim Density); the result is cut "
                                "back to the stone exactly instead of through voxels"),
-            ("CHIP", "Flat Chip", "Knock a flat chip off each sharp edge, like a chip off a stone.\n"
-                                  "Fast: works on the mesh as it is, no voxels"),
+            ("CHIP", "Chip", "Knock chips off the sharp edges and corners with the stone damage meshes.\n"
+                             "Each chip is one of the Chip Meshes (Ashlarize's Dent_S), picked, turned and "
+                             "sized at random, and cut with a boolean. Then Trim Thin takes off what got too thin"),
         ],
         default="ROUND",
     )
+    # (the old Flat Chip's slider: no longer used by Trim Edges, kept so saved files and scripts still load)
     trim_edges_thin: FloatProperty(
-        name="Thin", description="How big the flat chips are, in Blender units (cm).\n"
-                                 "About the width of the chip across a square edge; sharper edges get "
-                                 "bigger chips, blunt ones small or none. 0.03 matches the old Trim Edges",
+        name="Thin", description="How big the flat chips were, in Blender units (cm). Not used any more",
         default=0.04, min=0.005, max=0.2, soft_min=0.02, soft_max=0.12, precision=3, step=0.1,
+    )
+    trim_edges_chip_size: FloatProperty(
+        name="Chip Size", description="How big the chips are, as a share of the Chip Meshes' own size.\n"
+                                      "1 = the stone damage meshes as they are (about 0.14 cm across). Each chip "
+                                      "is drawn between 0.6 and 1.3 times this, corners a little bigger",
+        default=0.8, min=0.1, max=4.0, soft_min=0.2, soft_max=2.0, precision=2, step=5,
+    )
+    trim_edges_chip_amount: FloatProperty(
+        name="Chip Amount", description="How many chips go on the sharp edges, per cm of edge.\n"
+                                        "Corners get one most of the time on top of these. Chips are kept apart, "
+                                        "so very high values stop adding more",
+        default=2.5, min=0.0, max=20.0, soft_max=8.0, precision=1, step=10,
+    )
+    trim_edges_chip_meshes: PointerProperty(
+        name="Chip Meshes", type=bpy.types.Collection,
+        description="The collection of damage meshes the chips are made from (Z = out of the stone).\n"
+                    "Empty: Ashlarize's small stone damage (Dent_S), from this file or from the "
+                    "Ashlarize stone library",
     )
     trim_edges_only_cut: BoolProperty(
         name="Only Cut Edges", description="Chip only the edges where a cut face meets the stone.\n"

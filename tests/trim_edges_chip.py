@@ -1,9 +1,9 @@
-"""Trim Edges test: Flat Chip, Only Cut Edges, Round, through the real
+"""Trim Edges test: Chip (stone damage meshes + Trim Thin), Only Cut Edges, Round, through the real
 operator. Background Blender only, on copies; nothing is saved.
 
     blender -b <file with sp_cut stones>.blend --python tests/trim_edges_chip.py -- <stone> [<stone> ...]
 
-Checks: each result is closed and manifold, inside the original, changed (Flat Chip), fewer or equal
+Checks: each result is closed and manifold, inside the original, changed (Chip), fewer or equal
 changes with Only Cut Edges; Round (old) is gone and an old file opens on Round. Prints PASS / FAIL lines and times.
 """
 import bpy, sys, time, importlib, addon_utils
@@ -37,11 +37,11 @@ def ml_of(ob):
 
 def sharp_thin(m, angle=45.0):
     """Convex edges with an inside angle under `angle` whose two ends are thinner (meshlib ray
-    thickness) than the flat chip's thickness: the sharp, fragile points a print would lose."""
+    thickness) than 0.12 BU (the old flat chip's thickness): the sharp, fragile points a print would lose."""
     m = mm.Mesh(m); m.pack()
     V = np.array(mn.getNumpyVerts(m), float); F = np.array(mn.getNumpyFaces(m.topology), np.int64)
     th = np.array(mm.computeRayThicknessAtVertices(m).vec, float)[:len(V)]
-    T = 3.0 * float(s.trim_edges_thin)
+    T = 0.12
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
     nr = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
     cen = V[F].mean(1)
@@ -89,7 +89,7 @@ def run(method, only_cut=False):
         check(holes == 0 and selfx == 0, "%s %s: closed and not self-crossing (holes %d, crossings %d)"
               % (method, src.name, holes, selfx))
         # sharp thin points left: convex edges sharper than 45 deg whose ends are thinner than the chip
-        # thickness (3 x Thin). Reported, before -> after (the old Round way for comparison).
+        # thickness (0.12). Reported, before -> after (the old Round way for comparison).
         print("SHARP %s only_cut=%s %s: %d -> %d" % (method, only_cut, src.name, sharp_thin(O), sharp_thin(T)))
         if method in ("CHIP", "ROUND"):
             pts = mn.getNumpyVerts(T)
@@ -97,23 +97,34 @@ def run(method, only_cut=False):
             if not isinstance(vc, mm.VertCoords):
                 tmp = mm.VertCoords(); tmp.vec = vc; vc = tmp
             outside = float(np.array(mm.findSignedDistances(O, vc).vec).max())
-            check(outside < 1e-3, "%s %s: inside the original (max %.5f)" % (method, src.name, outside))
-            check(lost >= -0.01, "%s %s: volume lost %.2f %% (never gains)" % (method, src.name, lost))
+            # (Chip ends with Trim Thin, a voxel shrink and regrow: within half a Stone voxel)
+            tol = 0.004 if method == "CHIP" else 1e-3
+            check(outside < tol, "%s %s: inside the original (max %.5f)" % (method, src.name, outside))
+            check(lost >= -0.05 if method == "CHIP" else lost >= -0.01, "%s %s: volume lost %.2f %% (never gains)" % (method, src.name, lost))
         bpy.data.objects.remove(cp)
     return out
 
 
 chip = run("CHIP")
-check(any(v > 0.001 for v in chip), "Flat Chip chipped something (%s)" % ", ".join("%.2f" % v for v in chip))
+check(any(v > 0.1 for v in chip), "Chip chipped something (%s)" % ", ".join("%.2f" % v for v in chip))
 cut = run("CHIP", only_cut=True)
 check(all(c <= a + 0.05 for c, a in zip(cut, chip)), "Only Cut Edges takes no more than all edges")
 lean = run("ROUND")
 for n, a in zip(names, lean):
     print("ROUND %s: volume lost %.2f %%" % (n, a))
 check([e.identifier for e in s.bl_rna.properties["trim_edges_method"].enum_items] == ["ROUND", "CHIP"],
-      "Trim Edges has Round and Flat Chip only (Round (old) taken out)")
-check(abs(s.bl_rna.properties["trim_edges_thin"].default - 0.04) < 1e-6
-      and s.bl_rna.properties["trim_edges_thin"].soft_max > 0.04, "Thin is 0.04 by default and goes higher")
+      "Trim Edges has Round and Chip only (Round (old) taken out)")
+check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 0.8) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 2.5) < 1e-6, "Chip Size 0.8 and Amount 2.5 by default")
+tops = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".tools_operators")
+check(len(tops.chip_meshes(bpy.context)) > 0, "Chip Meshes found (%d damage meshes)" % len(tops.chip_meshes(bpy.context)))
+# the same stones get the same chips each time (the seed comes from the stone's shape)
+again = run("CHIP")
+check(all(abs(x - y) < 1e-6 for x, y in zip(chip, again)), "Chip gives the same result twice")
+s.trim_edges_chip_amount = 0.0
+none = run("CHIP")
+check(sum(none) < sum(chip), "Amount 0 (corners only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
+s.trim_edges_chip_amount = 2.5
 s["trim_edges_method"] = 2                      # a file saved with Round (old)
 settings_mod = sys.modules[type(s).__module__]
 settings_mod._old_round_to_round()

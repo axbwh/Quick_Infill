@@ -219,13 +219,62 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
         return ("trim_thin_job", ("thin",))
 
 
+DENT_COLL = "Dent_S"     # Ashlarize's small stone damage meshes: the default Chip Meshes
+
+
+def _dent_collection(context):
+    """The Chip Meshes collection: the setting, else Ashlarize's Dent_S (its own pointer, this file, or
+    linked from Ashlarize's stone library file, the way Ashlarize links it). None when there is none."""
+    s = context.scene.quick_infill_settings
+    if s.trim_edges_chip_meshes is not None:
+        return s.trim_edges_chip_meshes
+    sp = getattr(context.scene, "stone_pack", None)
+    c = getattr(sp, "dent_lib_s", None) if sp is not None else None
+    if c is not None:
+        return c
+    c = bpy.data.collections.get(DENT_COLL)
+    if c is not None:
+        return c
+    path = getattr(sp, "library_path", "") if sp is not None else ""
+    if path:
+        try:
+            with bpy.data.libraries.load(bpy.path.abspath(path), link=True) as (src, dst):
+                if DENT_COLL not in src.collections:
+                    return None
+                dst.collections = [DENT_COLL]
+            return dst.collections[0]
+        except Exception as e:
+            print("Quick Infill chip meshes:", e)
+    return None
+
+
+def chip_meshes(context):
+    """The Chip Meshes as [(V (n,3), F (k,3))] in Blender units (each object's scale applied, not its
+    place or turn: Z is out of the stone)."""
+    c = _dent_collection(context)
+    if c is None:
+        return []
+    out = []
+    for o in c.all_objects:
+        if o.type != 'MESH' or not len(o.data.polygons):
+            continue
+        me = o.data
+        V = np.empty(len(me.vertices) * 3, np.float64)
+        me.vertices.foreach_get("co", V)
+        me.calc_loop_triangles()
+        T = np.empty(len(me.loop_triangles) * 3, np.int32)
+        me.loop_triangles.foreach_get("vertices", T)
+        out.append((V.reshape(-1, 3) * np.array(o.scale[:], np.float64), T.reshape(-1, 3)))
+    return out
+
+
 class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     bl_idname = "quick_infill.trim_edges"
     bl_label = "Trim Edges"
     bl_description = ("Take the thin, sharp edges off the selected meshes.\n"
                       "Round (default): rounds them off as the old Trim Edges did, about 5 times faster; a stone "
                       "too small for the Stone resolution is trimmed at Detail instead and tagged Detail. "
-                      "Flat Chip: a flat chip off each sharp edge, sized by Thin")
+                      "Chip: stone damage meshes knock chips off the sharp edges and corners, then Trim Thin")
     suffix, label = "_TrimEdges", "Trim Edges"
     est_cost, est_grow = ToolCost(offsets=3, decimates=2, booleans=1), 2.0
     delete_collapsed = True
@@ -235,13 +284,26 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         s = context.scene.quick_infill_settings
         if getattr(s, "trim_edges_method", "ROUND") != "CHIP":
             return self._lean_round_setup(context, s)
+        return self._chip_setup(context, s)
+
+    def _chip_setup(self, context, s):
+        """Chip (Alex 2026-11-18, in place of the old Flat Chip): stone damage meshes knocked off the
+        sharp edges and corners (trim_dent), then Trim Thin. Trim Thin works through voxels, so the
+        result is decimated the usual way afterwards."""
         objs = selected_meshes(context)
         if not objs:
             self.report({'ERROR'}, "No mesh selected.")
             return None
-        from .trim_chip import fast_chip
+        dents = chip_meshes(context)
+        if not dents:
+            self.report({'ERROR'}, "Trim Edges (Chip): no Chip Meshes. Set Chip Meshes to a collection of "
+                                   "damage meshes (Ashlarize's Dent_S), or set Ashlarize's stone library")
+            return None
+        from .trim_dent import dent_trim
+        from .trim_chip import detect_cut_faces
+        from .trim_round import trim_thin
         from .blender_meshlib_utils import STL_EXPORT_SCALE
-        thin = float(s.trim_edges_thin)
+        size, amount = float(s.trim_edges_chip_size), float(s.trim_edges_chip_amount)
         only_cut = bool(s.trim_edges_only_cut)
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
 
@@ -251,18 +313,27 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
             for job in run.jobs:
                 att = job.obj.data.attributes.get("sp_cut")
                 if att is None or att.domain != 'FACE' or job.face_map is None:
-                    continue           # no marks: fast_chip finds the cut faces by shape
+                    continue           # no marks: the cut faces are found by shape
                 vals = [False] * len(job.obj.data.polygons)
                 att.data.foreach_get("value", vals)
                 marks[id(job.src)] = np.asarray(vals, bool)[job.face_map]
 
         def chip(mesh, res):
-            return fast_chip(mesh, thin, unit=STL_EXPORT_SCALE, only_cut=only_cut,
-                             cut_faces=marks.get(id(mesh)), detect=True)
+            cut = None
+            if only_cut:
+                cut = marks.get(id(mesh))
+                if cut is None:
+                    cut = detect_cut_faces(mesh, STL_EXPORT_SCALE)
+                if cut is None or not np.any(cut):
+                    return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
+            return dent_trim(mesh, res, dents, size, amount, STL_EXPORT_SCALE, cut_faces=cut)[0]
 
-        # the chipped stone keeps its own mesh: no voxel-style decimation afterwards
+        # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
+        # whose marks are per object
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             on_prepared=on_prepared, auto_decimate=False)
+                             on_prepared=on_prepared,
+                             process_job=None if only_cut else
+                             ("trim_edges_job", ("chip", dents, size, amount, STL_EXPORT_SCALE)))
 
     def _lean_round_setup(self, context, s):
         """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an
@@ -288,7 +359,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     def job_estimate(self, context):
         s = context.scene.quick_infill_settings
         if getattr(s, "trim_edges_method", "ROUND") == "CHIP":
-            return 0.05 * len(selected_meshes(context))
+            return 0.15 * len(selected_meshes(context))
         return 0.12 * len(selected_meshes(context))
 
 

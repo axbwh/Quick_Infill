@@ -169,9 +169,9 @@ class QUICKINFILL_OT_make_manifold(Operator):
     bl_idname = "quick_infill.make_manifold"
     bl_label = "Make Manifold"
     bl_description = ("Unite the selected objects (stones, infill, plugs) into ONE watertight object with Blender's "
-                      "Manifold solver, repair self-intersections and zero-size faces with meshlib, then make the flat "
-                      "cuts last (Intersect With blank, Cut at Plate) so they stay flat. The originals are kept; the "
-                      "result is '<active>_Solid'")
+                      "Manifold solver, then make the flat cuts (Intersect With blank, Cut at Plate). Nothing is "
+                      "repaired afterwards: self-intersections or zero-area faces left are only reported. The "
+                      "originals are kept; the result is '<active>_Solid'")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

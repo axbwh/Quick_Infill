@@ -382,7 +382,7 @@ class QuickInfillSettings(PropertyGroup):
     manifold_blank: PointerProperty(
         name="Intersect With", type=bpy.types.Object,
         description="Optional blank: Make Manifold intersects the united result with this object (read with its "
-                    "modifiers), after the repair, so the blank's flat faces stay flat",
+                    "modifiers), after the union",
         poll=lambda self, ob: ob.type == 'MESH',
     )
     check_result_cavities: StringProperty(default="", options={'SKIP_SAVE'})

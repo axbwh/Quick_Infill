@@ -165,6 +165,26 @@ class QUICKINFILL_OT_seal_cavities(ModalJobMixin, Operator):
         return JobSpec(prepare, compute, finish, items=1)
 
 
+def _meshlib_face_tags(obj, face_map, apply_modifiers):
+    """The resolution tag index of each meshlib face of obj (from its polygons' qi_res_tag), or None."""
+    from .blender_meshlib_utils import read_face_tags
+    if face_map is None:
+        return None
+    if apply_modifiers:
+        ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        tags = read_face_tags(ev.to_mesh())
+        ev.to_mesh_clear()
+    else:
+        tags = read_face_tags(obj.data)
+    if tags is None:
+        return None
+    import numpy as np
+    fm = np.asarray(face_map)
+    if fm.size and int(fm.max()) >= len(tags):
+        return None
+    return tags[fm]
+
+
 class QUICKINFILL_OT_make_manifold(Operator):
     bl_idname = "quick_infill.make_manifold"
     bl_label = "Make Manifold"
@@ -191,7 +211,11 @@ class QUICKINFILL_OT_make_manifold(Operator):
         colls = list(active.users_collection) or [context.scene.collection]
         notes = []
         try:
-            meshes = [blender_to_meshlib(o, s.apply_modifiers_on_export) for o in objs]
+            meshes, face_tags = [], []
+            for o in objs:
+                m, fmap = blender_to_meshlib(o, s.apply_modifiers_on_export, with_face_map=True)
+                meshes.append(m)
+                face_tags.append(_meshlib_face_tags(o, fmap, s.apply_modifiers_on_export))
             # the grow before the blank cut is Quick Infill's Grow: each object's resolution tag
             # (voxel size + decimate ratio), else the panel's voxel size and decimate setting
             from .blender_meshlib_utils import _effective_settings
@@ -204,7 +228,7 @@ class QUICKINFILL_OT_make_manifold(Operator):
                                                             open_shell_voxel=float(s.check_voxel) * 0.5,
                                                             log=notes.append,
                                                             delete_islands=s.manifold_delete_islands,
-                                                            grow_settings=grow_settings)
+                                                            grow_settings=grow_settings, face_tags=face_tags)
         except JobCancelled:
             self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
             return {'CANCELLED'}

@@ -10,14 +10,14 @@ plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
        through meshlib between these booleans: that trip opened holes in the
        union and the solver then silently skipped the cut. This is the same
        order as Alex's "Merge_Manifold" geometry nodes. With a blank, its bottom
-       is the bottom and there is no plate cut. Before that, each object that
+       is the bottom and there is no plate cut. Before that, each island that
        ends at the bottom (within SHIFT below to 2 x SHIFT above it, SHIFT =
        0.0005) is moved straight down on its own until its lowest point is
        SHIFT below the bottom; the rest stays where it is. Its bottom then gets
        one fresh cut instead of a second cut in exactly the same spot, which
        leaves degenerate slivers. For the same reason, with a blank, every
-       stone is grown by SHIFT with Quick Infill's own Grow (voxel offset at its
-       resolution tag, then its Auto Decimate), so faces already cut against
+       island is grown by SHIFT on its own with Quick Infill's own Grow
+       (voxel offset at its own resolution tag, then its Auto Decimate), so faces already cut against
        the blank's walls stick out a hair past them and are cut once, fresh;
     3. the n-gons the solver returns are split with Blender's Beauty
        triangulation; floating and inside islands are deleted (Merge_Manifold's
@@ -86,6 +86,22 @@ class Health:
         if self.clean():
             return f"watertight, no self-intersections, {self.faces} faces, {shells}"
         return ", ".join(self.problems()) + f" ({self.faces} faces, {shells})"
+
+
+def split_shells_with_faces(mesh):
+    """Loose shells of a mesh as (separate mesh, numpy array of the source face ids it holds)."""
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    nf = mesh.topology.faceSize()
+    comps = mm.MeshComponents.getAllComponents(mm.MeshPart(mesh))
+    if len(comps) <= 1:
+        return [(mesh, np.nonzero(mn.getNumpyBitSet(mesh.topology.getValidFaces())[:nf])[0])]
+    out = []
+    for c in comps:
+        part = mm.Mesh()
+        part.addMeshPart(mm.MeshPart(mesh, c))
+        out.append((part, np.nonzero(mn.getNumpyBitSet(c)[:nf])[0]))
+    return out
 
 
 def split_shells(mesh):
@@ -363,7 +379,7 @@ def grow_like_quick_infill(mesh, dist, voxel, ratio, mode):
 
 
 def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True,
-                  grow_settings=None):
+                  grow_settings=None, face_tags=None):
     """meshes (meshlib, world space) -> (one watertight meshlib mesh, Health, Flatness or None).
 
     blank: closed meshlib mesh the union is intersected with (the tower blank). Its
@@ -372,6 +388,8 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     delete_islands: keep only the main body (no floating or inside shells).
     grow_settings: per mesh (voxel mm, ratio, decimate mode) for the SHIFT grow with a blank:
                    each object's resolution tag (as Quick Infill's Grow with Smart), else the panel's.
+    face_tags: per mesh, the resolution tag index of each of its faces (or None): an island
+               with tagged faces grows at its own tag, the most common one among its faces.
     Must run on Blender's main thread (the booleans are Blender's).
     """
     say = log or (lambda msg: None)
@@ -387,46 +405,61 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         plate_z = None
     elif plate_z is not None:
         bottom_z = float(plate_z)
+    # Everything below works island by island (each loose part of each object on its own).
+    from .blender_meshlib_utils import STL_EXPORT_SCALE
+    from .offset_utils import RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER
+    gs = grow_settings or [None] * len(meshes)
+    ft = face_tags or [None] * len(meshes)
+    shells = []          # (island, (voxel, ratio, mode) for its grow)
+    for m, g, tags in zip(meshes, gs, ft):
+        for part, faces in split_shells_with_faces(m):
+            if face_count(part) == 0:
+                continue
+            gi = g
+            if tags is not None and len(faces):
+                # the island's own resolution tag: the most common tag of its faces (Smart + Islands)
+                t = np.asarray(tags)[faces[faces < len(tags)]]
+                t = t[(t >= 0) & (t < len(RESOLUTION_TAG_ORDER))]
+                if len(t):
+                    tag = RESOLUTION_TAG_ORDER[int(np.bincount(t).argmax())]
+                    voxel, ratio = RESOLUTION_PRESETS[tag]
+                    gi = (voxel, ratio, "VOXEL_RATIO")
+            shells.append((part, gi))
     if bottom_z is not None:
         # Stones often end at the bottom already (cut there against the blank or at the plate
         # before), or a hair above or below it. Cutting again in exactly the same spot leaves
-        # degenerate slivers from rounding, so each of those OBJECTS (only those; the rest
-        # stays where it is) is moved straight down, on its own, until its lowest point is
-        # SHIFT below the bottom: it then gets ONE fresh cut on the cut plane.
-        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        # degenerate slivers from rounding, so each of those ISLANDS (only those; the rest stays
+        # where it is) is moved straight down, on its own, until its lowest point is SHIFT below
+        # the bottom: it then gets ONE fresh cut on the cut plane.
         mm, _ = get_meshlib()
         d = SHIFT * STL_EXPORT_SCALE
         moved = 0
-        for m in meshes:
-            if not face_count(m):
-                continue
-            gap = float(m.computeBoundingBox().min.z) - bottom_z
+        for part, _g in shells:
+            gap = float(part.computeBoundingBox().min.z) - bottom_z
             if -d <= gap <= 2.0 * d:
-                # each by its own amount: its lowest point ends SHIFT below the bottom
-                m.transform(mm.AffineXf3f.translation(mm.Vector3f(0.0, 0.0, -(gap + d))))
+                part.transform(mm.AffineXf3f.translation(mm.Vector3f(0.0, 0.0, -(gap + d))))
                 moved += 1
         if moved:
-            say(f"{moved} object(s) ending at the bottom were moved down to {SHIFT:g} below it so they are cut fresh")
+            say(f"{moved} island(s) ending at the bottom were moved down to {SHIFT:g} below it so they are cut fresh")
     if blank is not None:
-        # Every stone grows by SHIFT with Quick Infill's own Grow (voxel offset at its resolution
-        # tag, then its Auto Decimate): faces already cut against the blank (walls and bottom)
-        # now stick out a hair past it and get ONE fresh cut. (Not for Cut at Plate alone: a
-        # stone edge lying exactly on the plate came out as doubled edges after growing.)
-        from .blender_meshlib_utils import STL_EXPORT_SCALE
-        gs = grow_settings or [None] * len(meshes)
+        # Every island grows by SHIFT on its own, with Quick Infill's own Grow (voxel offset at its
+        # resolution tag, then its Auto Decimate): faces already cut against the blank (walls and
+        # bottom) now stick out a hair past it and get ONE fresh cut. Island by island, so each
+        # voxel grid is only as big as that island. (Not for Cut at Plate alone: a stone edge
+        # lying exactly on the plate came out as doubled edges after growing.)
         grown = []
-        for m, g in zip(meshes, gs):
+        kept_tiny, _ = drop_small_shells([sh for sh, _ in shells])
+        keep = {id(x) for x in kept_tiny}
+        for sh, g in shells:
             check_cancelled()
-            if not face_count(m):
+            if id(sh) not in keep:
+                grown.append((sh, g))        # left out as a tiny piece just below: not worth growing
                 continue
             voxel, ratio, mode = g if g is not None else (open_shell_voxel * 2.0, None, "VOXEL_RATIO")
-            grown.append(grow_like_quick_infill(m, SHIFT * STL_EXPORT_SCALE, voxel, ratio, mode))
-        meshes = grown
-        say(f"{len(grown)} object(s) grown by {SHIFT:g} with Quick Infill's Grow (each at its resolution tag)")
-    shells = []
-    for m in meshes:
-        shells.extend(split_shells(m))
-    shells = [s for s in shells if face_count(s) > 0]
+            grown.append((grow_like_quick_infill(sh, SHIFT * STL_EXPORT_SCALE, voxel, ratio, mode), g))
+        shells = grown
+        say(f"{len(grown)} island(s) grown by {SHIFT:g} one by one with Quick Infill's Grow (each at its resolution tag)")
+    shells = [s for s, _ in shells]
     shells, tiny = drop_small_shells(shells)
     if tiny:
         say(f"{tiny} tiny piece(s) under {TINY_SHELL:g} mm were left out")

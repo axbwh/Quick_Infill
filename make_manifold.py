@@ -15,7 +15,9 @@ plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
        0.0005) is moved straight down on its own until its lowest point is
        SHIFT below the bottom; the rest stays where it is. Its bottom then gets
        one fresh cut instead of a second cut in exactly the same spot, which
-       leaves degenerate slivers;
+       leaves degenerate slivers. For the same reason, with a blank, every
+       stone is grown by SHIFT along its normals, so faces already cut against
+       the blank's walls stick out a hair past them and are cut once, fresh;
     3. the n-gons the solver returns are split with Blender's Beauty
        triangulation; floating and inside islands are deleted (Merge_Manifold's
        Delete Islands); the few small holes the triangulation leaves are closed
@@ -306,6 +308,31 @@ def fill_holes(mesh):
 TINY_SHELL = 0.2       # mm: Merge_Manifold's tiny-island size (0.02 Blender units)
 
 
+def grow_shell(mesh, dist):
+    """A copy of a closed shell with every vertex pushed out along its (area-weighted)
+    normal by dist (mm). Faces that were cut against the blank before then stick out
+    a hair past it, so the intersection cuts them once, fresh, instead of again in
+    exactly the same spot."""
+    mn = get_mrmeshnumpy()
+    v = mn.getNumpyVerts(mesh).astype(np.float64)
+    f = mn.getNumpyFaces(mesh.topology).astype(np.int64)
+    if len(f) == 0:
+        return mesh
+    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])     # length = 2 x area
+    vn = np.zeros_like(v)
+    for k in range(3):
+        np.add.at(vn, f[:, k], fn)
+    ln = np.linalg.norm(vn, axis=1)
+    ok = ln > 1e-30
+    vn[ok] /= ln[ok, None]
+    vn[~ok] = 0.0
+    if float(mesh.volume()) < 0:
+        vn = -vn
+    out = mn.meshFromFacesVerts(np.ascontiguousarray(f.astype(np.int32)),
+                                np.ascontiguousarray((v + vn * float(dist)).astype(np.float32)))
+    return out
+
+
 def drop_small_shells(shells, min_size=TINY_SHELL):
     """Shells smaller than min_size (mm) in all three directions, left out before
     the union (Merge_Manifold's "Tiny Islands"). Returns (kept, how many dropped)."""
@@ -413,6 +440,13 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         say(f"{vanished} open speck(s) with no volume were left out")
     if not shells:
         raise ValueError("nothing to unite")
+    if blank is not None:
+        # every stone grows by SHIFT: faces already cut against the blank (walls and bottom)
+        # now stick out a hair past it and get ONE fresh cut. (Not for Cut at Plate alone:
+        # growing moves vertices by float rounding, and a stone edge lying exactly on the
+        # plate then comes out as doubled edges.)
+        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        shells = [grow_shell(s, SHIFT * STL_EXPORT_SCALE) for s in shells]
     # the biggest shell is the base of the union
     shells.sort(key=lambda s: -abs(float(s.volume())))
     out = booleans_in_blender(shells, plate_z, blank, log=say)

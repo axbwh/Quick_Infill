@@ -385,6 +385,13 @@ class QuickInfillSettings(PropertyGroup):
                     "are deleted (like the Merge_Manifold geometry nodes)",
         default=True,
     )
+    manifold_regrow: BoolProperty(
+        name="Regrow",
+        description="Make Manifold grows every island by 0.0005 with Quick Infill's Grow (at its resolution "
+                    "tag) before cutting with the blank, so faces already cut against the blank are cut once, "
+                    "fresh. Off: no mesh is grown",
+        default=False,
+    )
     manifold_blank: PointerProperty(
         name="Intersect With", type=bpy.types.Object,
         description="Optional blank: Make Manifold intersects the united result with this object (read with its "

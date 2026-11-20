@@ -15,7 +15,7 @@ plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
        0.0005) is moved straight down on its own until its lowest point is
        SHIFT below the bottom; the rest stays where it is. Its bottom then gets
        one fresh cut instead of a second cut in exactly the same spot, which
-       leaves degenerate slivers. For the same reason, with a blank, every
+       leaves degenerate slivers. For the same reason, with Regrow on and a blank, every
        island is grown by SHIFT on its own with Quick Infill's own Grow
        (voxel offset at its own resolution tag, then its Auto Decimate), so faces already cut against
        the blank's walls stick out a hair past them and are cut once, fresh;
@@ -379,7 +379,7 @@ def grow_like_quick_infill(mesh, dist, voxel, ratio, mode):
 
 
 def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True,
-                  grow_settings=None, face_tags=None):
+                  grow_settings=None, face_tags=None, regrow=False):
     """meshes (meshlib, world space) -> (one watertight meshlib mesh, Health, Flatness or None).
 
     blank: closed meshlib mesh the union is intersected with (the tower blank). Its
@@ -388,6 +388,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     delete_islands: keep only the main body (no floating or inside shells).
     grow_settings: per mesh (voxel mm, ratio, decimate mode) for the SHIFT grow with a blank:
                    each object's resolution tag (as Quick Infill's Grow with Smart), else the panel's.
+    regrow: grow every island by SHIFT before the blank cut (see below). Off: nothing is grown.
     face_tags: per mesh, the resolution tag index of each of its faces (or None): an island
                with tagged faces grows at its own tag, the most common one among its faces.
     Must run on Blender's main thread (the booleans are Blender's).
@@ -441,7 +442,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
                 moved += 1
         if moved:
             say(f"{moved} island(s) ending at the bottom were moved down to {SHIFT:g} below it so they are cut fresh")
-    if blank is not None:
+    if regrow and blank is not None:
         # Every island grows by SHIFT on its own, with Quick Infill's own Grow (voxel offset at its
         # resolution tag, then its Auto Decimate): faces already cut against the blank (walls and
         # bottom) now stick out a hair past it and get ONE fresh cut. Island by island, so each

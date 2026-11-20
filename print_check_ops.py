@@ -165,6 +165,22 @@ class QUICKINFILL_OT_seal_cavities(ModalJobMixin, Operator):
         return JobSpec(prepare, compute, finish, items=1)
 
 
+STL_COLLECTION = "STLs"
+
+
+def stl_collection(scene):
+    """The collection Make Manifold puts its result in: "STLs" (made at the top of the scene if
+    there is none, and linked to the scene if it exists but is not in it)."""
+    coll = bpy.data.collections.get(STL_COLLECTION)
+    if coll is None:
+        coll = next((c for c in bpy.data.collections if c.name.lower() in ("stls", "stl") and c.library is None), None)
+    if coll is None:
+        coll = bpy.data.collections.new(STL_COLLECTION)
+    if coll not in scene.collection.children_recursive:
+        scene.collection.children.link(coll)
+    return coll
+
+
 def _meshlib_face_tags(obj, face_map, apply_modifiers):
     """The resolution tag index of each meshlib face of obj (from its polygons' qi_res_tag), or None."""
     from .blender_meshlib_utils import read_face_tags
@@ -192,7 +208,7 @@ class QUICKINFILL_OT_make_manifold(Operator):
                       "Manifold solver and make the flat cuts (Intersect With blank, Cut at Plate) on the same "
                       "object, like the Merge_Manifold geometry nodes. Delete Islands keeps only the main body. "
                       "Small holes left by triangulating are closed; self-intersections or zero-area faces are only "
-                      "reported. The originals are kept; the result is '<active>_Solid'")
+                      "reported. The originals are kept; the result is '<active>_Solid', in the STLs collection")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -208,7 +224,7 @@ class QUICKINFILL_OT_make_manifold(Operator):
             return {'CANCELLED'}
         active = context.active_object if context.active_object in objs else objs[0]
         name = active.name + "_Solid"
-        colls = list(active.users_collection) or [context.scene.collection]
+        colls = [stl_collection(context.scene)]
         notes = []
         try:
             meshes, face_tags = [], []
@@ -228,7 +244,8 @@ class QUICKINFILL_OT_make_manifold(Operator):
                                                             open_shell_voxel=float(s.check_voxel) * 0.5,
                                                             log=notes.append,
                                                             delete_islands=s.manifold_delete_islands,
-                                                            grow_settings=grow_settings, face_tags=face_tags)
+                                                            grow_settings=grow_settings, face_tags=face_tags,
+                                                            regrow=s.manifold_regrow)
         except JobCancelled:
             self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
             return {'CANCELLED'}
@@ -270,6 +287,7 @@ def draw_print_check(layout, context):
     row.operator("quick_infill.make_manifold", text="Make Manifold", icon='MESH_CUBE')
     row.prop(s, "manifold_cut_plate", text="Cut at Plate", toggle=True)
     row.prop(s, "manifold_delete_islands", text="Delete Islands", toggle=True)
+    row.prop(s, "manifold_regrow", text="Regrow", toggle=True)
     col.prop(s, "manifold_blank", text="Intersect With")
 
 

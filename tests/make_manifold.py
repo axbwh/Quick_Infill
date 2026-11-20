@@ -13,7 +13,7 @@ the blank's bottom / the plate, nothing pokes out of the blank, the originals ar
 meshlib repair is gone.
 Prints PASS / FAIL lines, counts and the time.
 """
-import bpy, sys, time, bmesh, addon_utils
+import bpy, sys, os, time, bmesh, addon_utils
 
 args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 if not hasattr(bpy.types.Scene, "quick_infill_settings"):
@@ -94,8 +94,9 @@ before = {o.name: snapshot(o) for o in objs}
 in_min = min(v.z for o in objs for v in world_co(o))
 check(not hasattr(MF, "repair") and not hasattr(MF, "tidy_after_cut"), "the meshlib repair is gone from make_manifold")
 
-def run(blank):
-    print("== with the blank" if blank is not None else "== no blank: Cut at Plate")
+def run(blank, regrow=False):
+    print(("== with the blank" + (", Regrow" if regrow else "")) if blank is not None else "== no blank: Cut at Plate")
+    s.manifold_regrow = regrow
     s.manifold_cut_plate = True
     s.check_plate = 'Z0'
     s.manifold_blank = blank
@@ -110,6 +111,7 @@ def run(blank):
     out = bpy.context.view_layer.objects.active
     check(out is not None and "_Solid" in out.name, f"result object {out.name if out else None}")
     if out is not None and "_Solid" in out.name:
+        check([c.name for c in out.users_collection] == ["STLs"], f"result in the STLs collection {[c.name for c in out.users_collection]}")
         me = out.data
         nb = bad_edges(me)
         check(nb == 0, f"closed: {nb} open / non-manifold edges")
@@ -166,6 +168,8 @@ def run(blank):
 
 
 run(blank)
+if not os.environ.get("MM_SKIP_REGROW"):
+    run(blank, regrow=True)
 run(None)
 check(all(snapshot(o) == before[o.name] for o in objs), "the originals are unchanged")
 

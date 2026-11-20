@@ -16,7 +16,8 @@ plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
        SHIFT below the bottom; the rest stays where it is. Its bottom then gets
        one fresh cut instead of a second cut in exactly the same spot, which
        leaves degenerate slivers. For the same reason, with a blank, every
-       stone is grown by SHIFT along its normals, so faces already cut against
+       stone is grown by SHIFT with Quick Infill's own Grow (voxel offset at its
+       resolution tag, then its Auto Decimate), so faces already cut against
        the blank's walls stick out a hair past them and are cut once, fresh;
     3. the n-gons the solver returns are split with Blender's Beauty
        triangulation; floating and inside islands are deleted (Merge_Manifold's
@@ -38,7 +39,7 @@ bpy part. Sizes in meshlib space (mm for Alex's files).
 import numpy as np
 
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy, check_cancelled
-from .offset_utils import cuda_offset, face_count
+from .offset_utils import cuda_offset, face_count, auto_decimate
 
 
 class Health:
@@ -308,31 +309,6 @@ def fill_holes(mesh):
 TINY_SHELL = 0.2       # mm: Merge_Manifold's tiny-island size (0.02 Blender units)
 
 
-def grow_shell(mesh, dist):
-    """A copy of a closed shell with every vertex pushed out along its (area-weighted)
-    normal by dist (mm). Faces that were cut against the blank before then stick out
-    a hair past it, so the intersection cuts them once, fresh, instead of again in
-    exactly the same spot."""
-    mn = get_mrmeshnumpy()
-    v = mn.getNumpyVerts(mesh).astype(np.float64)
-    f = mn.getNumpyFaces(mesh.topology).astype(np.int64)
-    if len(f) == 0:
-        return mesh
-    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])     # length = 2 x area
-    vn = np.zeros_like(v)
-    for k in range(3):
-        np.add.at(vn, f[:, k], fn)
-    ln = np.linalg.norm(vn, axis=1)
-    ok = ln > 1e-30
-    vn[ok] /= ln[ok, None]
-    vn[~ok] = 0.0
-    if float(mesh.volume()) < 0:
-        vn = -vn
-    out = mn.meshFromFacesVerts(np.ascontiguousarray(f.astype(np.int32)),
-                                np.ascontiguousarray((v + vn * float(dist)).astype(np.float32)))
-    return out
-
-
 def drop_small_shells(shells, min_size=TINY_SHELL):
     """Shells smaller than min_size (mm) in all three directions, left out before
     the union (Merge_Manifold's "Tiny Islands"). Returns (kept, how many dropped)."""
@@ -374,13 +350,28 @@ def keep_main_body(mesh):
     return removed
 
 
-def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True):
+def grow_like_quick_infill(mesh, dist, voxel, ratio, mode):
+    """Quick Infill's Grow on one object: meshlib voxel offset (cuda_offset) by dist at the
+    object's voxel size, then the same Auto Decimate (mode / ratio of its resolution tag,
+    or the panel's). Returns the grown mesh, or the mesh as it was if it collapsed."""
+    out = cuda_offset(mesh, float(voxel), float(dist))
+    if face_count(out) == 0:
+        return mesh
+    if mode != "OFF":
+        out = auto_decimate(out, face_count(mesh), float(voxel), mode, ratio)
+    return out
+
+
+def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True,
+                  grow_settings=None):
     """meshes (meshlib, world space) -> (one watertight meshlib mesh, Health, Flatness or None).
 
     blank: closed meshlib mesh the union is intersected with (the tower blank). Its
            lowest point is the bottom; plate_z is then ignored.
     plate_z: without a blank, everything below is cut away, leaving a flat face on the plate.
     delete_islands: keep only the main body (no floating or inside shells).
+    grow_settings: per mesh (voxel mm, ratio, decimate mode) for the SHIFT grow with a blank:
+                   each object's resolution tag (as Quick Infill's Grow with Smart), else the panel's.
     Must run on Blender's main thread (the booleans are Blender's).
     """
     say = log or (lambda msg: None)
@@ -416,6 +407,22 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
                 moved += 1
         if moved:
             say(f"{moved} object(s) ending at the bottom were moved down to {SHIFT:g} below it so they are cut fresh")
+    if blank is not None:
+        # Every stone grows by SHIFT with Quick Infill's own Grow (voxel offset at its resolution
+        # tag, then its Auto Decimate): faces already cut against the blank (walls and bottom)
+        # now stick out a hair past it and get ONE fresh cut. (Not for Cut at Plate alone: a
+        # stone edge lying exactly on the plate came out as doubled edges after growing.)
+        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        gs = grow_settings or [None] * len(meshes)
+        grown = []
+        for m, g in zip(meshes, gs):
+            check_cancelled()
+            if not face_count(m):
+                continue
+            voxel, ratio, mode = g if g is not None else (open_shell_voxel * 2.0, None, "VOXEL_RATIO")
+            grown.append(grow_like_quick_infill(m, SHIFT * STL_EXPORT_SCALE, voxel, ratio, mode))
+        meshes = grown
+        say(f"{len(grown)} object(s) grown by {SHIFT:g} with Quick Infill's Grow (each at its resolution tag)")
     shells = []
     for m in meshes:
         shells.extend(split_shells(m))
@@ -440,13 +447,6 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         say(f"{vanished} open speck(s) with no volume were left out")
     if not shells:
         raise ValueError("nothing to unite")
-    if blank is not None:
-        # every stone grows by SHIFT: faces already cut against the blank (walls and bottom)
-        # now stick out a hair past it and get ONE fresh cut. (Not for Cut at Plate alone:
-        # growing moves vertices by float rounding, and a stone edge lying exactly on the
-        # plate then comes out as doubled edges.)
-        from .blender_meshlib_utils import STL_EXPORT_SCALE
-        shells = [grow_shell(s, SHIFT * STL_EXPORT_SCALE) for s in shells]
     # the biggest shell is the base of the union
     shells.sort(key=lambda s: -abs(float(s.volume())))
     out = booleans_in_blender(shells, plate_z, blank, log=say)

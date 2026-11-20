@@ -2,22 +2,26 @@
 Make Manifold: turn a pile of overlapping closed meshes (stones, blank, infill,
 plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
 
-    1. every loose shell of the selection becomes its own clean temporary
-       object (world space, no modifiers) and Blender's Manifold boolean
-       unites them in one go (about a second for 550 stones). Shells that are
-       not closed are rebuilt through voxels first, because the Manifold
-       solver refuses open meshes;
-    2. the flat cuts are made, again with Blender's Manifold solver: the
-       intersection with the blank and / or the cut at the build plate;
-    3. vertices on the plate are set to its exact height, and the result is
-       measured: mesh health (holes, self-intersections, zero-area faces) and
-       how flat the bottom is. Nothing is repaired: what the check finds is
-       only reported.
+    1. every loose shell of the selection is taken apart; pieces under 0.2 mm
+       are left out, open ones are rebuilt through voxels (the Manifold solver
+       refuses open meshes);
+    2. on ONE temporary Blender object, Blender's Manifold boolean unites them
+       all, intersects with the blank and cuts at the plate. The mesh never goes
+       through meshlib between these booleans: that trip opened holes in the
+       union and the solver then silently skipped the cut. This is the same
+       order as Alex's "Merge_Manifold" geometry nodes. With a blank, its bottom
+       is the bottom and there is no plate cut. Before the cut the whole union
+       is moved straight down by SHIFT (0.0005): bottoms that were already cut
+       flat there get one fresh cut instead of a second cut in exactly the same
+       spot, which leaves degenerate slivers;
+    3. the n-gons the solver returns are split with Blender's Beauty
+       triangulation; floating and inside islands are deleted (Merge_Manifold's
+       Delete Islands); the few small holes the triangulation leaves are closed
+       (new triangles only, nothing moves); no vertex is snapped: the bottom is
+       the boolean's own cut plane; health and flatness are measured and reported.
 
-There is no meshlib repair step any more (Alex 2026-11-20: it did not work
-right). The old one fixed self-intersections (SelfIntersections.fix) and
-zero-area faces (fixMeshDegeneracies, edge flips, cut and refill), and it
-could move or re-mesh surface next to the defects.
+There is no meshlib self-intersection or zero-area repair (Alex 2026-11-20: it
+did not work right). What the check finds is only reported.
 
 Why not meshlib's own union (uniteManyMeshes)? Measured on the 550-piece
 tower it silently lost about 5% of the solid volume. Blender's Manifold union
@@ -98,22 +102,6 @@ def close_open_shell(mesh, voxel):
     out = cuda_offset(mesh, float(voxel), 0.0)
     out.pack()
     return out
-
-
-def snap_to_plate(mesh, plate_z, tolerance=1e-3):
-    """Vertices within `tolerance` (mm) of the plate get its exact height. Returns how many moved."""
-    mm, _ = get_meshlib()
-    z = float(plate_z)
-    v = get_mrmeshnumpy().getNumpyVerts(mesh)
-    idx = np.nonzero((np.abs(v[:, 2] - z) < tolerance) & (v[:, 2] != np.float32(z)))[0]
-    if len(idx) == 0:
-        return 0
-    pts = mesh.points.vec
-    for i in idx:
-        pt = pts[int(i)]
-        pts[int(i)] = mm.Vector3f(pt.x, pt.y, z)
-    mesh.invalidateCaches()
-    return int(len(idx))
 
 
 class Flatness:
@@ -216,70 +204,162 @@ class _Scratch:
         return False
 
 
-def union_in_blender(shells):
-    """Unite meshlib meshes (each one a closed shell) with Blender's Manifold
-    boolean. Returns a meshlib mesh. Nothing is left in the file."""
-    from .blender_meshlib_utils import blender_to_meshlib
+def _counts(ob):
+    return len(ob.data.vertices), len(ob.data.polygons)
+
+
+def _plate_cutter(tmp, base, z):
+    """A box under Blender height z, a little wider than base. None if base is all above z."""
+    bpy = tmp.bpy
+    co = np.empty(len(base.data.vertices) * 3, dtype=np.float32)
+    base.data.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    lo, hi = co.min(axis=0), co.max(axis=0)
+    if lo[2] >= z:
+        return None
+    pad = 1.0
+    x0, x1, y0, y1, zb = (float(lo[0]) - pad, float(hi[0]) + pad, float(lo[1]) - pad, float(hi[1]) + pad,
+                          float(lo[2]) - pad)
+    cme = bpy.data.meshes.new("QI_tmp_cutter")
+    cme.from_pydata([(x0, y0, zb), (x1, y0, zb), (x1, y1, zb), (x0, y1, zb),
+                     (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)], [],
+                    [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)])
+    cme.update()
+    return tmp.add(cme, "QI_tmp_cutter", in_collection=False)
+
+
+SHIFT = 0.0005   # Blender units: the union is moved down this much before the flat cuts (see booleans_in_blender)
+
+
+def booleans_in_blender(shells, plate_z=None, blank=None, log=None):
+    """Union of meshlib shells, then the flat cuts (intersect with `blank`, remove
+    everything below plate_z), all with Blender's Manifold solver on ONE scratch
+    object, the way Alex's "Merge_Manifold" geometry nodes do it. The mesh never
+    leaves Blender between the booleans: a trip through meshlib in between opened
+    holes in the union, and the Manifold solver then silently skipped the cut.
+    Returns a meshlib mesh. Nothing is left in the file."""
+    from .blender_meshlib_utils import blender_to_meshlib, STL_EXPORT_SCALE
+    say = log or (lambda msg: None)
     with _Scratch() as tmp:
         base = tmp.add(shells[0], "QI_tmp_0000", in_collection=False)
         for i, m in enumerate(shells[1:], 1):
             tmp.add(m, f"QI_tmp_{i:04d}")
         if len(shells) > 1:
+            before = _counts(base)
+
             def setup(mod):
                 mod.operation = 'UNION'
                 mod.operand_type = 'COLLECTION'
                 mod.collection = tmp.coll
             tmp.boolean(base, setup)
-        return blender_to_meshlib(base)
-
-
-def cut_in_blender(mesh, plate_z=None, blank=None):
-    """Flat cuts with Blender's Manifold boolean: intersect with `blank` (a
-    closed meshlib mesh) and / or remove everything below plate_z. Returns a meshlib mesh."""
-    from .blender_meshlib_utils import blender_to_meshlib, STL_EXPORT_SCALE
-    if blank is None and plate_z is None:
-        return mesh
-    with _Scratch() as tmp:
-        bpy = tmp.bpy
-        base = tmp.add(mesh, "QI_tmp_base", in_collection=False)
+            if _counts(base) == before:
+                say("WARNING: Blender's Manifold union did not run (an input is not a closed solid)")
+        check_cancelled()
+        if (blank is not None or plate_z is not None) and len(base.data.vertices):
+            # Stones were often cut flat at the bottom already (against the blank or at the
+            # plate). Cutting again in exactly the same spot leaves degenerate slivers from
+            # rounding, so the whole union is moved straight down by SHIFT first: those
+            # bottoms now sit just below the cut and get ONE fresh cut on the cut plane.
+            from mathutils import Matrix
+            base.data.transform(Matrix.Translation((0.0, 0.0, -SHIFT)))
+            base.data.update()
         if blank is not None:
-            other = tmp.add(blank, "QI_tmp_blank")
+            other = tmp.add(blank, "QI_tmp_blank", in_collection=False)
+            before = _counts(base)
 
-            def setup(mod):
+            def setup_blank(mod):
                 mod.operation = 'INTERSECT'
                 mod.operand_type = 'OBJECT'
                 mod.object = other
-            tmp.boolean(base, setup)
+            tmp.boolean(base, setup_blank)
+            if _counts(base) == before:
+                say("WARNING: the intersection with the blank did not change anything (Blender's Manifold "
+                    "solver skips it when the union is not closed)")
         if plate_z is not None and len(base.data.vertices):
-            co = np.empty(len(base.data.vertices) * 3, dtype=np.float32)
-            base.data.vertices.foreach_get("co", co)
-            co = co.reshape(-1, 3)
-            lo, hi = co.min(axis=0), co.max(axis=0)
-            z = float(plate_z) / STL_EXPORT_SCALE
-            if lo[2] < z:
-                pad = 1.0
-                x0, x1, y0, y1, zb = (float(lo[0]) - pad, float(hi[0]) + pad, float(lo[1]) - pad, float(hi[1]) + pad,
-                                      float(lo[2]) - pad)
-                cme = bpy.data.meshes.new("QI_tmp_cutter")
-                cme.from_pydata([(x0, y0, zb), (x1, y0, zb), (x1, y1, zb), (x0, y1, zb),
-                                 (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)], [],
-                                [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)])
-                cme.update()
-                cutter = tmp.add(cme, "QI_tmp_cutter")
+            cutter = _plate_cutter(tmp, base, float(plate_z) / STL_EXPORT_SCALE)
+            if cutter is not None:
+                before = _counts(base)
 
                 def setup_cut(mod):
                     mod.operation = 'DIFFERENCE'
                     mod.operand_type = 'OBJECT'
                     mod.object = cutter
                 tmp.boolean(base, setup_cut)
+                if _counts(base) == before:
+                    say("WARNING: the cut at the plate did not run")
+        # The Manifold solver hands back big n-gons; split them here with Blender's
+        # "Beauty" triangulation (far fewer slivers than splitting them later).
+        import bmesh
+        bm = bmesh.new()
+        bm.from_mesh(base.data)
+        bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='BEAUTY')
+        bm.to_mesh(base.data)
+        bm.free()
         return blender_to_meshlib(base)
 
 
-def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None):
+def fill_holes(mesh):
+    """Close the few small holes left where Blender's n-gons could not be split
+    cleanly into triangles. Only new triangles are added across each hole: no
+    existing vertex moves, nothing is smoothed. Returns how many holes were filled."""
+    mm, _ = get_meshlib()
+    holes = mesh.topology.findHoleRepresentiveEdges()
+    for e in holes:
+        mm.fillHole(mesh, e, mm.FillHoleParams())
+    return len(holes)
+
+
+TINY_SHELL = 0.2       # mm: Merge_Manifold's tiny-island size (0.02 Blender units)
+
+
+def drop_small_shells(shells, min_size=TINY_SHELL):
+    """Shells smaller than min_size (mm) in all three directions, left out before
+    the union (Merge_Manifold's "Tiny Islands"). Returns (kept, how many dropped)."""
+    kept = []
+    for s in shells:
+        bb = s.computeBoundingBox()
+        if max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z) < min_size:
+            continue
+        kept.append(s)
+    return kept, len(shells) - len(kept)
+
+
+def keep_main_body(mesh):
+    """Merge_Manifold's "Delete Islands": every loose shell smaller than the biggest
+    size along every axis (floating crumbs, sealed voids inside the solid) is
+    deleted; a shell that reaches the full size along at least one axis stays.
+    Whole shells only: nothing that is kept moves. Returns how many were deleted."""
+    mm, _ = get_meshlib()
+    mn = get_mrmeshnumpy()
+    comps = mm.MeshComponents.getAllComponents(mm.MeshPart(mesh))
+    if len(comps) <= 1:
+        return 0
+    v = mn.getNumpyVerts(mesh).astype(np.float64)
+    f = mn.getNumpyFaces(mesh.topology)
+    sizes = []
+    for c in comps:
+        bits = mn.getNumpyBitSet(c)[:len(f)]
+        pts = v[np.unique(f[np.nonzero(bits)[0]].ravel())]
+        sizes.append(pts.max(axis=0) - pts.min(axis=0))
+    sizes = np.array(sizes)
+    biggest = sizes.max(axis=0)
+    removed = 0
+    for c, sz in zip(comps, sizes):
+        if (sz < biggest - 1e-6).all():
+            mesh.deleteFaces(c)
+            removed += 1
+    if removed:
+        mesh.pack()
+    return removed
+
+
+def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True):
     """meshes (meshlib, world space) -> (one watertight meshlib mesh, Health, Flatness or None).
 
-    blank: closed meshlib mesh the union is intersected with (the tower blank).
-    plate_z: everything below is cut away, leaving a flat face on the plate.
+    blank: closed meshlib mesh the union is intersected with (the tower blank). Its
+           lowest point is the bottom; plate_z is then ignored.
+    plate_z: without a blank, everything below is cut away, leaving a flat face on the plate.
+    delete_islands: keep only the main body (no floating or inside shells).
     Must run on Blender's main thread (the booleans are Blender's).
     """
     say = log or (lambda msg: None)
@@ -287,8 +367,9 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     for m in meshes:
         shells.extend(split_shells(m))
     shells = [s for s in shells if face_count(s) > 0]
-    if not shells:
-        raise ValueError("nothing to unite")
+    shells, tiny = drop_small_shells(shells)
+    if tiny:
+        say(f"{tiny} tiny piece(s) under {TINY_SHELL:g} mm were left out")
     reopened = vanished = 0
     kept = []
     for s in shells:
@@ -308,16 +389,29 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         raise ValueError("nothing to unite")
     if blank is not None and not blank.topology.isClosed():
         raise ValueError("the blank is not a closed mesh, so it cannot be used for the intersection")
+    # With a blank, its flat bottom IS the bottom: no plate cut (a second cut in the same
+    # spot only makes slivers). Without one, Cut at Plate makes the bottom.
+    bottom_z = None
+    if blank is not None:
+        bottom_z = float(blank.computeBoundingBox().min.z)
+        if plate_z is not None:
+            say("the blank's bottom is the bottom: no cut at the plate")
+        plate_z = None
+    elif plate_z is not None:
+        bottom_z = float(plate_z)
     # the biggest shell is the base of the union
     shells.sort(key=lambda s: -abs(float(s.volume())))
-    out = union_in_blender(shells)
+    out = booleans_in_blender(shells, plate_z, blank, log=say)
     check_cancelled()
-    if plate_z is not None or blank is not None:
-        out = cut_in_blender(out, plate_z, blank)
-        if plate_z is not None:
-            snap_to_plate(out, plate_z)
+    if delete_islands:
+        n = keep_main_body(out)
+        if n:
+            say(f"{n} floating or inside island(s) were deleted")
+    n = fill_holes(out)
+    if n:
+        say(f"{n} small hole(s) left by splitting Blender's n-gons into triangles were closed")
     if out.topology.numValidFaces() != out.topology.faceSize():
         out.pack()
     health = Health(out)
-    flat = Flatness(out, plate_z) if plate_z is not None else None
+    flat = Flatness(out, bottom_z) if bottom_z is not None else None
     return out, health, flat

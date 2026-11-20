@@ -379,6 +379,12 @@ class QuickInfillSettings(PropertyGroup):
         name="Cut at Plate", description="Make Manifold also cuts the result flat at the build plate (world Z = 0)",
         default=True,
     )
+    manifold_delete_islands: BoolProperty(
+        name="Delete Islands",
+        description="Make Manifold keeps only the main body: floating pieces and sealed pockets inside the solid "
+                    "are deleted (like the Merge_Manifold geometry nodes)",
+        default=True,
+    )
     manifold_blank: PointerProperty(
         name="Intersect With", type=bpy.types.Object,
         description="Optional blank: Make Manifold intersects the united result with this object (read with its "

@@ -10,10 +10,12 @@ plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
        through meshlib between these booleans: that trip opened holes in the
        union and the solver then silently skipped the cut. This is the same
        order as Alex's "Merge_Manifold" geometry nodes. With a blank, its bottom
-       is the bottom and there is no plate cut. Before the cut the whole union
-       is moved straight down by SHIFT (0.0005): bottoms that were already cut
-       flat there get one fresh cut instead of a second cut in exactly the same
-       spot, which leaves degenerate slivers;
+       is the bottom and there is no plate cut. Before that, each object that
+       ends at the bottom (within SHIFT below to 2 x SHIFT above it, SHIFT =
+       0.0005) is moved straight down on its own until its lowest point is
+       SHIFT below the bottom; the rest stays where it is. Its bottom then gets
+       one fresh cut instead of a second cut in exactly the same spot, which
+       leaves degenerate slivers;
     3. the n-gons the solver returns are split with Blender's Beauty
        triangulation; floating and inside islands are deleted (Merge_Manifold's
        Delete Islands); the few small holes the triangulation leaves are closed
@@ -228,7 +230,7 @@ def _plate_cutter(tmp, base, z):
     return tmp.add(cme, "QI_tmp_cutter", in_collection=False)
 
 
-SHIFT = 0.0005   # Blender units: the union is moved down this much before the flat cuts (see booleans_in_blender)
+SHIFT = 0.0005   # Blender units: objects sitting exactly on the bottom are moved down this much (see make_manifold)
 
 
 def booleans_in_blender(shells, plate_z=None, blank=None, log=None):
@@ -255,14 +257,6 @@ def booleans_in_blender(shells, plate_z=None, blank=None, log=None):
             if _counts(base) == before:
                 say("WARNING: Blender's Manifold union did not run (an input is not a closed solid)")
         check_cancelled()
-        if (blank is not None or plate_z is not None) and len(base.data.vertices):
-            # Stones were often cut flat at the bottom already (against the blank or at the
-            # plate). Cutting again in exactly the same spot leaves degenerate slivers from
-            # rounding, so the whole union is moved straight down by SHIFT first: those
-            # bottoms now sit just below the cut and get ONE fresh cut on the cut plane.
-            from mathutils import Matrix
-            base.data.transform(Matrix.Translation((0.0, 0.0, -SHIFT)))
-            base.data.update()
         if blank is not None:
             other = tmp.add(blank, "QI_tmp_blank", in_collection=False)
             before = _counts(base)
@@ -363,6 +357,38 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     Must run on Blender's main thread (the booleans are Blender's).
     """
     say = log or (lambda msg: None)
+    if blank is not None and not blank.topology.isClosed():
+        raise ValueError("the blank is not a closed mesh, so it cannot be used for the intersection")
+    # With a blank, its flat bottom IS the bottom: no plate cut (a second cut in the same
+    # spot only makes slivers). Without one, Cut at Plate makes the bottom.
+    bottom_z = None
+    if blank is not None:
+        bottom_z = float(blank.computeBoundingBox().min.z)
+        if plate_z is not None:
+            say("the blank's bottom is the bottom: no cut at the plate")
+        plate_z = None
+    elif plate_z is not None:
+        bottom_z = float(plate_z)
+    if bottom_z is not None:
+        # Stones often end at the bottom already (cut there against the blank or at the plate
+        # before), or a hair above or below it. Cutting again in exactly the same spot leaves
+        # degenerate slivers from rounding, so each of those OBJECTS (only those; the rest
+        # stays where it is) is moved straight down, on its own, until its lowest point is
+        # SHIFT below the bottom: it then gets ONE fresh cut on the cut plane.
+        from .blender_meshlib_utils import STL_EXPORT_SCALE
+        mm, _ = get_meshlib()
+        d = SHIFT * STL_EXPORT_SCALE
+        moved = 0
+        for m in meshes:
+            if not face_count(m):
+                continue
+            gap = float(m.computeBoundingBox().min.z) - bottom_z
+            if -d <= gap <= 2.0 * d:
+                # each by its own amount: its lowest point ends SHIFT below the bottom
+                m.transform(mm.AffineXf3f.translation(mm.Vector3f(0.0, 0.0, -(gap + d))))
+                moved += 1
+        if moved:
+            say(f"{moved} object(s) ending at the bottom were moved down to {SHIFT:g} below it so they are cut fresh")
     shells = []
     for m in meshes:
         shells.extend(split_shells(m))
@@ -387,18 +413,6 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         say(f"{vanished} open speck(s) with no volume were left out")
     if not shells:
         raise ValueError("nothing to unite")
-    if blank is not None and not blank.topology.isClosed():
-        raise ValueError("the blank is not a closed mesh, so it cannot be used for the intersection")
-    # With a blank, its flat bottom IS the bottom: no plate cut (a second cut in the same
-    # spot only makes slivers). Without one, Cut at Plate makes the bottom.
-    bottom_z = None
-    if blank is not None:
-        bottom_z = float(blank.computeBoundingBox().min.z)
-        if plate_z is not None:
-            say("the blank's bottom is the bottom: no cut at the plate")
-        plate_z = None
-    elif plate_z is not None:
-        bottom_z = float(plate_z)
     # the biggest shell is the base of the union
     shells.sort(key=lambda s: -abs(float(s.volume())))
     out = booleans_in_blender(shells, plate_z, blank, log=say)

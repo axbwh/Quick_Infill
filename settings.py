@@ -387,9 +387,10 @@ class QuickInfillSettings(PropertyGroup):
     )
     manifold_regrow: BoolProperty(
         name="Regrow",
-        description="Make Manifold grows every island by 0.0005 with Quick Infill's Grow (at its resolution "
-                    "tag) before cutting with the blank, so faces already cut against the blank are cut once, "
-                    "fresh. Off: no mesh is grown",
+        description="Make Manifold grows the islands that reach the blank's surface (outside it, or cut flush "
+                    "against it) by 0.0005 with Quick Infill's Grow (at their resolution tag) before cutting with "
+                    "the blank, so they are cut once, fresh. Islands inside the blank are not grown. Off: no mesh "
+                    "is grown",
         default=False,
     )
     manifold_blank: PointerProperty(

@@ -388,7 +388,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     delete_islands: keep only the main body (no floating or inside shells).
     grow_settings: per mesh (voxel mm, ratio, decimate mode) for the SHIFT grow with a blank:
                    each object's resolution tag (as Quick Infill's Grow with Smart), else the panel's.
-    regrow: grow every island by SHIFT before the blank cut (see below). Off: nothing is grown.
+    regrow: grow the islands that reach the blank's surface by SHIFT before the blank cut. Off: nothing is grown.
     face_tags: per mesh, the resolution tag index of each of its faces (or None): an island
                with tagged faces grows at its own tag, the most common one among its faces.
     Must run on Blender's main thread (the booleans are Blender's).
@@ -448,7 +448,12 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         # bottom) now stick out a hair past it and get ONE fresh cut. Island by island, so each
         # voxel grid is only as big as that island. (Not for Cut at Plate alone: a stone edge
         # lying exactly on the plate came out as doubled edges after growing.)
+        # Only islands that reach the blank's surface are grown: some part outside it, or within
+        # SHIFT of it (a stone cut flush against the blank before). Islands fully inside are left.
+        mm, _ = get_meshlib()
+        d = SHIFT * STL_EXPORT_SCALE
         grown = []
+        n_grown = 0
         kept_tiny, _ = drop_small_shells([sh for sh, _ in shells])
         keep = {id(x) for x in kept_tiny}
         for sh, g in shells:
@@ -456,10 +461,16 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
             if id(sh) not in keep:
                 grown.append((sh, g))        # left out as a tiny piece just below: not worth growing
                 continue
+            reach = float(np.max(np.asarray(mm.findSignedDistances(blank, sh).vec)))
+            if reach <= -d:
+                grown.append((sh, g))        # fully inside the blank: nothing to cut fresh
+                continue
             voxel, ratio, mode = g if g is not None else (open_shell_voxel * 2.0, None, "VOXEL_RATIO")
-            grown.append((grow_like_quick_infill(sh, SHIFT * STL_EXPORT_SCALE, voxel, ratio, mode), g))
+            grown.append((grow_like_quick_infill(sh, d, voxel, ratio, mode), g))
+            n_grown += 1
         shells = grown
-        say(f"{len(grown)} island(s) grown by {SHIFT:g} one by one with Quick Infill's Grow (each at its resolution tag)")
+        say(f"{n_grown} island(s) reaching the blank's surface grown by {SHIFT:g} with Quick Infill's Grow "
+            f"(each at its resolution tag); {len(grown) - n_grown} left as they were")
     shells = [s for s, _ in shells]
     shells, tiny = drop_small_shells(shells)
     if tiny:

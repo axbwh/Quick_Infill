@@ -169,9 +169,10 @@ class QUICKINFILL_OT_make_manifold(Operator):
     bl_idname = "quick_infill.make_manifold"
     bl_label = "Make Manifold"
     bl_description = ("Unite the selected objects (stones, infill, plugs) into ONE watertight object with Blender's "
-                      "Manifold solver, then make the flat cuts (Intersect With blank, Cut at Plate). Nothing is "
-                      "repaired afterwards: self-intersections or zero-area faces left are only reported. The "
-                      "originals are kept; the result is '<active>_Solid'")
+                      "Manifold solver and make the flat cuts (Intersect With blank, Cut at Plate) on the same "
+                      "object, like the Merge_Manifold geometry nodes. Delete Islands keeps only the main body. "
+                      "Small holes left by triangulating are closed; self-intersections or zero-area faces are only "
+                      "reported. The originals are kept; the result is '<active>_Solid'")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -191,13 +192,19 @@ class QUICKINFILL_OT_make_manifold(Operator):
         notes = []
         try:
             meshes = [blender_to_meshlib(o, s.apply_modifiers_on_export) for o in objs]
+            # the grow before the blank cut is Quick Infill's Grow: each object's resolution tag
+            # (voxel size + decimate ratio), else the panel's voxel size and decimate setting
+            from .blender_meshlib_utils import _effective_settings
+            grow_settings = [_effective_settings(o, s, float(s.shared_voxel_size), True) for o in objs]
             # the blank is read as you see it: with its modifiers
             blank = blender_to_meshlib(blank_obj, True) if blank_obj is not None else None
             # with "Lowest Point" the plate already touches the model: nothing to cut
             plate = 0.0 if (s.manifold_cut_plate and s.check_plate == 'Z0') else None
             out, health, flat = make_manifold.make_manifold(meshes, plate_z=plate, blank=blank,
                                                             open_shell_voxel=float(s.check_voxel) * 0.5,
-                                                            log=notes.append)
+                                                            log=notes.append,
+                                                            delete_islands=s.manifold_delete_islands,
+                                                            grow_settings=grow_settings)
         except JobCancelled:
             self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
             return {'CANCELLED'}
@@ -238,6 +245,7 @@ def draw_print_check(layout, context):
     row = col.row(align=True)
     row.operator("quick_infill.make_manifold", text="Make Manifold", icon='MESH_CUBE')
     row.prop(s, "manifold_cut_plate", text="Cut at Plate", toggle=True)
+    row.prop(s, "manifold_delete_islands", text="Delete Islands", toggle=True)
     col.prop(s, "manifold_blank", text="Intersect With")
 
 

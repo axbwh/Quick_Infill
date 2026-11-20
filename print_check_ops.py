@@ -244,7 +244,8 @@ class QUICKINFILL_OT_make_manifold(Operator):
                                                             open_shell_voxel=float(s.check_voxel) * 0.5,
                                                             log=notes.append,
                                                             delete_islands=s.manifold_delete_islands,
-                                                            grow_settings=grow_settings, face_tags=face_tags)
+                                                            grow_settings=grow_settings, face_tags=face_tags,
+                                                            regrow=s.manifold_regrow)
         except JobCancelled:
             self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
             return {'CANCELLED'}
@@ -286,6 +287,7 @@ def draw_print_check(layout, context):
     row.operator("quick_infill.make_manifold", text="Make Manifold", icon='MESH_CUBE')
     row.prop(s, "manifold_cut_plate", text="Cut at Plate", toggle=True)
     row.prop(s, "manifold_delete_islands", text="Delete Islands", toggle=True)
+    row.prop(s, "manifold_regrow", text="Regrow", toggle=True)
     col.prop(s, "manifold_blank", text="Intersect With")
 
 

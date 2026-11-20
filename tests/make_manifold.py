@@ -110,6 +110,7 @@ def run(blank):
     out = bpy.context.view_layer.objects.active
     check(out is not None and "_Solid" in out.name, f"result object {out.name if out else None}")
     if out is not None and "_Solid" in out.name:
+        check([c.name for c in out.users_collection] == ["STLs"], f"result in the STLs collection {[c.name for c in out.users_collection]}")
         me = out.data
         nb = bad_edges(me)
         check(nb == 0, f"closed: {nb} open / non-manifold edges")

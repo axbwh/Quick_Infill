@@ -892,6 +892,16 @@ def size_depth(th):
     return float(k0 + (k1 - k0) * np.clip((th - t0) / (t1 - t0), 0.0, 1.0))
 
 
+SQUARE_SPAN = 30.0     # deg: an arris within this of 90 deg keeps its strokes in the detail too, fully at 90 (Alex 23 Nov:
+#                        "more chipping on the thin arch's 90 degree edges": they border its curved sides, not a big flat
+#                        face, and kept 15 %); knife edges (over 120 deg) stay light
+
+
+def square(angle):
+    """1 at a 90-degree arris, down to 0 SQUARE_SPAN either side."""
+    return float(np.clip(1.0 - abs(float(angle) - 90.0) / SQUARE_SPAN, 0.0, 1.0))
+
+
 def _hard(angle, rng_):
     """HARD_DEPTH / HARD_KEEP at an edge turning `angle` degrees."""
     h = float(np.clip((angle - HARD_ANGLE[0]) / (HARD_ANGLE[1] - HARD_ANGLE[0]), 0.0, 1.0))
@@ -988,6 +998,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             k_keep = keep if on_flat[r] else keep * DETAIL_KEEP * (float(np.clip(
                 (caps[r] / (STROKE_DEPTH * W)) ** 2, DETAIL_KEEP_MIN, 1.0)) if np.isfinite(caps[r]) else 1.0)
             k_keep = min(1.0, k_keep * _hard(angs[r], HARD_KEEP))     # (a 90-degree arris: every stroke)
+            k_keep = max(k_keep, keep * square(angs[r]))   # (a square arris in the detail too: the thin arch's long edges)
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W

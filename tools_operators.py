@@ -304,6 +304,8 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         from .blender_meshlib_utils import STL_EXPORT_SCALE
         size, amount = float(s.trim_edges_chip_size), float(s.trim_edges_chip_amount)
         dsize, damount = float(s.trim_edges_chip_dent_size), float(s.trim_edges_chip_dents)
+        auto = bool(getattr(s, "trim_edges_chip_auto", False))
+        from .blender_meshlib_utils import Retagged
         only_cut = bool(s.trim_edges_only_cut)
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
 
@@ -326,8 +328,9 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                     cut = detect_cut_faces(mesh, STL_EXPORT_SCALE)
                 if cut is None or not np.any(cut):
                     return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
-            return dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
-                             dent_size=dsize, dent_amount=damount)[0]
+            out, tag = dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
+                                 dent_size=dsize, dent_amount=damount, auto=auto)
+            return Retagged(out, tag) if tag else out      # (Auto Detail: tagged with what it worked out)
 
         # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
         # whose marks are per object
@@ -335,7 +338,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                              on_prepared=on_prepared,
                              process_job=None if only_cut else
                              ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
-                                                 damount)))
+                                                 damount, auto)))
 
     def _lean_round_setup(self, context, s):
         """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an

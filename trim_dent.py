@@ -48,7 +48,8 @@ def _ml():
 
 CREASE_DEG = 25.0      # an edge is sharp when its faces turn at least this much (a bevel of two 25 deg facets still counts)
 MIN_RUN = 0.08         # BU: crease runs shorter than this in all are sculpt noise, not stone edges
-AMOUNT = 2.5           # chips per BU of sharp edge (the "Amount" slider), corners come on top
+AMOUNT = 8.0           # the "Amount" slider: the share of the long edges chiselled is AMOUNT / (AMOUNT + 1), 8: 89 %
+#                        (Alex's example covers its main edges end to end)
 CORNER_CHANCE = 0.75   # a corner (three or more sharp edges, or two meeting at a turn) gets a chip this often
 CORNER_TURN = 45.0     # deg: two sharp edges at a vertex that turn more than this make a corner
 CORNER_SCALE = 1.25    # corner chips are this much bigger
@@ -203,8 +204,17 @@ FLOOR_SHARE = 0.6      # ... its floor this share of the opening (wider than Car
 #                        leaves a flat chamfer, as in Alex's example, not a dark slot) ...
 ABOVE = 0.6            # ... and the cutter runs on straight up this far above the surface, x the opening
 STEP_SHARE = 0.35      # the stroke's rings this far apart, x the opening
-STROKE_LEN = (3.0, 10.0)   # a stroke's length, x its opening (Alex's example: long strips along the main edges)
-STROKE_GAP = (0.2, 1.2)    # x the opening between one stroke and the next along a run
+# (measured 2026-11-23 on Alex's hand strokes, Tna_Stone_006.001, sections every 0.02 BU along its top front edge: the
+# cut 0.011 - 0.021 BU deep along the arris' bisector, steady within a stroke, stepping ~30 % from one stroke to the next
+# every 0.2 - 0.4 BU, the whole edge covered; its corner chips 0.086 and 0.136 deep, one flat facet each)
+STROKE_LEN = (5.0 * 0.7, 5.0 * 1.3)   # a stroke's length, x its opening: 5 +- 30 % (Alex: "vary by 30% the depth/length
+#                                       of entire strokes")
+STROKE_GAP = (-0.3, 0.3)   # x the opening between one stroke and the next along a run (they run on into each other)
+STROKE_DEPTH = 0.25        # how deep a stroke cuts in from the arris, x its opening (0.016 BU at 0.066) ...
+STROKE_DEPTH_VAR = 0.3     # ... +- this, the whole stroke alike
+STROKE_BEND = 0.12         # a stroke is one gentle bend: its middle off the edge's line by up to this x its opening,
+#                            sideways, and up to STROKE_BEND_UP x its depth in and out
+STROKE_BEND_UP = 0.25
 RUN_MIN = 4.0          # x the opening: a run shorter than this gets no stroke, nor its corners (the facets of a
 #                        rough, sculpted side: Alex's example leaves those as they are)
 EASE = 0.8             # its ends lift out of the stone over this much, x the opening (Carve's ends)
@@ -213,6 +223,34 @@ STROKE_SINK = (-0.2, 0.05)    # x the depth: a stroke sits this much deeper (-) 
 STROKE_TILT = 8.0      # deg: and its axis is tipped at random by up to this much
 CORNER_STROKE = (0.8, 1.6)   # a corner's stroke: this long (x the opening) ...
 CORNER_PAST = 0.4      # ... starting this far past the corner
+# Alex 2026-11-23 round 2: "more randomness and jitter to them, varying the width and depth as they go along, and hit
+# raised corners harder"
+JIT_WIDTH = 0.0        # (along a stroke nothing wanders: Alex wants single strokes, varied as a whole)
+JIT_DEPTH = 0.0
+JIT_SINK = 0.0
+JIT_WAVE = (1.2, 4.0)  # over waves this long (x the opening), two of them added
+RAISED_EDGES = 3       # a corner where this many sharp convex edges meet stands out: a raised corner ...
+RAISED_DEPTH = (4.0, 7.0)   # ... knocked off with one flat chip this many times a stroke's depth deep (Alex's example:
+#                             0.086 and 0.136 against 0.011 - 0.021 on the edge) ...
+RAISED_TILT = 15.0     # ... its face tipped at random by up to this much
+# sizes from the part's own detail (Alex: "automatically work out how much material to remove based on the level of
+# detail of each part, replacing the resolution tagging"): meshlib's ray thickness (how much stone stands behind each
+# point, measured straight in) at the edge sets that stroke's chisel; the part's thinnest tenth sets Trim Thin's voxel
+AUTO_SHARE = 0.2       # a stroke's opening: this share of the stone's thickness at its edge ...
+AUTO_RANGE = (0.012, 0.09)   # ... BU, held in here (0.12 - 0.9 mm), then x the Size slider
+# Alex 2026-11-23: "the width of the stroke on higher detail model should not change much, rather, the depth should
+# vary [not] to cut off too much": the chisel stays Carve's width; the detail holds how deep it may go
+DEPTH_SPACING = 0.25   # a stroke cuts in at most this share of the distance to the next sharp edge (a moulding's
+#                        fillets stay) ...
+DEPTH_THICK = 0.1      # ... and at most this share of the stone's thickness behind its edge (a cusp tip or a leaf only
+#                        gets touched: no hole, no sliver)
+SPACING_SHARE = 0.6    # (no longer sets the width) the distance to the next sharp edge (a moulding's fillets lie a
+#                        fraction of a mm apart: a chisel sized from the stone behind them cut through the whole profile)
+RES_SHARE = 0.25       # Trim Thin's voxel at most this share of the part's thin features (10th percentile thickness):
+#                        it takes off what is thinner than two voxels
+DETAIL_TOL = 0.005      # BU (0.05 mm, the finest detail Alex works at): a resolution keeps a part's detail when,
+#                        remeshed and decimated at it, its surface stays this close (99 % of its points). (Every part
+#                        is 0.03 - 0.07 mm off at Stone from the voxels alone; 0.02 mm sent plain stones to Mini.)
 
 
 def depth_of(W):
@@ -234,7 +272,7 @@ def runs(p0, p1, v0, v1, nl, nr):
     chains = []
 
     def walk(start):
-        pts, L, R = [pos[start]], [], []
+        pts, L, R, ids = [pos[start]], [], [], [start]
         v = start
         while True:
             nxt = [(k, w) for k, w in adj[v] if not used[k]]
@@ -243,22 +281,23 @@ def runs(p0, p1, v0, v1, nl, nr):
             k, w = nxt[0]
             used[k] = True
             pts.append(pos[w])
+            ids.append(w)
             L.append(nl[k])
             R.append(nr[k])
             v = w
             if v == start:
                 break
-        return pts, L, R
+        return pts, L, R, ids
 
     ends = [v for v, a in adj.items() if len(a) != 2]
     for v in ends + list(adj.keys()):
         while any(not used[k] for k, _w in adj[v]):
-            pts, L, R = walk(v)
+            pts, L, R, ids = walk(v)
             if len(pts) >= 2:
-                chains.append((np.array(pts), np.array(L), np.array(R)))
+                chains.append((np.array(pts), np.array(L), np.array(R), np.array(ids)))
     pieces = []
     cos_t = math.cos(math.radians(RUN_TURN))
-    for P, L, R in chains:
+    for P, L, R, I in chains:
         cut = [0]
         for i in range(1, len(P) - 1):
             a, b = P[i] - P[i - 1], P[i + 1] - P[i]
@@ -268,7 +307,7 @@ def runs(p0, p1, v0, v1, nl, nr):
         cut.append(len(P) - 1)
         for a, b in zip(cut[:-1], cut[1:]):
             if b > a:
-                pieces.append((P[a:b + 1], L[a:b], R[a:b]))
+                pieces.append((P[a:b + 1], L[a:b], R[a:b], I[a:b + 1]))
     return pieces
 
 
@@ -289,11 +328,23 @@ def _at(P, s, t):
     return P[k] * (1 - f) + P[k + 1] * f, k
 
 
-def stroke_cutter(pts, up, W):
+def _waves(rng, W):
+    """A smooth wobble along a stroke: f(s) in about -1..1, two waves of JIT_WAVE x W, random phases."""
+    ks = [2.0 * math.pi / (rng.uniform(*JIT_WAVE) * W) for _ in range(2)]
+    ph = [rng.uniform(0, 2 * math.pi) for _ in range(2)]
+    return lambda s: 0.6 * math.sin(ks[0] * s + ph[0]) + 0.4 * math.sin(ks[1] * s + ph[1])
+
+
+def stroke_cutter(pts, up, W, rng=None):
     """Carve's wedge swept along pts (straight-ish), `up` out of the stone: a closed (V, F) solid. The opening W at
     the surface, 30-degree walls down to a floor FLOOR_SHARE wide, the walls run on ABOVE x W over the surface; its
-    two ends lift out over EASE x W (the groove fades out as a chisel stroke does)."""
+    two ends lift out over EASE x W (the groove fades out as a chisel stroke does). rng: the opening, the depth and the
+    stroke's height wander along it (JIT_*), as a hand-held chisel does."""
     P = np.asarray(pts, np.float64)
+    if rng is not None:
+        fw, fd, fs = _waves(rng, W), _waves(rng, W), _waves(rng, W)
+    else:
+        fw = fd = fs = (lambda _s: 0.0)
     s = _along(P)
     L = float(s[-1])
     D = depth_of(W)
@@ -306,15 +357,16 @@ def stroke_cutter(pts, up, W):
         e = min(s[i], L - s[i]) / max(EASE * W, 1e-12)
         k = min(1.0, max(0.12, e))
         k = k * k * (3 - 2 * k)
-        d = D * k                            # (the floor rises to the surface at the ends)
+        d = D * k * (1.0 + JIT_DEPTH * fd(s[i]))       # (the floor rises to the surface at the ends)
         t = P[min(i + 1, len(P) - 1)] - P[max(i - 1, 0)]
         t = t / (np.linalg.norm(t) + 1e-12)
         u = up - t * float(up @ t)
         u = u / (np.linalg.norm(u) + 1e-12)
         x = np.cross(t, u)
-        fx = f * k + 1e-3 * W
+        fx = (f * k + 1e-3 * W) * (1.0 + JIT_WIDTH * fw(s[i]))
+        q = p + u * (JIT_SINK * D * k * fs(s[i]))
         xs = [(-fx, -d), (fx, -d), (fx + slope * (d + H), H), (-fx - slope * (d + H), H)]
-        rings.append([p + x * cx + u * cy for cx, cy in xs])
+        rings.append([q + x * cx + u * cy for cx, cy in xs])
     R = np.array(rings)                      # (n, 4, 3)
     n = len(R)
     V = R.reshape(-1, 3)
@@ -340,10 +392,155 @@ def coverage(amount):
     return a / (a + 1.0)
 
 
-def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None):
+def edge_thickness(m):
+    """meshlib's ray thickness at each vertex (how much stone stands behind it, straight in), in the mesh's units."""
+    mm, _mn = _ml()
+    t = np.array(mm.computeRayThicknessAtVertices(m).vec, float)
+    return np.where(np.isfinite(t) & (t > 0), t, np.nan)
+
+
+def thickness_in(m, p, inward, unit=1.0):
+    """How much stone stands behind point p, straight in along `inward` (one ray, cast from just inside p so it does not
+    hit the faces at p: meshlib's ray thickness AT an edge's own vertices reads near 0). inf when it finds nothing."""
+    mm, _mn = _ml()
+    d = np.asarray(inward, np.float64)
+    d = d / (np.linalg.norm(d) + 1e-12)
+    o = np.asarray(p, np.float64) + d * (1e-3 * unit)
+    hit = mm.rayMeshIntersect(mm.MeshPart(m), mm.Line3f(mm.Vector3f(*map(float, o)), mm.Vector3f(*map(float, d))))
+    return float(hit.distanceAlongLine) + 1e-3 * unit if hit else np.inf
+
+
+def auto_width(th, unit, size):
+    """A stroke's opening from the stone's thickness at its edge (AUTO_SHARE, held in AUTO_RANGE), x Size."""
+    w = AUTO_SHARE * float(th) if np.isfinite(th) else CHISEL * unit
+    return float(np.clip(w, AUTO_RANGE[0] * unit, AUTO_RANGE[1] * unit)) * float(size)
+
+
+def run_spacing(pieces, cap):
+    """Per run: how far the other sharp edges are from it (the median over its points of the nearest point of another
+    run; near the corners it shares with them that is small, so the median, not the least), at most cap. Looked up in a
+    grid of cap-sized cells, so only nearby edges are compared (the leafy parts have thousands)."""
+    pts = [np.asarray(P, np.float64) for P, _l, _r, _i in pieces]
+    allp = np.concatenate(pts)
+    lab = np.concatenate([np.full(len(P), r) for r, P in enumerate(pts)])
+    # (runs that share a vertex are one edge going on round a bend, or the edges of one corner: not "the next edge")
+    near = [set() for _ in pieces]
+    owner = {}
+    for r, (_P, _l, _r, I) in enumerate(pieces):
+        for v in (int(I[0]), int(I[-1])):
+            owner.setdefault(v, []).append(r)
+    for rs in owner.values():
+        for a in rs:
+            near[a].update(rs)
+    h = max(float(cap), 1e-9)
+    key = np.floor(allp / h).astype(np.int64)
+    cells = {}
+    for i, k in enumerate(map(tuple, key)):
+        cells.setdefault(k, []).append(i)
+    cells = {k: np.array(v) for k, v in cells.items()}
+    offs = [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)]
+    out = np.full(len(pts), float(cap))
+    start = 0
+    for r, P in enumerate(pts):
+        ks = {tuple(k) for k in key[start:start + len(P)]}
+        start += len(P)
+        cand = [cells[(k[0] + a, k[1] + b, k[2] + c)] for k in ks for a, b, c in offs
+                if (k[0] + a, k[1] + b, k[2] + c) in cells]
+        if not cand:
+            continue
+        cand = np.unique(np.concatenate(cand))
+        cand = cand[~np.isin(lab[cand], list(near[r] | {r}))]
+        if not len(cand):
+            continue
+        Q = allp[cand]
+        d = np.empty(len(P))
+        for a in range(0, len(P), 256):
+            q = P[a:a + 256]
+            d[a:a + 256] = np.sqrt(((q[:, None, :] - Q[None, :, :]) ** 2).sum(-1)).min(1)
+        out[r] = min(float(cap), float(np.median(d)))
+    return out
+
+
+def bent(pts, up, W, rng, cap=None):
+    """A stroke's line, set so it cuts STROKE_DEPTH x W in (+- STROKE_DEPTH_VAR, the whole stroke alike) and bent once,
+    gently (one arc, its middle up to STROKE_BEND x W sideways and STROKE_BEND_UP x its depth in or out)."""
+    P = np.asarray(pts, np.float64)
+    d = STROKE_DEPTH * W * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
+    if cap is not None and np.isfinite(cap):                 # (held by the detail there, still varied +-30 %)
+        d = min(d, float(cap) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, 0.0)))
+    t = P[-1] - P[0]
+    t = t / (np.linalg.norm(t) + 1e-12)
+    x = np.cross(t, up)
+    x = x / (np.linalg.norm(x) + 1e-12)
+    s = _along(P)
+    u = s / max(s[-1], 1e-12)
+    arc = np.sin(np.pi * u)[:, None]
+    side = rng.uniform(-STROKE_BEND, STROKE_BEND) * W
+    lift = rng.uniform(-STROKE_BEND_UP, STROKE_BEND_UP) * d
+    return P + up * (depth_of(W) - d) + arc * (x * side + up * lift)
+
+
+def corner_chip(c, n, depth, rng, sides=16):
+    """A raised corner knocked off with one flat chip (Alex's example, the red circle): a cone whose flat base lies
+    `depth` in from the corner across its normal n (tipped by up to RAISED_TILT), CHIP_RADIUS x depth wide, its point
+    CHIP_HEIGHT x depth above the base. A sharp corner loses one flat facet; on a blunt corner the narrowing sides only
+    take a shallow round dimple (a square slab there cut square steps into the stone). (V, F)."""
+    z = _tilt(np.asarray(n, np.float64), rng, RAISED_TILT)
+    z = z / (np.linalg.norm(z) + 1e-12)
+    B = _frame(z, rng)
+    o = np.asarray(c, np.float64) - z * depth
+    a = np.linspace(0.0, 2.0 * math.pi, sides, endpoint=False)
+    ring = np.stack([np.cos(a), np.sin(a), np.zeros_like(a)], 1) * (CHIP_RADIUS * depth)
+    V = np.vstack([ring @ B.T + o, o[None], (o + z * (CHIP_HEIGHT * depth))[None]])
+    cb, ct = sides, sides + 1
+    F = []
+    for i in range(sides):
+        j = (i + 1) % sides
+        F.append((cb, j, i))                    # (the flat base, facing into the stone)
+        F.append((i, j, ct))                    # (the sides up to the point)
+    F = np.array(F, np.int64)
+    vol = float(np.einsum('ij,ij->i', V[F[:, 0]], np.cross(V[F[:, 1]], V[F[:, 2]])).sum())
+    if vol < 0:
+        F = F[:, ::-1]
+    return V.astype(np.float32), F.astype(np.int32)
+
+
+RAISED_SHARP = 105.0   # deg: a raised corner's edges meet at angles averaging under this (a cube's corner: 90); a blunt
+#                        corner gets no chip (a round scoop there, not a chip)
+CHIP_VOLUME = 3.0      # a corner chip may take at most this x what a square corner's chip takes (0.87 depth^3): stone
+#                        corners are blunter than a cube's (2.0 let 1 corner in 15 through on Alex's Tna_Stone_006)
+CHIP_RADIUS = 1.6      # the chip's flat face this x its depth wide (a square corner's facet: 1.41 x)
+CHIP_HEIGHT = 3.0      # its cone's point this x its depth above the face
+
+
+def standing(dirs):
+    """The corner's edges (unit directions away from it) meet sharply enough to stand out: their angles to each other
+    average under RAISED_SHARP."""
+    a = [math.degrees(math.acos(max(-1.0, min(1.0, float(dirs[i] @ dirs[j])))))
+         for i in range(len(dirs)) for j in range(i + 1, len(dirs))]
+    return bool(a) and float(np.mean(a)) < RAISED_SHARP
+
+
+def chip_too_big(m, chip, depth):
+    """The flat chip would take more than CHIP_VOLUME x a square corner's chip out of the stone (the stone rises round
+    that corner, or its normal points along a face): meshlib boolean Intersection, its volume."""
+    mm, mn = _ml()
+    try:
+        c = mn.meshFromFacesVerts(np.ascontiguousarray(chip[1]), np.ascontiguousarray(chip[0]))
+        r = mm.boolean(m, c, mm.BooleanOperation.Intersection)
+        if not r.valid():
+            return True
+        return abs(r.mesh.volume()) > CHIP_VOLUME * 0.87 * depth ** 3
+    except Exception:
+        return True
+
+
+def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None, auto=False):
     """The chisel strokes for mesh m's sharp edges and corners: [(V, F)] in the mesh's units. Each run of sharp edges
     is walked from end to end in strokes of STROKE_LEN with STROKE_GAP between, each one kept coverage(amount) of the
-    time; corners: a stroke run out past them CORNER_CHANCE of the time (not with Amount 0)."""
+    time; corners: a stroke run out past them CORNER_CHANCE of the time (not with Amount 0); raised corners (RAISED_EDGES
+    sharp edges) always, harder, RAISED_STROKES of them. auto: each stroke's chisel from the stone's thickness at its edge
+    (auto_width), else CHISEL x size."""
     info = {} if info is None else info
     rng = np.random.default_rng(seed)
     p0, p1, nl, nr, v0, v1, V, vn = sharp_edges(m, unit, cut_faces)
@@ -351,7 +548,13 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     if not len(p0):
         return []
     pieces = runs(p0, p1, v0, v1, nl, nr)
-    lens = np.array([float(_along(P)[-1]) for P, _l, _r in pieces])
+    lens = np.array([float(_along(P)[-1]) for P, _l, _r, _i in pieces])
+    TH = edge_thickness(m) if auto else None
+    SP = run_spacing(pieces, AUTO_RANGE[1] * unit / SPACING_SHARE) if auto else None
+    vrun = {}                                # vertex -> the runs that end there (the corners' chisel)
+    for r, (_P, _l, _r, I) in enumerate(pieces):
+        for v in (int(I[0]), int(I[-1])):
+            vrun.setdefault(v, []).append(r)
     if not len(pieces) or lens.sum() <= 0:
         return []
     total = float(lens.sum()) / unit
@@ -360,11 +563,23 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     keep = coverage(amount)
     jobs = []                                # (run, start, end, chisel)
     W0 = CHISEL * float(size) * unit
+    caps = []                                # per run: how deep its strokes may go (auto: the detail there)
+
+    def depth_cap(TH_, SP_, r_, I_):
+        if TH_ is None:
+            return np.inf
+        P_, L_, R_, _I = pieces[r_]
+        k_ = len(L_) // 2                      # (the stone behind the run's middle, along its bisector)
+        th = thickness_in(m, 0.5 * (P_[k_] + P_[k_ + 1]), -(L_[k_] + R_[k_]), unit)
+        return min(DEPTH_SPACING * float(SP_[r_]), DEPTH_THICK * float(th))
+    widths = []
     long_ends = []                           # (the ends of the runs long enough: the corners that get a stroke)
-    for r, (P, Ln, Rn) in enumerate(pieces):
+    for r, (P, Ln, Rn, I) in enumerate(pieces):
         L = lens[r]
+        caps.append(depth_cap(TH, SP, r, I))
         if L < RUN_MIN * W0:
             continue
+        widths.append(W0 / unit)
         long_ends += [P[0], P[-1]]
         t = -rng.uniform(0.0, 0.5) * W0      # (a stroke may start just past the run's end: over the corner)
         while t < L:
@@ -374,7 +589,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
     for r, t0, t1, W in jobs:
-        P, Ln, Rn = pieces[r]
+        P, Ln, Rn, _I = pieces[r]
         s = _along(P)
         if t1 - t0 < 1.0 * W:
             continue
@@ -385,38 +600,122 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         w = rng.uniform(*LEAN)
         up = _tilt(Ln[km] * w + Rn[km] * (1 - w), rng, STROKE_TILT)
         up /= np.linalg.norm(up) + 1e-12
-        pts = pts + up * rng.uniform(*STROKE_SINK) * depth_of(W)
-        out.append(stroke_cutter(pts, up, W))
+        out.append(stroke_cutter(bent(pts, up, W, rng, caps[r]), up, W))
     info["strokes"] = len(out)
-    nc = 0
+    info["chisel_bu"] = (round(float(np.min(widths)), 4), round(float(np.median(widths)), 4),
+                         round(float(np.max(widths)), 4)) if widths else None
+    cf = [c_ / unit for c_ in caps if np.isfinite(c_)]
+    info["depth_cap_bu"] = (round(float(np.min(cf)), 4), round(float(np.median(cf)), 4),
+                            round(float(np.max(cf)), 4)) if cf else None
+    nc = nr_ = 0
     E = np.array(long_ends).reshape(-1, 3)
-    for c, n in corners(V, vn, p0, p1, v0, v1):
+    at = {}                                  # vertex -> its sharp edges (along each, from the vertex)
+    for k in range(len(v0)):
+        at.setdefault(int(v0[k]), []).append((p1[k] - p0[k], nl[k], nr[k]))
+        at.setdefault(int(v1[k]), []).append((p0[k] - p1[k], nl[k], nr[k]))
+    cos_turn = math.cos(math.radians(180.0 - CORNER_TURN))
+    for vi, ds in at.items():
+        c, n = V[vi], vn[vi]
+        un = [d / (np.linalg.norm(d) + 1e-12) for d, _a, _b in ds]
+        # (a raised corner: three edges or more, meeting sharply, at least two of them long main edges ending here: a
+        # block's corner, not a facet's edge meeting a long edge part way along it)
+        n_long = int((np.linalg.norm(E - c, axis=1) < 1e-6 * max(unit, 1.0)).sum()) if len(E) else 0
+        raised = len(ds) >= RAISED_EDGES and standing(un) and n_long >= 2
+        if not raised and not (len(ds) == 2 and float(un[0] @ un[1]) > cos_turn):
+            continue
         if keep <= 0.0 or not len(E) or float(np.linalg.norm(E - c, axis=1).min()) > 1e-6 * max(unit, 1.0):
             continue
-        if rng.random() >= CORNER_CHANCE:
+        if not raised and rng.random() >= CORNER_CHANCE:
             continue
-        W = CHISEL * float(size) * rng.uniform(*WIDTH_RANGE) * unit
-        ds = []                              # (along one of the sharp edges at the corner, from past it inwards)
-        for k in range(len(v0)):
-            if np.linalg.norm(p0[k] - c) < 1e-9:
-                ds.append((p1[k] - p0[k], nl[k], nr[k]))
-            elif np.linalg.norm(p1[k] - c) < 1e-9:
-                ds.append((p0[k] - p1[k], nl[k], nr[k]))
-        if not ds:
+        Wc = CHISEL * float(size) * unit
+        cap = np.inf
+        if TH is not None:
+            cap = DEPTH_THICK * thickness_in(m, c, -n, unit)
+        if SP is not None and vi in vrun:
+            cap = min(cap, DEPTH_SPACING * min(float(SP[r]) for r in vrun[vi]))
+        if raised:                           # (one flat chip off the corner, 4 - 7 x a stroke's depth deep)
+            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc,
+                     rng.uniform(*RAISED_DEPTH) * cap if np.isfinite(cap) else np.inf)
+            chip = corner_chip(c, n, dc, rng)
+            if chip_too_big(m, chip, dc):    # (the corner is not a clean, standing corner: no chip)
+                continue
+            out.append(chip)
+            nc += 1
+            nr_ += 1
             continue
-        d, a_, b_ = ds[int(rng.integers(0, len(ds)))]
-        d = d / (np.linalg.norm(d) + 1e-12)
-        ln = rng.uniform(*CORNER_STROKE) * W
-        k = max(2, int(math.ceil((ln + CORNER_PAST * W) / (STEP_SHARE * W))) + 1)
-        pts = c + np.outer(np.linspace(-CORNER_PAST * W, ln, k), d)
-        w = rng.uniform(*LEAN)
-        up = _tilt(0.5 * (a_ * w + b_ * (1 - w)) + 0.5 * n, rng, STROKE_TILT)
-        up /= np.linalg.norm(up) + 1e-12
-        pts = pts + up * rng.uniform(*STROKE_SINK) * depth_of(W)
-        out.append(stroke_cutter(pts, up, W))
-        nc += 1
+        order = rng.permutation(len(ds))[:1]
+        for j in order:
+            d, a_, b_ = ds[int(j)]
+            d = d / (np.linalg.norm(d) + 1e-12)
+            W = Wc * rng.uniform(*WIDTH_RANGE)
+            ln = rng.uniform(*CORNER_STROKE) * W
+            k = max(2, int(math.ceil((ln + CORNER_PAST * W) / (STEP_SHARE * W))) + 1)
+            pts = c + np.outer(np.linspace(-CORNER_PAST * W, ln, k), d)
+            w = rng.uniform(*LEAN)
+            up = _tilt(0.5 * (a_ * w + b_ * (1 - w)) + 0.5 * n, rng, STROKE_TILT)
+            up /= np.linalg.norm(up) + 1e-12
+            out.append(stroke_cutter(bent(pts, up, W, rng, cap), up, W))
+            nc += 1
     info["corner_strokes"] = nc
+    info["raised_corners"] = nr_
     return out
+
+
+def _deviation(m, r, n_max=20000):
+    """How far the part's surface points lie from r (99th percentile, the mesh's units)."""
+    mm, mn = _ml()
+    V = np.asarray(mn.getNumpyVerts(m), np.float32)
+    if len(V) > n_max:
+        V = V[np.random.default_rng(0).choice(len(V), n_max, replace=False)]
+    vc = mn.fromNumpyArray(np.ascontiguousarray(V))
+    if not isinstance(vc, mm.VertCoords):
+        tmp = mm.VertCoords()
+        tmp.vec = vc
+        vc = tmp
+    d = np.abs(np.array(mm.findSignedDistances(r, vc).vec, float))
+    return float(np.percentile(d, 99)) if len(d) else 0.0
+
+
+def detail_tag(m, unit=1.0, info=None):
+    """The resolution a part needs, from its own detail instead of a tag (Alex 2026-11-23: "automatically work out
+    how much material to remove based on the level of detail of each part, replacing the resolution tagging"): the
+    coarsest preset (STONE, DETAIL, FINE, MINI) that
+      * keeps its surface: remeshed and decimated the way every tool's result is at that preset, it stays within
+        DETAIL_TOL of the part (a carved capital needs a fine one, a plain block does not), and
+      * keeps its thin features through Trim Thin: the voxel at most RES_SHARE of the 10th percentile thickness.
+    Else the finest. (tag, voxel) in the mesh's units."""
+    from .offset_utils import RESOLUTION_PRESETS, cuda_offset, auto_decimate, face_count
+    info = {} if info is None else info
+    th = edge_thickness(m)
+    th = th[np.isfinite(th)]
+    need = RES_SHARE * float(np.percentile(th, 10)) if len(th) else RESOLUTION_PRESETS['STONE'][0]
+    order = sorted(((v[0], v[1], k) for k, v in RESOLUTION_PRESETS.items() if k in ('STONE', 'DETAIL', 'FINE', 'MINI')),
+                   reverse=True)
+    f0 = face_count(m)
+    devs = {}
+    ok = [(vox, ratio, k) for vox, ratio, k in order if vox <= need] or [order[-1]]
+    for vox, ratio, k in order:
+        if (vox, ratio, k) not in ok:
+            devs[k] = None
+    got = []
+    for vox, ratio, k in ok:
+        try:
+            r = cuda_offset(m, vox, 0.0)
+            r = auto_decimate(r, f0, vox, "VOXEL_RATIO", ratio)
+            dev = _deviation(m, r)
+        except Exception:
+            continue
+        devs[k] = round(dev / unit, 4)
+        got.append((dev, vox, k))
+        if dev <= DETAIL_TOL * unit:
+            info["detail"] = devs
+            return k, vox
+    info["detail"] = devs
+    # (off by as much at every resolution: something in the mesh itself, inner pieces or open caps, not detail a finer
+    # voxel would keep: the thickness rule alone)
+    if len(got) >= 2 and got[-1][0] >= 0.8 * got[0][0]:
+        return ok[0][2], ok[0][0]
+    return ok[-1][2], ok[-1][0]
 
 
 # --- Stone Damage dents on the flat faces (Alex 2026-11-23) ------------------------------------------
@@ -428,7 +727,8 @@ FLAT_OUTLINE = 16      # a flat face's outline has at least this many points: a 
 #                        (jagged), not a flat facet the stone was modelled with (Alex's example leaves its top alone)
 DENT_SIZE = 0.5        # x the dent meshes' own size (the "Dent Size" slider)
 DENT_RANGE = (0.6, 1.3)
-DENT_EDGE = 0.25       # x a dent's width: dents are kept this far in from the flat face's outline at least
+DENT_EDGE = 1.0        # x a dent's half width: its centre is kept this far in from the flat face's outline (its whole
+#                        footprint inside the face: at 0.25 a dent by the rim broke through the edge in a round scoop)
 DENT_BITE = (0.1, 0.2)     # x its width: how deep a dent bites into the flat face (the damage meshes only reach
 #                            0.03 BU under their origin: laid on the face as they are, most only scraped it)
 
@@ -544,7 +844,7 @@ def _holes(m):
 
 
 def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_faces=None, info=None,
-              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT):
+              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False):
     """mesh worked over (a new mesh; the input is kept): Carve's chisel strokes on its sharp edges and corners
     (size: x Carve's Standard chisel, amount: strokes per BU of edge), Stone Damage's dents on its flat faces
     (face_dents: [(V, F)] in Blender units, Z out of the stone; dent_size: x their own size; dent_amount: per
@@ -556,7 +856,7 @@ def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_fac
     m.pack()
     if seed is None:
         seed = _seed_of(mn.getNumpyVerts(m))
-    cuts = place_strokes(m, size, amount, unit, seed, cut_faces, info)
+    cuts = place_strokes(m, size, amount, unit, seed, cut_faces, info, auto)
     cuts += place_dents(m, face_dents or [], dent_size, dent_amount, unit, seed, cut_faces, info)
     info["place_s"] = time.perf_counter() - t0
     if not cuts:
@@ -592,11 +892,86 @@ def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_fac
     return w
 
 
+def islands_of(mesh):
+    """The mesh's islands (its loose parts) as [(meshlib mesh, face indices in the mesh)]; one island: the mesh as it is
+    (Alex 2026-11-23: "make sure each island gets chipped individually")."""
+    mm, mn = _ml()
+    m = mm.Mesh(mesh)
+    m.pack()
+    F = np.asarray(mn.getNumpyFaces(m.topology), np.int64)
+    try:
+        comps = list(mm.MeshComponents.getAllComponents(mm.MeshPart(m)))
+    except Exception:
+        comps = []
+    if len(comps) <= 1:
+        return [(m, np.arange(len(F)))]
+    V = np.asarray(mn.getNumpyVerts(m), np.float32)
+    out = []
+    for bs in comps:
+        idx = np.nonzero(np.asarray(mn.getNumpyBitSet(bs), bool)[:len(F)])[0]
+        if not len(idx):
+            continue
+        f = F[idx]
+        used = np.unique(f)
+        remap = np.full(len(V), -1, np.int64)
+        remap[used] = np.arange(len(used))
+        out.append((mn.meshFromFacesVerts(remap[f].astype(np.int32), np.ascontiguousarray(V[used])), idx))
+    return out or [(m, np.arange(len(F)))]
+
+
+def _joined(meshes):
+    mm, mn = _ml()
+    if len(meshes) == 1:
+        return meshes[0]
+    Vs, Fs, n = [], [], 0
+    for r in meshes:
+        V = np.asarray(mn.getNumpyVerts(r), np.float32)
+        F = np.asarray(mn.getNumpyFaces(r.topology), np.int64)
+        F = F[(F >= 0).all(1)]
+        Vs.append(V)
+        Fs.append(F + n)
+        n += len(V)
+    return mn.meshFromFacesVerts(np.concatenate(Fs).astype(np.int32), np.concatenate(Vs))
+
+
 def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=None, info=None,
-              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT):
-    """The Chip method of Trim Edges, the way the operator runs it: the strokes and dents, then Trim Thin.
-    (mesh, None); raises MeshCollapsedError when Trim Thin leaves nothing."""
+              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False):
+    """The Chip method of Trim Edges, the way the operator runs it, island by island: each loose part gets its own
+    strokes and dents, its own detail (auto: detail_tag) and its own Trim Thin, then they are put back together side by
+    side (nothing merged). (mesh, tag): tag None, or with auto the finest resolution any island needed (the object is
+    tagged with it in place of its own tag). Raises MeshCollapsedError when Trim Thin leaves nothing of any island."""
     from .trim_round import trim_thin
-    chipped = dent_chip(mesh, dents, size, amount, unit, cut_faces=cut_faces, info=info, face_dents=face_dents,
-                        dent_size=dent_size, dent_amount=dent_amount)
-    return trim_thin(chipped, res)
+    from .offset_utils import MeshCollapsedError
+    info = {} if info is None else info
+    parts, tags = [], []
+    isl = islands_of(mesh)
+    info["islands"] = len(isl)
+    for k, (m, idx) in enumerate(isl):
+        ii = {}
+        r = res
+        tag = None
+        if auto:
+            tag, r = detail_tag(m, unit, ii)
+        cf = None
+        if cut_faces is not None:
+            cf = np.asarray(cut_faces, bool)
+            cf = cf[idx[idx < len(cf)]] if len(cf) else None
+        chipped = dent_chip(m, dents, size, amount, unit, cut_faces=cf, info=ii, face_dents=face_dents,
+                            dent_size=dent_size, dent_amount=dent_amount, auto=auto)
+        try:
+            parts.append(trim_thin(chipped, r)[0])
+            if tag is not None:
+                tags.append((r, tag, len(idx)))
+        except MeshCollapsedError:
+            ii["collapsed"] = True
+        ii["tag"] = tag
+        info.setdefault("per_island", []).append(ii)
+        for key in ("strokes", "corner_strokes", "raised_corners", "dents"):
+            info[key] = info.get(key, 0) + int(ii.get(key) or 0)
+    if not parts:
+        raise MeshCollapsedError("Trim Thin left nothing")
+    # (one tag for the object, for now: the one its biggest island needed; a small thin island trimmed at its own finer
+    # voxel above, but it no longer sends the whole object to Mini)
+    tag = max(tags, key=lambda t_: t_[2])[1] if tags else None
+    info["tag"] = tag
+    return _joined(parts), tag

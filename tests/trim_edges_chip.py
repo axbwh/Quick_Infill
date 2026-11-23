@@ -115,10 +115,10 @@ for n, a in zip(names, lean):
 check([e.identifier for e in s.bl_rna.properties["trim_edges_method"].enum_items] == ["ROUND", "CHIP"],
       "Trim Edges has Round and Chip only (Round (old) taken out)")
 check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 1.0) < 1e-6
-      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 2.5) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 8.0) < 1e-6
       and abs(s.bl_rna.properties["trim_edges_chip_dent_size"].default - 0.5) < 1e-6
       and abs(s.bl_rna.properties["trim_edges_chip_dents"].default - 16.0) < 1e-6,
-      "Chip Size 1 (Carve's Standard chisel), Amount 2.5, Dent Size 0.5, Dents 16 by default")
+      "Chip Size 1 (Carve's Standard chisel), Amount 8, Dent Size 0.5, Dents 16 by default")
 tops = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".tools_operators")
 check(len(tops.chip_meshes(bpy.context)) > 0, "Dent Meshes found (%d damage meshes, Dent_L)" % len(tops.chip_meshes(bpy.context)))
 # Alex 2026-11-23: chisel strokes on the long sharp edges and the corners, dents on the flat faces
@@ -129,6 +129,21 @@ td.dent_chip(ml_of(bpy.data.objects[names[0]]), [], 1.0, 2.5, 1.0, info=info, fa
 check(info.get("strokes", 0) > 0 and info.get("corner_strokes", 0) > 0 and info.get("dents", 0) > 0,
       "Chip on %s: %d chisel strokes on the edges, %d on corners, %d dents on %d flat faces"
       % (names[0], info.get("strokes", 0), info.get("corner_strokes", 0), info.get("dents", 0), info.get("flat_faces", 0)))
+# Alex 2026-11-23 "make sure each island gets chipped individually": two stones in one mesh, each chipped on its own
+if len(names) >= 2:
+    A, B = ml_of(bpy.data.objects[names[0]]), ml_of(bpy.data.objects[names[1]])
+    VA, FA = mn.getNumpyVerts(A) * 10.0, mn.getNumpyFaces(A.topology)          # (x10: Quick Infill's units)
+    VB, FB = (mn.getNumpyVerts(B) + np.array([5.0, 0, 0], np.float32)) * 10.0, mn.getNumpyFaces(B.topology)
+    both = mn.meshFromFacesVerts(np.concatenate([FA, FB + len(VA)]).astype(np.int32), np.concatenate([VA, VB]))
+    info2 = {}
+    out2, tag2 = td.dent_trim(both, 0.075, [], 1.0, 2.5, 10.0, info=info2, face_dents=tops.chip_meshes(bpy.context),
+                              auto=True)
+    per = info2.get("per_island", [])
+    n_out = len(mm.MeshComponents.getAllComponents(mm.MeshPart(out2)))
+    check(info2.get("islands") == 2 and len(per) == 2 and all(p_.get("strokes", 0) > 0 for p_ in per)
+          and n_out >= 2 and out2.topology.findHoleRepresentiveEdges().__len__() == 0,
+          "two islands in one mesh: each chipped on its own (%s strokes, tags %s), %d pieces after, closed"
+          % ([p_.get("strokes") for p_ in per], [p_.get("tag") for p_ in per], n_out))
 s.trim_edges_chip_dents = 0.0
 nodent = run("CHIP")
 check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))
@@ -139,7 +154,7 @@ check(all(abs(x - y) < 1e-6 for x, y in zip(chip, again)), "Chip gives the same 
 s.trim_edges_chip_amount = 0.0
 none = run("CHIP")
 check(sum(none) < sum(chip), "Amount 0 (no strokes, the dents only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
-s.trim_edges_chip_amount = 2.5
+s.trim_edges_chip_amount = 8.0
 s["trim_edges_method"] = 2                      # a file saved with Round (old)
 settings_mod = sys.modules[type(s).__module__]
 settings_mod._old_round_to_round()

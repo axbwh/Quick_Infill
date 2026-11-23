@@ -193,21 +193,29 @@ class QuickInfillSettings(PropertyGroup):
         default=0.04, min=0.005, max=0.2, soft_min=0.02, soft_max=0.12, precision=3, step=0.1,
     )
     trim_edges_chip_size: FloatProperty(
-        name="Chip Size", description="How wide the chisel strokes on the sharp edges are, x Carve's Standard "
-                                      "chisel (0.66 mm).\nEach stroke is drawn between 0.7 and 1.3 times this",
+        name="Chip Size", description="How wide the chisel strokes on the sharp edges are.\n"
+                                      "Auto Detail: x the width worked out from each edge; off: x Carve's Standard "
+                                      "chisel (0.66 mm). Each stroke is drawn between 0.7 and 1.3 times this",
         default=1.0, min=0.1, max=4.0, soft_min=0.2, soft_max=3.0, precision=2, step=5,
     )
     trim_edges_chip_amount: FloatProperty(
-        name="Chip Amount", description="How much of the sharp edges is chiselled: 0 none, 2.5 about 70 %, "
-                                        "10 about 90 %.\nEdges shorter than a few chisel widths (the facets of a "
+        name="Chip Amount", description="How much of the long sharp edges is chiselled: 0 none, 2.5 about 70 %, "
+                                        "8 (default) about 90 %.\nEdges shorter than a few chisel widths (the facets of a "
                                         "rough side) are left as they are",
-        default=2.5, min=0.0, max=20.0, soft_max=10.0, precision=1, step=10,
+        default=8.0, min=0.0, max=20.0, soft_max=10.0, precision=1, step=10,
     )
     trim_edges_chip_meshes: PointerProperty(
         name="Dent Meshes", type=bpy.types.Collection,
         description="The stone damage meshes dropped on the flat faces (Z = out of the stone).\n"
                     "Empty: Ashlarize's big stone damage (Dent_L), from this file or from the "
                     "Ashlarize stone library",
+    )
+    trim_edges_chip_auto: BoolProperty(
+        name="Auto Detail", default=True,
+        description="Work out how much to take off from each part's own detail, not its resolution tag.\n"
+                    "Each chisel stroke is sized from how much stone stands behind its edge (thin cusps and leaves "
+                    "get a fine chisel, big blocks a broad one), x Size; Trim Thin runs at the resolution the part's "
+                    "thin features need, and the part is tagged with it",
     )
     trim_edges_chip_dent_size: FloatProperty(
         name="Dent Size", description="How big the dents on the flat faces are, x the Dent Meshes' own size.\n"

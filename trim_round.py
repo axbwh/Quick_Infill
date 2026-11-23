@@ -97,13 +97,13 @@ def trim_thin(mesh, res):
     return cuda_offset(shrunk, res, res), None
 
 
-def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None):
+def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None, auto=False):
     """Trim Edges, Chip: chisel strokes on the sharp edges, dents on the flat faces (trim_dent), then Trim Thin.
     (mesh, None)."""
     from . import trim_dent as td
     return td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
                         dent_size=td.DENT_SIZE if dent_size is None else dent_size,
-                        dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount)
+                        dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto)
 
 
 KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin, "chip": chip_trim}

@@ -80,7 +80,7 @@ def _normals(V, F):
     return fn, vn
 
 
-def sharp_edges(m, unit=1.0, cut_faces=None):
+def sharp_edges(m, unit=1.0, cut_faces=None, faces=False):
     """The stone's sharp convex edges: (p0 (k,3), p1 (k,3), n_left (k,3), n_right (k,3), v0 (k,), v1 (k,)),
     plus the vertex normals. cut_faces: per face, True on a cut face: then only edges with a cut face
     on exactly one side."""
@@ -112,9 +112,11 @@ def sharp_edges(m, unit=1.0, cut_faces=None):
         rows.append((int(topo.org(e).get()), int(topo.dest(e).get()), a, b))
     if not rows:
         z = np.zeros((0, 3))
-        return z, z, z, z, np.zeros(0, int), np.zeros(0, int), V, vn
+        e = np.zeros(0, int)
+        return (z, z, z, z, e, e, V, vn) + ((e, e) if faces else ())
     R = np.array(rows, np.int64)
-    return V[R[:, 0]], V[R[:, 1]], fn[R[:, 2]], fn[R[:, 3]], R[:, 0], R[:, 1], V, vn
+    out = (V[R[:, 0]], V[R[:, 1]], fn[R[:, 2]], fn[R[:, 3]], R[:, 0], R[:, 1], V, vn)
+    return out + ((R[:, 2], R[:, 3]) if faces else ())
 
 
 def corners(V, vn, p0, p1, v0, v1):
@@ -240,6 +242,16 @@ AUTO_SHARE = 0.2       # a stroke's opening: this share of the stone's thickness
 AUTO_RANGE = (0.012, 0.09)   # ... BU, held in here (0.12 - 0.9 mm), then x the Size slider
 # Alex 2026-11-23: "the width of the stroke on higher detail model should not change much, rather, the depth should
 # vary [not] to cut off too much": the chisel stays Carve's width; the detail holds how deep it may go
+# Alex 2026-11-23 (marked picture: "more damage on the top and bottom (large flat face) and less on the mostly vertical
+# ones with a lot of detail"; a plain block "not enough chipping and stone damage"): an edge on a big flat face is
+# chiselled in full (only the stone behind it holds the depth); an edge in the detail gets fewer, shallower strokes
+BIG_FLAT = 0.008       # BU^2: a flat face this big counts as a big flat face (an arch stone's joint face) ...
+BIG_FLAT_SHAPE = 0.1   # ... if it is not a long strip: its area at least this x its length squared (the long narrow
+#                        strip down an arch stone's back is not: its edges chewed the stone end to end)
+DETAIL_KEEP = 0.15     # an edge that does not border a big flat face keeps at most this share of its strokes (Alex:
+#                        "less on the mostly vertical ones with a lot of detail": an arch stone's moulded sides), and
+DETAIL_KEEP_MIN = 0.05 # an edge in the detail keeps a stroke this often at least: (the detail's depth / a full stroke's)
+#                        squared (a moulding's fillets: about 1 stroke in 10; 0.15 linear still chewed the arch stones)
 DEPTH_SPACING = 0.25   # a stroke cuts in at most this share of the distance to the next sharp edge (a moulding's
 #                        fillets stay) ...
 DEPTH_THICK = 0.1      # ... and at most this share of the stone's thickness behind its edge (a cusp tip or a leaf only
@@ -248,6 +260,13 @@ SPACING_SHARE = 0.6    # (no longer sets the width) the distance to the next sha
 #                        fraction of a mm apart: a chisel sized from the stone behind them cut through the whole profile)
 RES_SHARE = 0.25       # Trim Thin's voxel at most this share of the part's thin features (10th percentile thickness):
 #                        it takes off what is thinner than two voxels
+REMESH_TOL = 0.004     # BU (0.04 mm): Auto Detail's remesh keeps 99 % of the part's surface this close (the remesh
+#                        alone: the decimation after it has its own bound, DEC_TOL; 0.02 mm sent plain stones to Fine /
+#                        Mini and 8x their faces, measured on the Live Pillar row 2026-11-23)
+DEC_TOL = 0.005        # BU (0.05 mm, the finest detail Alex works at): Auto Detail decimates each island as far as this error allows, no face target:
+#                        flat faces go down to a few triangles, carved detail keeps what its shape needs (Alex 2026-11-23:
+#                        "replace quick infill's resolution and auto-decimation so it knows automatically how much each
+#                        part needs"; the presets' face ratios took a leafy abacus's leaves)
 DETAIL_TOL = 0.005      # BU (0.05 mm, the finest detail Alex works at): a resolution keeps a part's detail when,
 #                        remeshed and decimated at it, its surface stays this close (99 % of its points). (Every part
 #                        is 0.03 - 0.07 mm off at Stone from the voxels alone; 0.02 mm sent plain stones to Mini.)
@@ -543,11 +562,35 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     (auto_width), else CHISEL x size."""
     info = {} if info is None else info
     rng = np.random.default_rng(seed)
-    p0, p1, nl, nr, v0, v1, V, vn = sharp_edges(m, unit, cut_faces)
+    p0, p1, nl, nr, v0, v1, V, vn, fa, fb = sharp_edges(m, unit, cut_faces, faces=True)
     info["sharp_edges"] = int(len(p0))
     if not len(p0):
         return []
     pieces = runs(p0, p1, v0, v1, nl, nr)
+    # (which runs lie along a big flat face: its sharp edges have one)
+    _mm, _mn = _ml()
+    VV = np.asarray(_mn.getNumpyVerts(m), np.float64)
+    FF = np.asarray(_mn.getNumpyFaces(m.topology), np.int64)
+    _fa0 = FLAT_AREA
+    try:
+        globals()["FLAT_AREA"] = min(FLAT_AREA, BIG_FLAT)      # (the regions down to BIG_FLAT)
+        regs, _ar = flat_regions(VV, FF, unit)
+    finally:
+        globals()["FLAT_AREA"] = _fa0
+    bigf = np.zeros(len(FF), bool)
+    for reg, _n, A in regs:
+        ext = float(np.ptp(VV[np.unique(FF[reg])], axis=0).max())
+        if A >= BIG_FLAT * unit * unit and A >= BIG_FLAT_SHAPE * ext * ext:
+            bigf[reg] = True
+    eflat = {}
+    for k in range(len(v0)):
+        eflat[(min(int(v0[k]), int(v1[k])), max(int(v0[k]), int(v1[k])))] = bool(
+            (fa[k] < len(bigf) and bigf[fa[k]]) or (fb[k] < len(bigf) and bigf[fb[k]]))
+    on_flat = []
+    for _P, _l, _r, I in pieces:
+        fl = [eflat.get((min(int(a), int(b)), max(int(a), int(b))), False) for a, b in zip(I[:-1], I[1:])]
+        on_flat.append(bool(fl) and float(np.mean(fl)) >= 0.5)
+    info["runs_on_big_flat"] = int(sum(on_flat))
     lens = np.array([float(_along(P)[-1]) for P, _l, _r, _i in pieces])
     TH = edge_thickness(m) if auto else None
     SP = run_spacing(pieces, AUTO_RANGE[1] * unit / SPACING_SHARE) if auto else None
@@ -571,6 +614,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         P_, L_, R_, _I = pieces[r_]
         k_ = len(L_) // 2                      # (the stone behind the run's middle, along its bisector)
         th = thickness_in(m, 0.5 * (P_[k_] + P_[k_ + 1]), -(L_[k_] + R_[k_]), unit)
+        if on_flat[r_]:                        # (along a big flat face: the stone behind it only)
+            return DEPTH_THICK * float(th)
         return min(DEPTH_SPACING * float(SP_[r_]), DEPTH_THICK * float(th))
     widths = []
     long_ends = []                           # (the ends of the runs long enough: the corners that get a stroke)
@@ -585,7 +630,10 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         while t < L:
             W = W0 * rng.uniform(*WIDTH_RANGE)
             ln = rng.uniform(*STROKE_LEN) * W
-            if rng.random() < keep:
+            # (in the detail, fewer strokes: kept as often as the detail lets a stroke go deep)
+            k_keep = keep if on_flat[r] else keep * DETAIL_KEEP * (float(np.clip(
+                (caps[r] / (STROKE_DEPTH * W)) ** 2, DETAIL_KEEP_MIN, 1.0)) if np.isfinite(caps[r]) else 1.0)
+            if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
     for r, t0, t1, W in jobs:
@@ -701,13 +749,12 @@ def detail_tag(m, unit=1.0, info=None):
     for vox, ratio, k in ok:
         try:
             r = cuda_offset(m, vox, 0.0)
-            r = auto_decimate(r, f0, vox, "VOXEL_RATIO", ratio)
             dev = _deviation(m, r)
         except Exception:
             continue
         devs[k] = round(dev / unit, 4)
         got.append((dev, vox, k))
-        if dev <= DETAIL_TOL * unit:
+        if dev <= REMESH_TOL * unit:
             info["detail"] = devs
             return k, vox
     info["detail"] = devs
@@ -723,7 +770,8 @@ FLAT_DEG = 2.0         # deg: faces this close in direction ...
 FLAT_TOL = 0.0005      # BU: ... and this close to one plane make one flat face
 FLAT_AREA = 0.02       # BU^2: a flat face at least this big gets dents (a boolean's cut, not a stone's facet)
 DENT_AMOUNT = 16.0     # dents per BU^2 of flat face (the "Dents" slider)
-FLAT_OUTLINE = 16      # a flat face's outline has at least this many points: a boolean's cut through a rough stone
+FLAT_OUTLINE = 0       # (Alex 2026-11-23: a plain block's big faces get stone damage too; was 16: only a boolean's
+#                        jagged cut) a flat face's outline has at least this many points: a boolean's cut through a rough stone
 #                        (jagged), not a flat facet the stone was modelled with (Alex's example leaves its top alone)
 DENT_SIZE = 0.5        # x the dent meshes' own size (the "Dent Size" slider)
 DENT_RANGE = (0.6, 1.3)
@@ -804,12 +852,16 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
             continue
         k_n = int(rng.poisson(A / (unit * unit) * float(amount)))
         pw = ar[reg] / ar[reg].sum()
+        k_n = max(k_n, 1 if rng.random() < A / (unit * unit) * float(amount) else 0)
         for _ in range(k_n):
             dv, dt = dents[int(rng.integers(0, len(dents)))]
             dv = np.asarray(dv, np.float64)
             sc = float(size) * rng.uniform(*DENT_RANGE)
             half = 0.5 * max(np.ptp(dv[:, 0]), np.ptp(dv[:, 1])) * sc * unit
-            for _try in range(10):
+            for _try in range(24):
+                if _try and _try % 8 == 0:         # (a small face: a smaller dent, so it fits inside)
+                    sc *= 0.7
+                    half *= 0.7
                 f = int(reg[rng.choice(len(reg), p=pw)])
                 r1, r2 = rng.random(), rng.random()
                 if r1 + r2 > 1:
@@ -943,7 +995,7 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
     from .trim_round import trim_thin
     from .offset_utils import MeshCollapsedError
     info = {} if info is None else info
-    parts, tags = [], []
+    parts, tags, ftags = [], [], []
     isl = islands_of(mesh)
     info["islands"] = len(isl)
     for k, (m, idx) in enumerate(isl):
@@ -959,9 +1011,16 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
         chipped = dent_chip(m, dents, size, amount, unit, cut_faces=cf, info=ii, face_dents=face_dents,
                             dent_size=dent_size, dent_amount=dent_amount, auto=auto)
         try:
-            parts.append(trim_thin(chipped, r)[0])
+            got = trim_thin(chipped, r)[0]
+            if auto:                         # (as far as DEC_TOL allows: no face target)
+                from .offset_utils import decimate_mesh, face_count as _fc
+                f_before = _fc(got)
+                got = decimate_mesh(got, target_face_count=1, max_error=DEC_TOL * unit)
+                ii["faces"] = (f_before, _fc(got))
+            parts.append(got)
             if tag is not None:
                 tags.append((r, tag, len(idx)))
+                ftags.append((tag, got))
         except MeshCollapsedError:
             ii["collapsed"] = True
         ii["tag"] = tag
@@ -974,4 +1033,14 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
     # voxel above, but it no longer sends the whole object to Mini)
     tag = max(tags, key=lambda t_: t_[2])[1] if tags else None
     info["tag"] = tag
+    if auto and ftags and len(ftags) == len(parts):
+        # (each island keeps its own tag, face by face; already decimated: the pipeline leaves it)
+        try:
+            from .offset_utils import RESOLUTION_TAG_ORDER
+            from .offset_utils import face_count as _fc
+            info["face_tags"] = np.concatenate([np.full(_fc(g), RESOLUTION_TAG_ORDER.index(t_), np.int32)
+                                                for t_, g in ftags])
+        except Exception:
+            info["face_tags"] = None
+        info["decimated"] = True
     return _joined(parts), tag

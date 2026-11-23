@@ -402,10 +402,12 @@ class Retagged:
     """An operation's result that was worked at another resolution tag than the one asked for
     (Trim Edges: a stone too small for Stone is trimmed at Detail). The pipeline decimates and
     tags the result with that tag's values."""
-    __slots__ = ("mesh", "tag")
+    __slots__ = ("mesh", "tag", "decimated", "face_tags")
 
-    def __init__(self, mesh, tag):
-        self.mesh, self.tag = mesh, tag
+    def __init__(self, mesh, tag, decimated=False, face_tags=None):
+        # decimated: the operation decimated it already (Trim Edges Chip, Auto Detail): no auto-decimation after;
+        # face_tags: its own resolution tag per face (each island its own), else the tag on every face
+        self.mesh, self.tag, self.decimated, self.face_tags = mesh, tag, decimated, face_tags
 
 
 def _unwrap(out, res, ratio):
@@ -432,13 +434,19 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
 
     components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
     if len(components) <= 1:
-        out, res, ratio = _unwrap(operation_fn(src, job.res), job.res, job.ratio)
+        got = operation_fn(src, job.res)
+        out, res, ratio = _unwrap(got, job.res, job.ratio)
         if face_count(out) == 0:
             raise MeshCollapsedError()
-        if auto_decimate:
+        done = isinstance(got, Retagged) and got.decimated
+        if auto_decimate and not done:
             out = _decimate(out, face_count(src), res, job.mode, ratio)
         job.out = out
-        job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
+        ft = got.face_tags if isinstance(got, Retagged) else None
+        if ft is not None and len(ft) == face_count(out):
+            job.out_tags = np.asarray(ft, dtype=np.int32)
+        else:
+            job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
         job.voxels_used = [res] if res is not None else []
         return
 
@@ -605,7 +613,10 @@ class PipelineRun:
                 if r[0] == "ok":
                     out = mn.meshFromFacesVerts(r[2], r[1])
                     job.out = out
-                    job.out_tags = np.full(face_count(out), _tag_index(r[3]), dtype=np.int32)
+                    if len(r) > 4 and r[4] is not None and len(r[4]) == face_count(out):
+                        job.out_tags = np.asarray(r[4], dtype=np.int32)      # (each island its own tag)
+                    else:
+                        job.out_tags = np.full(face_count(out), _tag_index(r[3]), dtype=np.int32)
                     job.voxels_used = [r[3]]
                 elif r[0] == "collapsed":
                     job.error = MeshCollapsedError()

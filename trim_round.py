@@ -101,9 +101,13 @@ def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=N
     """Trim Edges, Chip: chisel strokes on the sharp edges, dents on the flat faces (trim_dent), then Trim Thin.
     (mesh, None)."""
     from . import trim_dent as td
-    return td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
-                        dent_size=td.DENT_SIZE if dent_size is None else dent_size,
-                        dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto)
+    info = {}
+    out, tag = td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
+                            dent_size=td.DENT_SIZE if dent_size is None else dent_size,
+                            dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto, info=info)
+    if auto and info.get("decimated"):
+        return out, {"tag": tag, "decimated": True, "face_tags": info.get("face_tags")}
+    return out, tag
 
 
 KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin, "chip": chip_trim}
@@ -116,16 +120,20 @@ def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
         mn = get_mrmeshnumpy()
         src = mn.meshFromFacesVerts(faces, verts)
         out, tag = KINDS[kind](src, res, *params)
+        face_tags, done = None, False
+        if isinstance(tag, dict):             # (Chip, Auto Detail: decimated already, a tag per face)
+            face_tags, done, tag = tag.get("face_tags"), bool(tag.get("decimated")), tag.get("tag")
         if tag is not None:
             res, ratio = RESOLUTION_PRESETS[tag]
         if face_count(out) == 0:
             return ("collapsed",)
-        if auto_decimate:   # the same as blender_meshlib_utils._decimate
+        if auto_decimate and not done:   # the same as blender_meshlib_utils._decimate
             out = shared_auto_decimate(out, face_count(src), res, mode, ratio)
         if out.topology.numValidFaces() != out.topology.faceSize():
             out.pack()
         return ("ok", np.asarray(mn.getNumpyVerts(out), np.float32),
-                np.asarray(mn.getNumpyFaces(out.topology), np.int32), res)
+                np.asarray(mn.getNumpyFaces(out.topology), np.int32), res,
+                None if face_tags is None else np.asarray(face_tags, np.int32))
     except MeshCollapsedError:
         return ("collapsed",)
     except Exception as e:

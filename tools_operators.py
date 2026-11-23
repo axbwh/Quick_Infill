@@ -328,9 +328,13 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                     cut = detect_cut_faces(mesh, STL_EXPORT_SCALE)
                 if cut is None or not np.any(cut):
                     return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
+            ii = {}
             out, tag = dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
-                                 dent_size=dsize, dent_amount=damount, auto=auto)
-            return Retagged(out, tag) if tag else out      # (Auto Detail: tagged with what it worked out)
+                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii)
+            if not tag:
+                return out
+            # (Auto Detail: each island tagged with what it worked out, decimated already)
+            return Retagged(out, tag, decimated=bool(ii.get("decimated")), face_tags=ii.get("face_tags"))
 
         # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
         # whose marks are per object

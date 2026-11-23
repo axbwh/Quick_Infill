@@ -855,7 +855,8 @@ def bands(pieces, on_flat, gap, nv=None):
                 continue
             ra, rq = find(r), find(q)
             ns = gnorm[ra] + gnorm[rq]               # (the whole band as it would be: a rounded bead's facets, each
-            if max(_angle(x, y) for x in ns for y in ns) > BAND_MAX:   # step small, chain round to a knife's turn)
+            N_ = np.array(ns)                        # step small, chain round to a knife's turn)
+            if math.degrees(math.acos(max(-1.0, min(1.0, float((N_ @ N_.T).min()))))) > BAND_MAX:
                 continue
             par[rq] = ra
             gnorm[ra] = ns
@@ -944,7 +945,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     _mm, _mn = _ml()
     VV = np.asarray(_mn.getNumpyVerts(m), np.float64)
     FF = np.asarray(_mn.getNumpyFaces(m.topology), np.int64)
-    regs, _ar = flat_regions(VV, FF, unit, min(FLAT_AREA, BIG_FLAT))     # (the regions down to BIG_FLAT)
+    regs, _ar = flat_all(VV, FF, unit, info)                 # (the regions down to BIG_FLAT)
     bigf = np.zeros(len(FF), bool)
     big = []
     curved = facet_family(VV, FF, regs, ARRIS_GAP * CHISEL * float(size) * unit)
@@ -1237,48 +1238,97 @@ DENT_BITE = (0.1, 0.2)     # x its width: how deep a dent bites into the flat fa
 #                            0.03 BU under their origin: laid on the face as they are, most only scraped it)
 
 
+def edge_pairs(F):
+    """The mesh's edges and the face pairs across them, built with numpy (a dict per edge took a third of Chip's time):
+    (edges (k, 2) vertex ids low, high; how many faces each has (k,); pairs (j, 2): the two faces of each edge with
+    exactly two, in the order the edges first appear going through the faces; the edge of each pair (j,))."""
+    n = len(F)
+    he = F[:, [[0, 1], [1, 2], [2, 0]]].reshape(-1, 2)             # (half edge 3 i + j)
+    lo, hi = he.min(1), he.max(1)
+    key = lo.astype(np.int64) * (int(F.max()) + 1 if n else 1) + hi
+    order = np.argsort(key, kind='stable')                         # (the same edge's half edges together, in order)
+    ks = key[order]
+    first = np.concatenate([[True], ks[1:] != ks[:-1]]) if n else np.zeros(0, bool)
+    start = np.flatnonzero(first)
+    count = np.diff(np.concatenate([start, [len(ks)]]))
+    edges = np.stack([lo[order[start]], hi[order[start]]], 1)
+    two = np.flatnonzero(count == 2)
+    h0, h1 = order[start[two]], order[start[two] + 1]
+    seen = np.argsort(h0, kind='stable')                           # (as the edges first appear)
+    pairs = np.stack([h0[seen] // 3, h1[seen] // 3], 1)
+    return edges, count, pairs, two[seen]
+
+
 def flat_regions(V, F, unit=1.0, min_area=None):
     """The flat faces (coplanar edge-connected regions) of at least min_area (FLAT_AREA), BU^2: ([(face indices,
     normal, area)], face areas). (Passed in, never set on the module: the operator chips stones on several threads at
-    once, and a module setting changed by one changed the other's dents: Chip gave a different result run to run.)"""
+    once, and a module setting changed by one changed the other's dents: Chip gave a different result run to run.)
+    The regions grow from the biggest face down, each face tried against the region's own mean normal and its seed's
+    plane; plain float arithmetic per face (numpy calls on three numbers were two thirds of Chip's time)."""
     min_area = FLAT_AREA if min_area is None else min_area
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
     ar = 0.5 * np.linalg.norm(c, axis=1)
     nr = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
-    emap = {}
-    for i, (a, b, d) in enumerate(F):
-        for e in ((a, b), (b, d), (d, a)):
-            emap.setdefault((min(e), max(e)), []).append(i)
     nb = [[] for _ in range(len(F))]
-    for fs in emap.values():
-        if len(fs) == 2:
-            nb[fs[0]].append(fs[1])
-            nb[fs[1]].append(fs[0])
+    for f0, f1 in edge_pairs(F)[2].tolist():
+        nb[f0].append(f1)
+        nb[f1].append(f0)
     cosa = math.cos(math.radians(FLAT_DEG))
     tol = FLAT_TOL * unit
-    lab = np.full(len(F), -1)
+    lab = [-1] * len(F)
+    nrl, arl, FV = nr.tolist(), ar.tolist(), V[F].tolist()
+    sqrt = math.sqrt
     out = []
-    for seed in np.argsort(-ar):
+    for seed in np.argsort(-ar).tolist():
         if lab[seed] >= 0:
             continue
         lab[seed] = seed
         reg = [seed]
         q = [seed]
-        acc = nr[seed] * ar[seed]
-        p0 = V[F[seed]].mean(0)
+        n0, a0 = nrl[seed], arl[seed]
+        ax, ay, az = n0[0] * a0, n0[1] * a0, n0[2] * a0
+        (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = FV[seed]
+        px, py, pz = (x0 + x1 + x2) / 3.0, (y0 + y1 + y2) / 3.0, (z0 + z1 + z2) / 3.0
         while q:
             f = q.pop()
-            m = acc / (np.linalg.norm(acc) + 1e-30)
+            ln = sqrt(ax * ax + ay * ay + az * az) + 1e-30
+            mx, my, mz = ax / ln, ay / ln, az / ln
             for h in nb[f]:
-                if lab[h] < 0 and nr[h] @ m >= cosa and np.abs((V[F[h]] - p0) @ m).max() <= tol:
-                    lab[h] = seed
-                    reg.append(h)
-                    q.append(h)
-                    acc = acc + nr[h] * ar[h]
+                if lab[h] >= 0:
+                    continue
+                nh = nrl[h]
+                if nh[0] * mx + nh[1] * my + nh[2] * mz < cosa:
+                    continue
+                far = False
+                for vx, vy, vz in FV[h]:
+                    if abs((vx - px) * mx + (vy - py) * my + (vz - pz) * mz) > tol:
+                        far = True
+                        break
+                if far:
+                    continue
+                lab[h] = seed
+                reg.append(h)
+                q.append(h)
+                ah = arl[h]
+                ax, ay, az = ax + nh[0] * ah, ay + nh[1] * ah, az + nh[2] * ah
+        if len(reg) == 1 and a0 < min_area * unit * unit:
+            continue
         A = float(ar[reg].sum())
         if A >= min_area * unit * unit:
+            acc = np.array([ax, ay, az])
             out.append((np.array(reg), acc / (np.linalg.norm(acc) + 1e-30), A))
     return out, ar
+
+
+def flat_all(V, F, unit, info):
+    """flat_regions down to the smallest size any step asks for, found once per stone and kept in info for the next
+    step (the strokes want them down to BIG_FLAT, the dents down to FLAT_AREA: the same list, cut off higher)."""
+    got = info.get("_flat") if info is not None else None
+    if got is None or got[0].shape != F.shape or not np.array_equal(got[0], F):
+        got = (F,) + flat_regions(V, F, unit, min(FLAT_AREA, BIG_FLAT))
+        if info is not None:
+            info["_flat"] = got
+    return got[1], got[2]
 
 
 def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None):
@@ -1291,7 +1341,8 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
     rng = np.random.default_rng(seed + 1)
     V = np.asarray(mn.getNumpyVerts(m), np.float64)
     F = np.asarray(mn.getNumpyFaces(m.topology), np.int64)
-    regs, ar = flat_regions(V, F, unit)
+    regs, ar = flat_all(V, F, unit, info)
+    regs = [r for r in regs if r[2] >= FLAT_AREA * unit * unit]
     info["flat_faces"] = len(regs)
     out = []
     for reg, n, A in regs:
@@ -1340,7 +1391,10 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
             bite = rng.uniform(*DENT_BITE) * 2.0 * half
             Vd = ((dv * s3) @ B.T) * unit + p - n * max(bite - own, 0.0)
             out.append((Vd.astype(np.float32), np.asarray(dt, np.int32)))
-    out += curved_dents(V, F, dents, size, unit, rng, info)
+    flat = np.zeros(len(F), bool)
+    for reg, _n, _A in regs:
+        flat[reg] = True
+    out += curved_dents(V, F, dents, size, unit, rng, info, flat)
     info["dents"] = len(out)
     return out
 
@@ -1354,7 +1408,8 @@ CURVED_MIN_AREA = 0.03    # BU^2: a curved face this big or more can take a dent
 CURVED_ONE_WAY = 0.2       # its normals nearly in one plane (smallest / largest spread): curved one way, as a soffit, a
 #                            moulding's channel or a shaft (Alex 23 Nov: "XL profile and the pillars should get some stone
 #                            damage"); a leaf or a capital's carving curves both ways and is left alone
-CURVED_MIN_TURN = 8.0     # deg: and it turns at least this much (else it is flat)
+CURVED_SHRINKS = 1         # a dent that does not fit is tried this many times smaller (x 0.75), then left out
+CURVED_LOCAL_MAX = 50.0   # deg: under one dent the stone turns at most this much from where the dent sits
 CURVED_DEG = 20.0          # deg: the curved side grown from its facets over edges turning less than this
 
 
@@ -1384,12 +1439,10 @@ def curved_surface(F, fn, seeds):
 
 def smooth_patches(F, fn):
     """Per face, the smooth patch it lies on: faces joined over edges turning under CURVED_DEG (a moulding's curved
-    channel, a shaft's round side, an arch's soffit), cut apart by the sharp edges. (labels, edge -> faces)."""
-    adj = {}
-    for i, (a, b, c) in enumerate(F):
-        for e in ((a, b), (b, c), (c, a)):
-            adj.setdefault((min(e), max(e)), []).append(i)
-    par = np.arange(len(F))
+    channel, a shaft's round side, an arch's soffit), cut apart by the sharp edges. (labels, the edges (k, 2) between
+    two patches or with other than two faces: the patches' outlines)."""
+    edges, count, pairs, pe = edge_pairs(F)
+    par = list(range(len(F)))
 
     def find(x):
         while par[x] != x:
@@ -1397,18 +1450,23 @@ def smooth_patches(F, fn):
             x = par[x]
         return x
     cmin = math.cos(math.radians(CURVED_DEG))
-    for fs in adj.values():
-        if len(fs) == 2 and float(fn[fs[0]] @ fn[fs[1]]) > cmin:
-            ra, rb = find(fs[0]), find(fs[1])
-            if ra != rb:
-                par[ra] = rb
-    return np.array([find(i) for i in range(len(F))]), adj
+    smooth = (fn[pairs[:, 0]] * fn[pairs[:, 1]]).sum(1) > cmin if len(pairs) else np.zeros(0, bool)
+    for f0, f1 in pairs[smooth].tolist():
+        ra, rb = find(f0), find(f1)
+        if ra != rb:
+            par[ra] = rb
+    lab = np.array([find(i) for i in range(len(F))])
+    rim = np.ones(len(edges), bool)
+    if len(pairs):
+        rim[pe] = lab[pairs[:, 0]] != lab[pairs[:, 1]]
+    return lab, edges[rim].astype(np.int64)
 
 
-def curved_dents(V, F, dents, size, unit, rng, info):
+def curved_dents(V, F, dents, size, unit, rng, info, flat=None):
     """Stone damage on the stone's smooth curved faces (an arch's soffit, a moulding's channels, a pillar's shaft):
     on CURVED_CHANCE of the stones (more on thick ones), one to three dents, the big one first, each kept inside the
-    curved face it lands on: [(V, F)] in the mesh's units."""
+    curved face it lands on: [(V, F)] in the mesh's units. flat: per face, True on the flat faces that get their own
+    dents."""
     info["curved_dents"] = 0
     if not dents:
         return []
@@ -1418,29 +1476,23 @@ def curved_dents(V, F, dents, size, unit, rng, info):
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
     ar = 0.5 * np.linalg.norm(c, axis=1)
     fn = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
-    lab, adj = smooth_patches(F, fn)
-    cands = []
+    lab, rim = smooth_patches(F, fn)
+    # (where a dent may land: the smooth faces big enough, the flat faces' own dents apart; whether the stone under one
+    # dent is flat or curved one way is looked at there, under its own footprint: a foot's moulded sides run round its
+    # rounded corners as one patch, curved both ways as a whole, flat or one way under any one dent)
+    ok = np.zeros(len(F), bool)
     for L in np.unique(lab):
         fs = np.flatnonzero(lab == L)
-        A = float(ar[fs].sum())
-        if A < CURVED_MIN_AREA * unit * unit:
-            continue
-        m_ = (fn[fs] * ar[fs, None]).sum(0)
-        m_ /= np.linalg.norm(m_) + 1e-12
-        if float(np.degrees(np.arccos(np.clip(fn[fs] @ m_, -1, 1))).max()) < CURVED_MIN_TURN:
-            continue                                 # (flat: the flat faces' own dents)
-        sv = np.linalg.svd(fn[fs] * np.sqrt(ar[fs])[:, None], compute_uv=False)
-        if sv[2] > CURVED_ONE_WAY * sv[0]:
-            continue                                 # (curved both ways: a leaf, carved detail, not a dressed face)
-        cands.append(fs)
-    info["curved_faces"] = len(cands)
-    if not cands:
+        if float(ar[fs].sum()) >= CURVED_MIN_AREA * unit * unit:
+            ok[fs] = True
+    if flat is not None:
+        ok &= ~flat
+    faces = np.flatnonzero(ok)
+    info["curved_faces"] = int(len(faces))
+    if not len(faces) or float(ar[faces].sum()) <= 0.0:
         return []
-    faces = np.concatenate(cands)
-    rim = np.array([e for e, fs in adj.items() if len(fs) != 2 or lab[fs[0]] != lab[fs[1]]], np.int64).reshape(-1, 2)
-    infaces = np.zeros(len(F), bool)
-    infaces[faces] = True
-    rim = rim[[any(infaces[f] for f in adj[(int(a), int(b))]) for a, b in rim]] if len(rim) else rim
+    cen = V[F].mean(1)
+    cos_max = math.cos(math.radians(CURVED_LOCAL_MAX))
     pw = ar[faces] / ar[faces].sum()
     out = []
     placed = []
@@ -1449,9 +1501,9 @@ def curved_dents(V, F, dents, size, unit, rng, info):
         dv = np.asarray(dv, np.float64)
         sc = float(size) * CURVED_SIZES[k] * rng.uniform(0.85, 1.15)
         half = 0.5 * max(np.ptp(dv[:, 0]), np.ptp(dv[:, 1])) * sc * unit
-        for _try in range(32):
-            if _try and _try % 8 == 0:
-                sc *= 0.75
+        for _try in range(8 * (CURVED_SHRINKS + 1)):
+            if _try and _try % 8 == 0:               # (a smaller one, CURVED_SHRINKS times at most: a dent shrunk
+                sc *= 0.75                           # until a leaf looks flat under it is not stone damage)
                 half *= 0.75
             f = int(faces[rng.choice(len(faces), p=pw)])
             r1, r2 = rng.random(), rng.random()
@@ -1466,6 +1518,13 @@ def curved_dents(V, F, dents, size, unit, rng, info):
                 t = np.clip(((p - A_) * d).sum(1) / np.maximum((d * d).sum(1), 1e-24), 0, 1)
                 if float(np.linalg.norm(A_ + d * t[:, None] - p, axis=1).min()) < DENT_EDGE * half:
                     continue
+            near = np.flatnonzero(((cen - p) ** 2).sum(1) < half * half)      # (the stone under this dent)
+            if len(near):
+                if float((fn[near] @ fn[f]).min()) < cos_max:
+                    continue                         # (it turns away under the dent: an edge, a thin part's far side)
+                sv = np.linalg.svd(fn[near] * np.sqrt(ar[near])[:, None], compute_uv=False)
+                if len(sv) > 2 and sv[2] > CURVED_ONE_WAY * sv[0]:
+                    continue                         # (curved both ways there: a leaf, carving)
             break
         else:
             continue
@@ -1505,6 +1564,7 @@ def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_fac
         seed = _seed_of(mn.getNumpyVerts(m))
     cuts = place_strokes(m, size, amount, unit, seed, cut_faces, info, auto)
     cuts += place_dents(m, face_dents or [], dent_size, dent_amount, unit, seed, cut_faces, info)
+    info.pop("_flat", None)
     info["place_s"] = time.perf_counter() - t0
     if not cuts:
         info["seconds"] = time.perf_counter() - t0

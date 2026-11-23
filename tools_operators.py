@@ -308,8 +308,13 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         from .blender_meshlib_utils import Retagged
         only_cut = bool(s.trim_edges_only_cut)
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
+        near = {}    # id(meshlib mesh) -> the other stones' faces near it: no dent where one lies over it
 
         def on_prepared(run):
+            from .trim_dent import cover_of
+            srcs = [job.src for job in run.jobs]
+            for job in run.jobs:
+                near[id(job.src)] = cover_of(job.src, [o for o in srcs if o is not job.src], STL_EXPORT_SCALE)
             if not only_cut:
                 return
             for job in run.jobs:
@@ -330,7 +335,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                     return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
             ii = {}
             out, tag = dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
-                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii)
+                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii, cover=near.get(id(mesh)))
             if not tag:
                 return out
             # (Auto Detail: each island tagged with what it worked out, decimated already)
@@ -342,7 +347,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                              on_prepared=on_prepared,
                              process_job=None if only_cut else
                              ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
-                                                 damount, auto)))
+                                                 damount, auto), lambda job: (near.get(id(job.src)),)))
 
     def _lean_round_setup(self, context, s):
         """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an

@@ -97,14 +97,16 @@ def trim_thin(mesh, res):
     return cuda_offset(shrunk, res, res), None
 
 
-def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None, auto=False):
+def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None, auto=False,
+              cover=None):
     """Trim Edges, Chip: chisel strokes on the sharp edges, dents on the flat faces (trim_dent), then Trim Thin.
     (mesh, None)."""
     from . import trim_dent as td
     info = {}
     out, tag = td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
                             dent_size=td.DENT_SIZE if dent_size is None else dent_size,
-                            dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto, info=info)
+                            dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto, info=info,
+                            cover=cover)
     if auto and info.get("decimated"):
         return out, {"tag": tag, "decimated": True, "face_tags": info.get("face_tags")}
     return out, tag

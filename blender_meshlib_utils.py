@@ -522,7 +522,7 @@ class PipelineRun:
         self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
         self.parallel = parallel
         self.strip_flat = set(strip_flat)   # objects whose flat polygon pieces are left out (Grow / Shrink)
-        # (worker function name in qi_worker, extra args): run the objects in worker processes
+        # (worker function name in qi_worker, extra args[, job -> more args of its own]): run the objects in worker processes
         # (process_pool.py) when there are enough of them; see _compute_in_processes.
         self.process_job = process_job
         self.jobs = []
@@ -605,6 +605,8 @@ class PipelineRun:
                 src.pack()
             args = (np.asarray(mn.getNumpyVerts(src), np.float32), np.asarray(mn.getNumpyFaces(src.topology), np.int32),
                     job.res, job.ratio, job.mode, self.auto_decimate) + tuple(self.process_job[1])
+            if len(self.process_job) > 2:          # (more arguments of this job's own: Chip's neighbouring stones)
+                args = args + tuple(self.process_job[2](job))
             futures[pool.submit(fn, args)] = job
         pending = set(futures)
         broken = False

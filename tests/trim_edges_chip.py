@@ -147,6 +147,31 @@ if len(names) >= 2:
           and n_out >= 2 and out2.topology.findHoleRepresentiveEdges().__len__() == 0,
           "two islands in one mesh: each chipped on its own (%s strokes, tags %s), %d pieces after, closed"
           % ([p_.get("strokes") for p_ in per], [p_.get("tag") for p_ in per], n_out))
+# Alex 2026-11-23 "skip hidden faces": no dent where another stone of the run lies over the face (a foot's top under
+# its plinth). A slab with a block standing on the middle of its top: dents round the block, none under it.
+def box_mesh(lo, hi):
+    lo, hi = np.array(lo, np.float32) * 10.0, np.array(hi, np.float32) * 10.0
+    V = np.array([[x, y, z] for z in (lo[2], hi[2]) for y in (lo[1], hi[1]) for x in (lo[0], hi[0])], np.float32)
+    F = np.array([[0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4], [2, 6, 3], [3, 6, 7],
+                  [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5]], np.int32)
+    return mn.meshFromFacesVerts(F, V)
+
+
+slab, block = box_mesh((0, 0, 0), (2.0, 2.0, 0.4)), box_mesh((0.5, 0.5, 0.42), (1.5, 1.5, 1.4))
+fd = tops.chip_meshes(bpy.context)
+under = {}
+for label, cov in (("alone", None), ("under a block", td.cover_of(slab, [block], 10.0))):
+    ic = {}
+    got = td.place_dents(slab, fd, 0.5, 16.0, 10.0, seed=3, info=ic, cover=cov)
+    cen = np.array([np.asarray(v_).mean(0) / 10.0 for v_, _f in got]).reshape(-1, 3)
+    top = cen[cen[:, 2] > 0.3] if len(cen) else cen
+    under[label] = (len(top), int(((top[:, 0] > 0.5) & (top[:, 0] < 1.5) & (top[:, 1] > 0.5) & (top[:, 1] < 1.5)).sum()),
+                    ic.get("covered_skips", 0))
+check(under["alone"][1] > 0 and under["under a block"][1] == 0 and under["under a block"][0] > 0
+      and under["under a block"][2] > 0,
+      "hidden faces: a slab's top alone takes %d dents (%d where the block would stand); with the block on it %d, "
+      "none under the block (%d spots skipped)" % (under["alone"][0], under["alone"][1], under["under a block"][0],
+                                                   under["under a block"][2]))
 s.trim_edges_chip_dents = 0.0
 nodent = run("CHIP")
 check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))

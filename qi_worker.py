@@ -14,8 +14,43 @@ import types
 _trim = None
 
 
-def init(addon_dir):
+def _exit_with_parent(parent):
+    """End this worker when the Blender that started it is gone. A Blender that crashes or is killed never shuts its
+    pool down, and its workers stayed behind for good, each holding a CUDA context: 32 of them from crashed test runs
+    took 12 GB of GPU memory on 2026-11-23. parent: Blender's process id (from process_pool; the worker's own idea of
+    its parent is not reliable on Windows)."""
+    import threading
+    if not parent:
+        return
+
+    def watch():
+        try:
+            if os.name == "nt":
+                import ctypes
+                from ctypes import wintypes
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                k32.OpenProcess.restype = wintypes.HANDLE
+                k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+                k32.WaitForSingleObject.restype = wintypes.DWORD
+                k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+                h = k32.OpenProcess(0x00100000, False, int(parent))     # SYNCHRONIZE
+                if not h:
+                    return                                              # (cannot watch it: carry on as before)
+                if k32.WaitForSingleObject(h, 0xFFFFFFFF) != 0:         # (0: the parent ended)
+                    return
+            else:
+                import time
+                while os.getppid() == int(parent):
+                    time.sleep(2.0)
+        except Exception:
+            return
+        os._exit(0)
+    threading.Thread(target=watch, name="qi-parent-watch", daemon=True).start()
+
+
+def init(addon_dir, parent_pid=None):
     global _trim
+    _exit_with_parent(parent_pid)
     if "qi_core" not in sys.modules:
         pkg = types.ModuleType("qi_core")
         pkg.__path__ = [addon_dir]

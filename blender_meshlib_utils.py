@@ -23,6 +23,7 @@ from .meshlib_utils import get_meshlib, get_mrmeshnumpy, JobCancelled, check_can
 from .offset_utils import (
     RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag,
     decimate_mesh, auto_decimate, should_auto_decimate_faces, face_count, MeshCollapsedError, PARALLEL_DECIMATE_FACES,
+    AUTO_DETAIL, auto_resolution,
 )
 
 # Scale applied to Blender coordinates when entering meshlib (and undone on the way back).
@@ -390,6 +391,9 @@ class _Job:
 def _effective_settings(obj, settings, resolution, smart):
     ratio = settings.decimation_ratio
     mode = settings.decimate_mode
+    if smart and getattr(settings, "auto_detail", False):
+        # Auto Detail: the voxel from each mesh's own shape (in _compute, off the main thread), the decimation by error
+        return resolution, ratio, AUTO_DETAIL
     if smart:
         tag = read_object_resolution_tag(obj)
         if tag:
@@ -402,10 +406,12 @@ class Retagged:
     """An operation's result that was worked at another resolution tag than the one asked for
     (Trim Edges: a stone too small for Stone is trimmed at Detail). The pipeline decimates and
     tags the result with that tag's values."""
-    __slots__ = ("mesh", "tag")
+    __slots__ = ("mesh", "tag", "decimated", "face_tags")
 
-    def __init__(self, mesh, tag):
-        self.mesh, self.tag = mesh, tag
+    def __init__(self, mesh, tag, decimated=False, face_tags=None):
+        # decimated: the operation decimated it already (Trim Edges Chip, Auto Detail): no auto-decimation after;
+        # face_tags: its own resolution tag per face (each island its own), else the tag on every face
+        self.mesh, self.tag, self.decimated, self.face_tags = mesh, tag, decimated, face_tags
 
 
 def _unwrap(out, res, ratio):
@@ -431,14 +437,22 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
     src = job.src
 
     components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
+    auto = job.mode == AUTO_DETAIL
     if len(components) <= 1:
-        out, res, ratio = _unwrap(operation_fn(src, job.res), job.res, job.ratio)
+        res0 = auto_resolution(src, job.res) if auto else job.res
+        got = operation_fn(src, res0)
+        out, res, ratio = _unwrap(got, res0, job.ratio)
         if face_count(out) == 0:
             raise MeshCollapsedError()
-        if auto_decimate:
+        done = isinstance(got, Retagged) and got.decimated
+        if auto_decimate and not done:
             out = _decimate(out, face_count(src), res, job.mode, ratio)
         job.out = out
-        job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
+        ft = got.face_tags if isinstance(got, Retagged) else None
+        if ft is not None and len(ft) == face_count(out):
+            job.out_tags = np.asarray(ft, dtype=np.int32)
+        else:
+            job.out_tags = np.full(face_count(out), _tag_index(res), dtype=np.int32)
         job.voxels_used = [res] if res is not None else []
         return
 
@@ -449,7 +463,9 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
         island = mm.Mesh()
         island.addMeshPart(mm.MeshPart(src, bitset))
         res, ratio, mode = job.res, job.ratio, job.mode
-        if smart and job.face_tags is not None:
+        if auto:
+            res = auto_resolution(island, res)
+        elif smart and job.face_tags is not None:
             mask = mn.getNumpyBitSet(bitset)
             mask = np.pad(mask, (0, max(0, n_faces - mask.size)))[:n_faces]
             tag = _index_to_tag(_majority(job.face_tags[mask[:job.face_tags.size]]))
@@ -506,7 +522,7 @@ class PipelineRun:
         self.apply_modifiers = s.apply_modifiers_on_export if apply_modifiers is None else apply_modifiers
         self.parallel = parallel
         self.strip_flat = set(strip_flat)   # objects whose flat polygon pieces are left out (Grow / Shrink)
-        # (worker function name in qi_worker, extra args): run the objects in worker processes
+        # (worker function name in qi_worker, extra args[, job -> more args of its own]): run the objects in worker processes
         # (process_pool.py) when there are enough of them; see _compute_in_processes.
         self.process_job = process_job
         self.jobs = []
@@ -589,6 +605,8 @@ class PipelineRun:
                 src.pack()
             args = (np.asarray(mn.getNumpyVerts(src), np.float32), np.asarray(mn.getNumpyFaces(src.topology), np.int32),
                     job.res, job.ratio, job.mode, self.auto_decimate) + tuple(self.process_job[1])
+            if len(self.process_job) > 2:          # (more arguments of this job's own: Chip's neighbouring stones)
+                args = args + tuple(self.process_job[2](job))
             futures[pool.submit(fn, args)] = job
         pending = set(futures)
         broken = False
@@ -605,7 +623,10 @@ class PipelineRun:
                 if r[0] == "ok":
                     out = mn.meshFromFacesVerts(r[2], r[1])
                     job.out = out
-                    job.out_tags = np.full(face_count(out), _tag_index(r[3]), dtype=np.int32)
+                    if len(r) > 4 and r[4] is not None and len(r[4]) == face_count(out):
+                        job.out_tags = np.asarray(r[4], dtype=np.int32)      # (each island its own tag)
+                    else:
+                        job.out_tags = np.full(face_count(out), _tag_index(r[3]), dtype=np.int32)
                     job.voxels_used = [r[3]]
                 elif r[0] == "collapsed":
                     job.error = MeshCollapsedError()

@@ -12,7 +12,7 @@ from bpy.types import Operator
 from bpy.props import FloatProperty
 
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy, progress_callback, check_cancelled, reraise_if_cancelled
-from .offset_utils import ANGLE_PRESETS, auto_decimate, face_count
+from .offset_utils import ANGLE_PRESETS, AUTO_DETAIL, auto_decimate, face_count
 from .blender_meshlib_utils import (
     process_objects, estimate_seconds, ToolCost, blender_to_meshlib, meshlib_to_blender_mesh, select_results, swap_mesh_keep_transforms,
     link_new_object, free_unused_meshes, remove_objects,
@@ -427,7 +427,8 @@ def _voxel_boolean_combine(op, context, combine_fn, op_label, suffix):
         op.report({'ERROR'}, f"{op_label} resulted in an empty mesh. Objects may not overlap.")
         return {'CANCELLED'}
     if s.decimate_mode != "OFF":
-        result = auto_decimate(result, initial_faces, voxel_size, s.decimate_mode, s.decimation_ratio)
+        mode = AUTO_DETAIL if (s.smart_resolution and getattr(s, "auto_detail", False)) else s.decimate_mode
+        result = auto_decimate(result, initial_faces, voxel_size, mode, s.decimation_ratio)
 
     new_mesh = meshlib_to_blender_mesh(result, active.name + suffix)
     if s.replace_original:

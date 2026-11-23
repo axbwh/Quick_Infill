@@ -144,6 +144,14 @@ class QuickInfillSettings(PropertyGroup):
                     "size and ratio. The values set here are only used for meshes without a tag",
         default=True,
     )
+    auto_detail: BoolProperty(
+        name="Auto Detail",
+        description="Work out each mesh's resolution and decimation from its own shape.\nThe voxel size is the "
+                    "coarsest that keeps the surface within 0.04 mm, and the result is decimated as far as a 0.1 mm error "
+                    "allows (flat faces down to a few triangles), not to a face ratio. Needs Smart on. "
+                    "Off: the resolution tag's voxel size and ratio",
+        default=True,
+    )
     apply_modifiers_on_export: BoolProperty(
         name="Apply Modifiers",
         description="Work on each object as its modifiers leave it.\nOff: the modifiers are ignored",
@@ -180,9 +188,10 @@ class QuickInfillSettings(PropertyGroup):
             ("ROUND", "Round", "Round the thin edges off, as the old Trim Edges did, about 5 times faster.\n"
                                "Same grow, shrink and regrow (Distance, X, Trim Density); the result is cut "
                                "back to the stone exactly instead of through voxels"),
-            ("CHIP", "Chip", "Knock chips off the sharp edges and corners with the stone damage meshes.\n"
-                             "Each chip is one of the Chip Meshes (Ashlarize's Dent_S), picked, turned and "
-                             "sized at random, and cut with a boolean. Then Trim Thin takes off what got too thin"),
+            ("CHIP", "Chip", "Work the stone over the way Ashlarize's brushes do by hand.\n"
+                             "Its sharp edges and corners get short chisel strokes (Carve's wedge), its flat faces "
+                             "(a boolean's cuts) get stone damage dents (Dent_L). All cut with one boolean, then "
+                             "Trim Thin takes off what got too thin"),
         ],
         default="ROUND",
     )
@@ -192,22 +201,39 @@ class QuickInfillSettings(PropertyGroup):
         default=0.04, min=0.005, max=0.2, soft_min=0.02, soft_max=0.12, precision=3, step=0.1,
     )
     trim_edges_chip_size: FloatProperty(
-        name="Chip Size", description="How big the chips are, as a share of the Chip Meshes' own size.\n"
-                                      "1 = the stone damage meshes as they are (about 0.14 cm across). Each chip "
-                                      "is drawn between 0.6 and 1.3 times this, corners a little bigger",
-        default=0.8, min=0.1, max=4.0, soft_min=0.2, soft_max=2.0, precision=2, step=5,
+        name="Chip Size", description="How wide the chisel strokes on the sharp edges are.\n"
+                                      "Auto Detail: x the width worked out from each edge; off: x Carve's Standard "
+                                      "chisel (0.66 mm). Each stroke is drawn between 0.7 and 1.3 times this",
+        default=1.0, min=0.1, max=4.0, soft_min=0.2, soft_max=3.0, precision=2, step=5,
     )
     trim_edges_chip_amount: FloatProperty(
-        name="Chip Amount", description="How many chips go on the sharp edges, per cm of edge.\n"
-                                        "Corners get one most of the time on top of these. Chips are kept apart, "
-                                        "so very high values stop adding more",
-        default=2.5, min=0.0, max=20.0, soft_max=8.0, precision=1, step=10,
+        name="Chip Amount", description="How much of the long sharp edges is chiselled: 0 none, 2.5 about 70 %, "
+                                        "8 (default) about 90 %.\nEdges shorter than a few chisel widths (the facets of a "
+                                        "rough side) are left as they are",
+        default=8.0, min=0.0, max=20.0, soft_max=10.0, precision=1, step=10,
     )
     trim_edges_chip_meshes: PointerProperty(
-        name="Chip Meshes", type=bpy.types.Collection,
-        description="The collection of damage meshes the chips are made from (Z = out of the stone).\n"
-                    "Empty: Ashlarize's small stone damage (Dent_S), from this file or from the "
+        name="Dent Meshes", type=bpy.types.Collection,
+        description="The stone damage meshes dropped on the flat faces (Z = out of the stone).\n"
+                    "Empty: Ashlarize's big stone damage (Dent_L), from this file or from the "
                     "Ashlarize stone library",
+    )
+    trim_edges_chip_auto: BoolProperty(
+        name="Auto Detail", default=True,
+        description="Work out how much to take off from each part's own detail, not its resolution tag.\n"
+                    "Each chisel stroke is sized from how much stone stands behind its edge (thin cusps and leaves "
+                    "get a fine chisel, big blocks a broad one), x Size; Trim Thin runs at the resolution the part's "
+                    "thin features need, and the part is tagged with it",
+    )
+    trim_edges_chip_dent_size: FloatProperty(
+        name="Dent Size", description="How big the dents on the flat faces are, x the Dent Meshes' own size.\n"
+                                      "Each dent is drawn between 0.6 and 1.3 times this",
+        default=0.5, min=0.05, max=3.0, soft_min=0.1, soft_max=1.5, precision=2, step=5,
+    )
+    trim_edges_chip_dents: FloatProperty(
+        name="Dents", description="How many dents go on the flat faces a boolean left, per square cm.\n"
+                                  "0: none",
+        default=16.0, min=0.0, max=100.0, soft_max=40.0, precision=1, step=50,
     )
     trim_edges_only_cut: BoolProperty(
         name="Only Cut Edges", description="Chip only the edges where a cut face meets the stone.\n"

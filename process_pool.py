@@ -78,7 +78,7 @@ def get_pool():
             for k in saved:
                 setattr(main, k, None) if k == "__spec__" else delattr(main, k)
             pool = ProcessPoolExecutor(max_workers=WORKERS, mp_context=ctx, initializer=wm.init,
-                                       initargs=(ADDON_DIR,))
+                                       initargs=(ADDON_DIR, os.getpid()))
             # start every worker now, while the path and __main__ are set up for it
             list(pool.map(wm.ping, range(WORKERS * 2)))
         except Exception as e:

@@ -12,7 +12,7 @@ import numpy as np
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
-    auto_decimate as shared_auto_decimate, PARALLEL_DECIMATE_FACES, OFFSET_PRESETS, RESOLUTION_PRESETS,
+    auto_decimate as shared_auto_decimate, AUTO_DETAIL, auto_resolution, PARALLEL_DECIMATE_FACES, OFFSET_PRESETS, RESOLUTION_PRESETS,
     nearest_resolution_tag, MeshCollapsedError,
 )
 
@@ -97,10 +97,19 @@ def trim_thin(mesh, res):
     return cuda_offset(shrunk, res, res), None
 
 
-def chip_trim(mesh, res, dents, size, amount, unit):
-    """Trim Edges, Chip: the stone damage chips (trim_dent), then Trim Thin. (mesh, None)."""
-    from .trim_dent import dent_trim
-    return dent_trim(mesh, res, dents, size, amount, unit)
+def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None, auto=False,
+              cover=None):
+    """Trim Edges, Chip: chisel strokes on the sharp edges, dents on the flat faces (trim_dent), then Trim Thin.
+    (mesh, None)."""
+    from . import trim_dent as td
+    info = {}
+    out, tag = td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
+                            dent_size=td.DENT_SIZE if dent_size is None else dent_size,
+                            dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto, info=info,
+                            cover=cover)
+    if auto and info.get("decimated"):
+        return out, {"tag": tag, "decimated": True, "face_tags": info.get("face_tags")}
+    return out, tag
 
 
 KINDS = {"voxel": trim_edges, "lean": lean_trim, "thin": trim_thin, "chip": chip_trim}
@@ -112,17 +121,23 @@ def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
     try:
         mn = get_mrmeshnumpy()
         src = mn.meshFromFacesVerts(faces, verts)
+        if mode == AUTO_DETAIL:               # (Auto Detail: the voxel from the mesh's own shape)
+            res = auto_resolution(src, res)
         out, tag = KINDS[kind](src, res, *params)
+        face_tags, done = None, False
+        if isinstance(tag, dict):             # (Chip, Auto Detail: decimated already, a tag per face)
+            face_tags, done, tag = tag.get("face_tags"), bool(tag.get("decimated")), tag.get("tag")
         if tag is not None:
             res, ratio = RESOLUTION_PRESETS[tag]
         if face_count(out) == 0:
             return ("collapsed",)
-        if auto_decimate:   # the same as blender_meshlib_utils._decimate
+        if auto_decimate and not done:   # the same as blender_meshlib_utils._decimate
             out = shared_auto_decimate(out, face_count(src), res, mode, ratio)
         if out.topology.numValidFaces() != out.topology.faceSize():
             out.pack()
         return ("ok", np.asarray(mn.getNumpyVerts(out), np.float32),
-                np.asarray(mn.getNumpyFaces(out.topology), np.int32), res)
+                np.asarray(mn.getNumpyFaces(out.topology), np.int32), res,
+                None if face_tags is None else np.asarray(face_tags, np.int32))
     except MeshCollapsedError:
         return ("collapsed",)
     except Exception as e:

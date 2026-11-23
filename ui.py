@@ -254,6 +254,9 @@ class QUICKINFILL_PT_sidebar(Panel):
             prop_with_suffix(vc, "ask_above_seconds", "Ask Before Jobs Over", "s")
             row = vc.row(align=True)
             row.prop(s, "smart_resolution", text="Smart Res", toggle=True)
+            sub = row.row(align=True)
+            sub.active = s.smart_resolution
+            sub.prop(s, "auto_detail", text="Auto Detail", toggle=True)
             row.operator("quick_infill.select_by_resolution_tag", text="", icon='VIEWZOOM')
             row.operator("quick_infill.pick_resolution_tag", text="", icon='EYEDROPPER')
 

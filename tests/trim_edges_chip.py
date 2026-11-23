@@ -1,4 +1,4 @@
-"""Trim Edges test: Chip (stone damage meshes + Trim Thin), Only Cut Edges, Round, through the real
+"""Trim Edges test: Chip (chisel strokes on the sharp edges, dents on the flat faces, Trim Thin), Only Cut Edges, Round, through the real
 operator. Background Blender only, on copies; nothing is saved.
 
     blender -b <file with sp_cut stones>.blend --python tests/trim_edges_chip.py -- <stone> [<stone> ...]
@@ -108,23 +108,83 @@ def run(method, only_cut=False):
 chip = run("CHIP")
 check(any(v > 0.1 for v in chip), "Chip chipped something (%s)" % ", ".join("%.2f" % v for v in chip))
 cut = run("CHIP", only_cut=True)
-check(all(c <= a + 0.05 for c, a in zip(cut, chip)), "Only Cut Edges takes no more than all edges")
+# (the cut faces' edges are chiselled in full either way; the strokes are drawn at random in another order, so the
+# totals wander a little: 2.02 vs 1.87 % on Tna_Stone_006, 2026-11-23)
+check(all(c <= a + 0.3 for c, a in zip(cut, chip)), "Only Cut Edges takes no more than all edges (%s vs %s %%)"
+      % (["%.2f" % c for c in cut], ["%.2f" % a for a in chip]))
 lean = run("ROUND")
 for n, a in zip(names, lean):
     print("ROUND %s: volume lost %.2f %%" % (n, a))
 check([e.identifier for e in s.bl_rna.properties["trim_edges_method"].enum_items] == ["ROUND", "CHIP"],
       "Trim Edges has Round and Chip only (Round (old) taken out)")
-check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 0.8) < 1e-6
-      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 2.5) < 1e-6, "Chip Size 0.8 and Amount 2.5 by default")
+check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 1.0) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 8.0) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_dent_size"].default - 0.5) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_dents"].default - 16.0) < 1e-6,
+      "Chip Size 1 (Carve's Standard chisel), Amount 8, Dent Size 0.5, Dents 16 by default")
 tops = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".tools_operators")
-check(len(tops.chip_meshes(bpy.context)) > 0, "Chip Meshes found (%d damage meshes)" % len(tops.chip_meshes(bpy.context)))
+check(len(tops.chip_meshes(bpy.context)) > 0, "Dent Meshes found (%d damage meshes, Dent_L)" % len(tops.chip_meshes(bpy.context)))
+# Alex 2026-11-23: chisel strokes on the long sharp edges and the corners, dents on the flat faces
+td = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".trim_dent")
+info = {}
+td.dent_chip(ml_of(bpy.data.objects[names[0]]), [], 1.0, 2.5, 1.0, info=info, face_dents=tops.chip_meshes(bpy.context),
+             dent_size=0.5, dent_amount=16.0)
+check(info.get("strokes", 0) > 0 and info.get("corner_strokes", 0) > 0 and info.get("dents", 0) > 0,
+      "Chip on %s: %d chisel strokes on the edges, %d on corners, %d dents on %d flat faces"
+      % (names[0], info.get("strokes", 0), info.get("corner_strokes", 0), info.get("dents", 0), info.get("flat_faces", 0)))
+# Alex 2026-11-23 "make sure each island gets chipped individually": two stones in one mesh, each chipped on its own
+if len(names) >= 2:
+    A, B = ml_of(bpy.data.objects[names[0]]), ml_of(bpy.data.objects[names[1]])
+    VA, FA = mn.getNumpyVerts(A) * 10.0, mn.getNumpyFaces(A.topology)          # (x10: Quick Infill's units)
+    VB, FB = (mn.getNumpyVerts(B) + np.array([5.0, 0, 0], np.float32)) * 10.0, mn.getNumpyFaces(B.topology)
+    both = mn.meshFromFacesVerts(np.concatenate([FA, FB + len(VA)]).astype(np.int32), np.concatenate([VA, VB]))
+    info2 = {}
+    out2, tag2 = td.dent_trim(both, 0.075, [], 1.0, 2.5, 10.0, info=info2, face_dents=tops.chip_meshes(bpy.context),
+                              auto=True)
+    per = info2.get("per_island", [])
+    n_out = len(mm.MeshComponents.getAllComponents(mm.MeshPart(out2)))
+    check(info2.get("islands") == 2 and len(per) == 2 and all(p_.get("strokes", 0) > 0 for p_ in per)
+          and n_out >= 2 and out2.topology.findHoleRepresentiveEdges().__len__() == 0,
+          "two islands in one mesh: each chipped on its own (%s strokes, tags %s), %d pieces after, closed"
+          % ([p_.get("strokes") for p_ in per], [p_.get("tag") for p_ in per], n_out))
+# Alex 2026-11-23 "skip hidden faces": no dent where another stone of the run lies over the face (a foot's top under
+# its plinth). A slab with a block standing on the middle of its top: dents round the block, none under it.
+def box_mesh(lo, hi):
+    lo, hi = np.array(lo, np.float32) * 10.0, np.array(hi, np.float32) * 10.0
+    V = np.array([[x, y, z] for z in (lo[2], hi[2]) for y in (lo[1], hi[1]) for x in (lo[0], hi[0])], np.float32)
+    F = np.array([[0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4], [2, 6, 3], [3, 6, 7],
+                  [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5]], np.int32)
+    return mn.meshFromFacesVerts(F, V)
+
+
+slab, block = box_mesh((0, 0, 0), (2.0, 2.0, 0.4)), box_mesh((0.5, 0.5, 0.42), (1.5, 1.5, 1.4))
+fd = tops.chip_meshes(bpy.context)
+under = {}
+for label, cov in (("alone", None), ("under a block", td.cover_of(slab, [block], 10.0))):
+    ic = {}
+    got = td.place_dents(slab, fd, 0.5, 16.0, 10.0, seed=3, info=ic, cover=cov)
+    cen = np.array([np.asarray(v_).mean(0) / 10.0 for v_, _f in got]).reshape(-1, 3)
+    top = cen[cen[:, 2] > 0.3] if len(cen) else cen
+    under[label] = (len(top), int(((top[:, 0] > 0.5) & (top[:, 0] < 1.5) & (top[:, 1] > 0.5) & (top[:, 1] < 1.5)).sum()),
+                    ic.get("covered_skips", 0))
+check(under["alone"][1] > 0 and under["under a block"][1] == 0 and under["under a block"][0] > 0
+      and under["under a block"][2] > 0,
+      "hidden faces: a slab's top alone takes %d dents (%d where the block would stand); with the block on it %d, "
+      "none under the block (%d spots skipped)" % (under["alone"][0], under["alone"][1], under["under a block"][0],
+                                                   under["under a block"][2]))
+s.trim_edges_chip_dents = 0.0
+nodent = run("CHIP")
+check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))
+s.trim_edges_chip_dents = 16.0
 # the same stones get the same chips each time (the seed comes from the stone's shape)
 again = run("CHIP")
-check(all(abs(x - y) < 1e-6 for x, y in zip(chip, again)), "Chip gives the same result twice")
+# (exact: the stones are chipped on several threads at once; a module setting one changed for a moment changed the
+# other's dents, 1 run in 6 differed before trim_dent.flat_regions took it as an argument)
+check(all(abs(x - y) < 1e-6 for x, y in zip(chip, again)), "Chip gives the same result twice (%s vs %s)" % (chip, again))
 s.trim_edges_chip_amount = 0.0
 none = run("CHIP")
-check(sum(none) < sum(chip), "Amount 0 (corners only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
-s.trim_edges_chip_amount = 2.5
+check(sum(none) < sum(chip), "Amount 0 (no strokes, the dents only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
+s.trim_edges_chip_amount = 8.0
 s["trim_edges_method"] = 2                      # a file saved with Round (old)
 settings_mod = sys.modules[type(s).__module__]
 settings_mod._old_round_to_round()

@@ -33,7 +33,12 @@ def draw_offset_tools(layout, context):
     if s.trim_edges_method == 'CHIP':
         row.prop(s, "trim_edges_chip_size", text="Size")
         row.operator("quick_infill.trim_edges", text="Trim Edges", icon='MOD_BOOLEAN')
-        col.row(align=True).prop(s, "trim_edges_chip_amount", text="Amount")
+        row = col.row(align=True)
+        row.prop(s, "trim_edges_chip_amount", text="Amount")
+        row.prop(s, "trim_edges_chip_auto", text="Auto", toggle=True)
+        row = col.row(align=True)
+        row.prop(s, "trim_edges_chip_dent_size", text="Dent Size")
+        row.prop(s, "trim_edges_chip_dents", text="Dents")
         col.row(align=True).prop(s, "trim_edges_chip_meshes", text="")
         col.row(align=True).prop(s, "trim_edges_only_cut")
     else:

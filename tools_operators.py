@@ -219,7 +219,7 @@ class QUICKINFILL_OT_trim_thin(_OffsetToolBase, Operator):
         return ("trim_thin_job", ("thin",))
 
 
-DENT_COLL = "Dent_S"     # Ashlarize's small stone damage meshes: the default Chip Meshes
+DENT_COLL = "Dent_L"     # Ashlarize's big stone damage meshes: the default Dent Meshes (the flat faces' dents)
 
 
 def _dent_collection(context):
@@ -229,7 +229,7 @@ def _dent_collection(context):
     if s.trim_edges_chip_meshes is not None:
         return s.trim_edges_chip_meshes
     sp = getattr(context.scene, "stone_pack", None)
-    c = getattr(sp, "dent_lib_s", None) if sp is not None else None
+    c = getattr(sp, "dent_lib", None) if sp is not None else None
     if c is not None:
         return c
     c = bpy.data.collections.get(DENT_COLL)
@@ -294,20 +294,27 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         if not objs:
             self.report({'ERROR'}, "No mesh selected.")
             return None
-        dents = chip_meshes(context)
-        if not dents:
-            self.report({'ERROR'}, "Trim Edges (Chip): no Chip Meshes. Set Chip Meshes to a collection of "
-                                   "damage meshes (Ashlarize's Dent_S), or set Ashlarize's stone library")
-            return None
+        dents = chip_meshes(context)          # (the flat faces' dents; none found: the edges only)
+        if not dents and float(s.trim_edges_chip_dents) > 0:
+            self.report({'WARNING'}, "Trim Edges (Chip): no Dent Meshes found (Ashlarize's Dent_L): the flat "
+                                     "faces get no dents")
         from .trim_dent import dent_trim
         from .trim_chip import detect_cut_faces
         from .trim_round import trim_thin
         from .blender_meshlib_utils import STL_EXPORT_SCALE
         size, amount = float(s.trim_edges_chip_size), float(s.trim_edges_chip_amount)
+        dsize, damount = float(s.trim_edges_chip_dent_size), float(s.trim_edges_chip_dents)
+        auto = bool(getattr(s, "trim_edges_chip_auto", False))
+        from .blender_meshlib_utils import Retagged
         only_cut = bool(s.trim_edges_only_cut)
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
+        near = {}    # id(meshlib mesh) -> the other stones' faces near it: no dent where one lies over it
 
         def on_prepared(run):
+            from .trim_dent import cover_of
+            srcs = [job.src for job in run.jobs]
+            for job in run.jobs:
+                near[id(job.src)] = cover_of(job.src, [o for o in srcs if o is not job.src], STL_EXPORT_SCALE)
             if not only_cut:
                 return
             for job in run.jobs:
@@ -326,14 +333,21 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                     cut = detect_cut_faces(mesh, STL_EXPORT_SCALE)
                 if cut is None or not np.any(cut):
                     return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
-            return dent_trim(mesh, res, dents, size, amount, STL_EXPORT_SCALE, cut_faces=cut)[0]
+            ii = {}
+            out, tag = dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
+                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii, cover=near.get(id(mesh)))
+            if not tag:
+                return out
+            # (Auto Detail: each island tagged with what it worked out, decimated already)
+            return Retagged(out, tag, decimated=bool(ii.get("decimated")), face_tags=ii.get("face_tags"))
 
         # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
         # whose marks are per object
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
                              on_prepared=on_prepared,
                              process_job=None if only_cut else
-                             ("trim_edges_job", ("chip", dents, size, amount, STL_EXPORT_SCALE)))
+                             ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
+                                                 damount, auto), lambda job: (near.get(id(job.src)),)))
 
     def _lean_round_setup(self, context, s):
         """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an

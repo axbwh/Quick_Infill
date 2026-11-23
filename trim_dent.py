@@ -213,10 +213,10 @@ STROKE_LEN = (5.0 * 0.7, 5.0 * 1.3)   # a stroke's length, x its opening: 5 +- 3
 #                                       of entire strokes")
 STROKE_GAP = (-0.3, 0.3)   # x the opening between one stroke and the next along a run (they run on into each other)
 STROKE_DEPTH = 0.25        # how deep a stroke cuts in from the arris, x its opening (0.016 BU at 0.066) ...
-STROKE_DEPTH_VAR = 0.3     # ... +- this, the whole stroke alike
+STROKE_DEPTH_VAR = 0.345   # ... +- this, the whole stroke alike (0.3 + 15 %: Alex 23 Nov "slightly more variation")
 STROKE_BEND = 0.12         # a stroke is one gentle bend: its middle off the edge's line by up to this x its opening,
 #                            sideways, and up to STROKE_BEND_UP x its depth in and out
-STROKE_BEND_UP = 0.25
+STROKE_BEND_UP = 0.2875    # (0.25 + 15 %, as the depth's variation)
 RUN_MIN = 4.0          # x the opening: a run shorter than this gets no stroke, nor its corners (the facets of a
 #                        rough, sculpted side: Alex's example leaves those as they are)
 RUN_MIN_FLAT = 1.2     # ... but round a big flat face (a joint face's moulded outline: short steps) down to this, and
@@ -440,6 +440,8 @@ def stroke_cutter(pts, up, W, rng=None):
 
 
 CHAMFER_REACH = (1.5, 6.0)  # x the depth: how far across the chamfer plane reaches either side (from the arris' angle)
+CHAMFER_EASE = (1.0 / 3.0, 4.0)  # the cut fades in / out over this share of the stroke, at most this x its depth (was
+#                                  0.25 / 3: Alex 23 Nov "make the exit/entry angle shallower by 25 percent")
 CHAMFER_ABOVE = 2.0    # x the depth: how far out past the arris the cutter stands
 
 
@@ -455,7 +457,7 @@ def chamfer_cutter(pts, up, d, turn, rng):
     X = d * float(np.clip(1.3 / math.tan(math.radians(max(10.0, min(170.0, turn)) / 2.0)), *CHAMFER_REACH))
     H = CHAMFER_ABOVE * d + 1e-3 * d
     lift = rng.uniform(-STROKE_BEND_UP, STROKE_BEND_UP)
-    ease = max(min(0.25 * L, 3.0 * d), 1e-9)
+    ease = max(min(CHAMFER_EASE[0] * L, CHAMFER_EASE[1] * d), 1e-9)
     rings = []
     for i, p in enumerate(P):
         e = min(s[i], L - s[i]) / ease

@@ -75,6 +75,14 @@ else:
     bm.faces.new((a, c, d))
     bm.to_mesh(me)
     bm.free()
+    # a CLOSED flat speck as one more object: two triangles back to back, 0.3 mm long (over the tiny-piece
+    # size). Blender's Manifold solver refuses it, and used to skip the whole union with it: only the
+    # biggest shell came out (Alex 2026-11-23, a Print Ready support carrying such specks)
+    sme = bpy.data.meshes.new("Speck")
+    sme.from_pydata([(0, 0, 0.2), (0.03, 0, 0.2), (0.03, 0.005, 0.21)], [], [(0, 1, 2), (0, 2, 1)])
+    speck = bpy.data.objects.new("Speck", sme)
+    sc.collection.objects.link(speck)
+    objs.append(speck)
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.9, 0, 0.4), scale=(1.6, 0.55, 1.2))
     blank = bpy.context.object
     blank.name = "Blank"
@@ -108,6 +116,10 @@ def run(blank, regrow=False):
     res = bpy.ops.quick_infill.make_manifold()
     dt = time.time() - t0
     check(res == {'FINISHED'}, f"the operator finished ({res})")
+    if not args:
+        ob_ = bpy.context.active_object
+        xs = [p.x for p in world_co(ob_)] if ob_ is not None and ob_.name.endswith(tuple("_Solid.0123456789")) else [0.0]
+        check(max(xs) - min(xs) > 1.45, f"every object is in the result, not just the biggest ({max(xs) - min(xs):.2f} BU wide)")
     out = bpy.context.view_layer.objects.active
     check(out is not None and "_Solid" in out.name, f"result object {out.name if out else None}")
     if out is not None and "_Solid" in out.name:

@@ -23,6 +23,7 @@ from .meshlib_utils import get_meshlib, get_mrmeshnumpy, JobCancelled, check_can
 from .offset_utils import (
     RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, nearest_resolution_tag,
     decimate_mesh, auto_decimate, should_auto_decimate_faces, face_count, MeshCollapsedError, PARALLEL_DECIMATE_FACES,
+    AUTO_DETAIL, auto_resolution,
 )
 
 # Scale applied to Blender coordinates when entering meshlib (and undone on the way back).
@@ -390,6 +391,9 @@ class _Job:
 def _effective_settings(obj, settings, resolution, smart):
     ratio = settings.decimation_ratio
     mode = settings.decimate_mode
+    if smart and getattr(settings, "auto_detail", False):
+        # Auto Detail: the voxel from each mesh's own shape (in _compute, off the main thread), the decimation by error
+        return resolution, ratio, AUTO_DETAIL
     if smart:
         tag = read_object_resolution_tag(obj)
         if tag:
@@ -433,9 +437,11 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
     src = job.src
 
     components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
+    auto = job.mode == AUTO_DETAIL
     if len(components) <= 1:
-        got = operation_fn(src, job.res)
-        out, res, ratio = _unwrap(got, job.res, job.ratio)
+        res0 = auto_resolution(src, job.res) if auto else job.res
+        got = operation_fn(src, res0)
+        out, res, ratio = _unwrap(got, res0, job.ratio)
         if face_count(out) == 0:
             raise MeshCollapsedError()
         done = isinstance(got, Retagged) and got.decimated
@@ -457,7 +463,9 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
         island = mm.Mesh()
         island.addMeshPart(mm.MeshPart(src, bitset))
         res, ratio, mode = job.res, job.ratio, job.mode
-        if smart and job.face_tags is not None:
+        if auto:
+            res = auto_resolution(island, res)
+        elif smart and job.face_tags is not None:
             mask = mn.getNumpyBitSet(bitset)
             mask = np.pad(mask, (0, max(0, n_faces - mask.size)))[:n_faces]
             tag = _index_to_tag(_majority(job.face_tags[mask[:job.face_tags.size]]))

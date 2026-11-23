@@ -144,6 +144,14 @@ class QuickInfillSettings(PropertyGroup):
                     "size and ratio. The values set here are only used for meshes without a tag",
         default=True,
     )
+    auto_detail: BoolProperty(
+        name="Auto Detail",
+        description="Work out each mesh's resolution and decimation from its own shape.\nThe voxel size is the "
+                    "coarsest that keeps the surface within 0.04 mm, and the result is decimated as far as a 0.1 mm error "
+                    "allows (flat faces down to a few triangles), not to a face ratio. Needs Smart on. "
+                    "Off: the resolution tag's voxel size and ratio",
+        default=True,
+    )
     apply_modifiers_on_export: BoolProperty(
         name="Apply Modifiers",
         description="Work on each object as its modifiers leave it.\nOff: the modifiers are ignored",

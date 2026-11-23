@@ -1408,7 +1408,11 @@ CURVED_MIN_AREA = 0.03    # BU^2: a curved face this big or more can take a dent
 CURVED_ONE_WAY = 0.2       # its normals nearly in one plane (smallest / largest spread): curved one way, as a soffit, a
 #                            moulding's channel or a shaft (Alex 23 Nov: "XL profile and the pillars should get some stone
 #                            damage"); a leaf or a capital's carving curves both ways and is left alone
-CURVED_SHRINKS = 1         # a dent that does not fit is tried this many times smaller (x 0.75), then left out
+CURVED_SHRINKS = 4         # a dent that does not fit is tried this many times smaller (x 0.75: down to a third, a foot's
+#                            narrow moulded band), then left out
+CURVED_STONE_AREA = 0.5    # BU^2: only on a stone with this much surface (leaf pieces have under 0.4, stones over 0.6)
+CURVED_PROBE = 0.08        # BU: the stone is looked at this far round a dent, however small the dent: straight there (a
+#                            moulding, whatever its profile does), not a leaf
 CURVED_LOCAL_MAX = 50.0   # deg: under one dent the stone turns at most this much from where the dent sits
 CURVED_DEG = 20.0          # deg: the curved side grown from its facets over edges turning less than this
 
@@ -1475,6 +1479,8 @@ def curved_dents(V, F, dents, size, unit, rng, info, flat=None):
         return []
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
     ar = 0.5 * np.linalg.norm(c, axis=1)
+    if float(ar.sum()) < CURVED_STONE_AREA * unit * unit:
+        return []                                    # (a small piece: a leaf of a leafy abacus, a loose bead)
     fn = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
     lab, rim = smooth_patches(F, fn)
     # (where a dent may land: the smooth faces big enough, the flat faces' own dents apart; whether the stone under one
@@ -1518,13 +1524,15 @@ def curved_dents(V, F, dents, size, unit, rng, info, flat=None):
                 t = np.clip(((p - A_) * d).sum(1) / np.maximum((d * d).sum(1), 1e-24), 0, 1)
                 if float(np.linalg.norm(A_ + d * t[:, None] - p, axis=1).min()) < DENT_EDGE * half:
                     continue
-            near = np.flatnonzero(((cen - p) ** 2).sum(1) < half * half)      # (the stone under this dent)
-            if len(near):
-                if float((fn[near] @ fn[f]).min()) < cos_max:
-                    continue                         # (it turns away under the dent: an edge, a thin part's far side)
-                sv = np.linalg.svd(fn[near] * np.sqrt(ar[near])[:, None], compute_uv=False)
-                if len(sv) > 2 and sv[2] > CURVED_ONE_WAY * sv[0]:
-                    continue                         # (curved both ways there: a leaf, carving)
+            d2 = ((cen - p) ** 2).sum(1)
+            near = np.flatnonzero(d2 < half * half)                  # (the stone under this dent)
+            if len(near) and float((fn[near] @ fn[f]).min()) < cos_max:
+                continue                             # (it turns away under the dent: an edge, a thin part's far side)
+            probe = np.flatnonzero(d2 < max(half, CURVED_PROBE * unit) ** 2)    # (and round it, whatever its size)
+            if len(probe) > 2:
+                sv = np.linalg.svd(fn[probe] * np.sqrt(ar[probe])[:, None], compute_uv=False)
+                if sv[2] > CURVED_ONE_WAY * sv[0]:
+                    continue                         # (curved both ways there: a leaf, carving, a rounded corner)
             break
         else:
             continue

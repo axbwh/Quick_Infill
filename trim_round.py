@@ -12,7 +12,7 @@ import numpy as np
 from .meshlib_utils import get_meshlib, get_mrmeshnumpy
 from .offset_utils import (
     cuda_offset, decimate_mesh, target_faces_for_density, ensure_not_collapsed, bbox_of, face_count,
-    auto_decimate as shared_auto_decimate, PARALLEL_DECIMATE_FACES, OFFSET_PRESETS, RESOLUTION_PRESETS,
+    auto_decimate as shared_auto_decimate, AUTO_DETAIL, auto_resolution, PARALLEL_DECIMATE_FACES, OFFSET_PRESETS, RESOLUTION_PRESETS,
     nearest_resolution_tag, MeshCollapsedError,
 )
 
@@ -119,6 +119,8 @@ def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
     try:
         mn = get_mrmeshnumpy()
         src = mn.meshFromFacesVerts(faces, verts)
+        if mode == AUTO_DETAIL:               # (Auto Detail: the voxel from the mesh's own shape)
+            res = auto_resolution(src, res)
         out, tag = KINDS[kind](src, res, *params)
         face_tags, done = None, False
         if isinstance(tag, dict):             # (Chip, Auto Detail: decimated already, a tag per face)

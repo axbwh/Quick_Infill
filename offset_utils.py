@@ -255,10 +255,30 @@ def compute_voxel_size(mesh, target_voxels: int, min_resolution: float) -> float
 PARALLEL_DECIMATE_FACES = 20_000
 
 
+AUTO_DETAIL = "AUTO_DETAIL"   # a decimation mode: Auto Detail (trim_dent.detail_tag / decimate_flat), set by the pipeline
+AUTO_UNIT = 10.0              # Quick Infill's meshes are in Blender units x 10 (blender_meshlib_utils.STL_EXPORT_SCALE)
+
+
+def auto_resolution(mesh, fallback=None):
+    """Auto Detail's voxel size for a mesh, from its own shape (Alex 2026-11-23: every offset tool follows the smart
+    resolution worked out for Chip): trim_dent.detail_tag; the fallback if that fails."""
+    try:
+        from .trim_dent import detail_tag
+        return float(detail_tag(mesh, AUTO_UNIT)[1])
+    except Exception:
+        if fallback is None:
+            raise
+        return fallback
+
+
 def auto_decimate(mesh, initial_faces: int, voxel_size: Optional[float], mode: str, ratio: Optional[float]):
     """The Auto Decimation every tool uses on its result: should_auto_decimate_faces' rule, then
     decimate_mesh (maxError 10 voxels, the shared parallel split). Returns the mesh (decimated in
-    place, or as it was)."""
+    place, or as it was). Mode AUTO_DETAIL: as far as an error allows instead (trim_dent.decimate_flat: 0.01 BU,
+    or 1.5 x the voxel if more), no face ratio: flat faces go down to a few triangles, detail keeps what it needs."""
+    if mode == AUTO_DETAIL and voxel_size:
+        from . import trim_dent as td
+        return td.decimate_flat(mesh, max(td.DEC_TOL * AUTO_UNIT, td.DEC_VOX * float(voxel_size)))
     do, target = should_auto_decimate_faces(initial_faces, face_count(mesh), voxel_size=voxel_size,
                                             mode=mode, ratio=ratio)
     if do:

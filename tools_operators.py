@@ -313,6 +313,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         dsize, damount = float(s.trim_edges_chip_dent_size), float(s.trim_edges_chip_dents)
         auto = one_click or bool(getattr(s, "trim_edges_chip_auto", False))
         from .blender_meshlib_utils import Retagged
+        from .process_pool import CHIP_MIN_JOBS
         only_cut = bool(s.trim_edges_only_cut) and not one_click
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
         near = {}    # id(meshlib mesh) -> the other stones' faces near it: no dent where one lies over it
@@ -359,7 +360,7 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         # decimated once, a tag per island). With the Islands toggle on the pipeline split them first: Chip then saw no
         # neighbours, and each island was decimated again by ratio.
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             on_prepared=on_prepared, islands=False,
+                             on_prepared=on_prepared, islands=False, process_min_jobs=CHIP_MIN_JOBS,
                              process_job=None if only_cut else
                              ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
                                                  damount, auto), lambda job: (near.get(id(job.src)), low.get("z"))))

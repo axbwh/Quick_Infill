@@ -238,6 +238,8 @@ RAISED_EDGES = 3       # a corner where this many sharp convex edges meet stands
 RAISED_DEPTH = (4.0, 7.0)   # ... knocked off with one flat chip this many times a stroke's depth deep (Alex's example:
 #                             0.086 and 0.136 against 0.011 - 0.021 on the edge) ...
 RAISED_DEPTH_FLAT = (2.0, 3.5)  # ... a joint face's corner with one long edge only (a moulded profile's steps): half that
+CORNER_THICK_CUT = 0.5  # a thick stone's corner chips this much shallower (Alex 23 Nov: "Corner chipping on large stones max
+#                        depth should be reduced 50%"), a thin one's as they are, in proportion between
 RAISED_CAP = 1.5       # ... at most this x the depth the stone there allows (was x 4 - 7 too: Alex 23 Nov "cut is too deep"
 #                        on a small arch stone's end)
 RAISED_TILT = 15.0     # ... its face tipped at random by up to this much
@@ -884,6 +886,17 @@ SIZE_DEPTH = ((0.2, 1.0), (0.4, 1.25))  # (BU median thickness, x depth): a ston
 #                                         depth"; thin ones 0.17 - 0.19 BU, the XL 0.41)
 
 
+THIN_DETAIL_KEEP = 0.3     # x: a thin stone's edges in its detail (not along a flat or joint face) keep this share of
+#                            their strokes, a thick one all (Alex 23 Nov: "reduce the frequency of cuts on the detailed
+#                            parts of the thin profile 70% (relative)")
+
+
+def thick_share(k_size):
+    """0 for a thin stone, 1 for a thick one (from its SIZE_DEPTH factor)."""
+    (_t0, k0), (_t1, k1) = SIZE_DEPTH
+    return float(np.clip((k_size - k0) / max(k1 - k0, 1e-9), 0.0, 1.0))
+
+
 def size_depth(th):
     """The depth factor for a stone of median thickness th (BU; None: 1)."""
     if th is None or not np.isfinite(th):
@@ -958,6 +971,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     th_med = float(np.nanmedian(TH)) / unit if TH is not None and np.isfinite(TH).any() else None
     k_size = size_depth(th_med)
     info["size_depth"] = round(k_size, 3)
+    k_corner = 1.0 - CORNER_THICK_CUT * thick_share(k_size)   # (a big stone's corner chips: shallower)
     SP = run_spacing(pieces, AUTO_RANGE[1] * unit / SPACING_SHARE) if auto else None
     vrun = {}                                # vertex -> the runs that end there (the corners' chisel)
     for r, (_P, _l, _r, I) in enumerate(pieces):
@@ -1005,6 +1019,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             k_keep = max(k_keep, keep * square(angs[r]))   # (a square arris in the detail too: the thin arch's long edges)
             if angs[r] >= KNIFE_DEG:
                 k_keep = keep                              # (a knife edge: trimmed all along)
+            if not on_flat[r]:                             # (the detail of a thin stone: fewer cuts)
+                k_keep *= THIN_DETAIL_KEEP + (1.0 - THIN_DETAIL_KEEP) * thick_share(k_size)
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
@@ -1060,7 +1076,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             cap = min(cap, DEPTH_SPACING * min(float(SP[r]) for r in vrun[vi]))
         if raised:                           # (one flat chip off the corner, 4 - 7 x a stroke's depth deep)
             rd = RAISED_DEPTH if n_long >= 2 else RAISED_DEPTH_FLAT
-            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc * k_size, RAISED_CAP * cap)
+            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc * k_size * k_corner, RAISED_CAP * cap)
             chip = corner_chip(c, n, dc, rng)
             if chip_too_big(m, chip, dc):    # (the corner is not a clean, standing corner: no chip)
                 continue
@@ -1129,7 +1145,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 n += q / (np.linalg.norm(q) + 1e-12)
             n /= np.linalg.norm(n) + 1e-12
             cap = DEPTH_THICK * thickness_in(m, c, -n, unit) if TH is not None else np.inf
-            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc * k_size, RAISED_CAP * cap)
+            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc * k_size * k_corner, RAISED_CAP * cap)
             # (the corner itself lies out past the bevels: the chip's base set from there)
             corner = c + n * float(np.mean([np.linalg.norm(E[i] - c) for i in g]))
             chip = corner_chip(corner, n, dc, rng)
@@ -1325,8 +1341,15 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
 
 
 CURVED_CHANCE = 1.0 / 3.0  # (Alex 2026-11-23, an arch stone's curved soffit: "about a third of such arc stones should get
+CURVED_CHANCE_THICK = 0.30  # ... plus this on a thick stone (Alex 23 Nov: "increase the frequency of the XL profile getting
+#                              damaged 30% (absolute)"), in proportion between
 CURVED_COUNT = (1, 3)      # one to three stone damage on the flat surface ... large damage first, then small")
 CURVED_SIZES = (1.3, 0.8, 0.5)  # x the Dent Size, the first, second and third (each +- 15 %)
+CURVED_MIN_AREA = 0.03    # BU^2: a curved face this big or more can take a dent
+CURVED_ONE_WAY = 0.2       # its normals nearly in one plane (smallest / largest spread): curved one way, as a soffit, a
+#                            moulding's channel or a shaft (Alex 23 Nov: "XL profile and the pillars should get some stone
+#                            damage"); a leaf or a capital's carving curves both ways and is left alone
+CURVED_MIN_TURN = 8.0     # deg: and it turns at least this much (else it is flat)
 CURVED_DEG = 20.0          # deg: the curved side grown from its facets over edges turning less than this
 
 
@@ -1354,27 +1377,65 @@ def curved_surface(F, fn, seeds):
     return np.flatnonzero(seen)
 
 
+def smooth_patches(F, fn):
+    """Per face, the smooth patch it lies on: faces joined over edges turning under CURVED_DEG (a moulding's curved
+    channel, a shaft's round side, an arch's soffit), cut apart by the sharp edges. (labels, edge -> faces)."""
+    adj = {}
+    for i, (a, b, c) in enumerate(F):
+        for e in ((a, b), (b, c), (c, a)):
+            adj.setdefault((min(e), max(e)), []).append(i)
+    par = np.arange(len(F))
+
+    def find(x):
+        while par[x] != x:
+            par[x] = par[par[x]]
+            x = par[x]
+        return x
+    cmin = math.cos(math.radians(CURVED_DEG))
+    for fs in adj.values():
+        if len(fs) == 2 and float(fn[fs[0]] @ fn[fs[1]]) > cmin:
+            ra, rb = find(fs[0]), find(fs[1])
+            if ra != rb:
+                par[ra] = rb
+    return np.array([find(i) for i in range(len(F))]), adj
+
+
 def curved_dents(V, F, dents, size, unit, rng, info):
-    """On a third of the stones with a faceted curved side (an arch stone's soffit), one to three dents on it, the big
-    one first: [(V, F)] in the mesh's units."""
+    """Stone damage on the stone's smooth curved faces (an arch's soffit, a moulding's channels, a pillar's shaft):
+    on CURVED_CHANCE of the stones (more on thick ones), one to three dents, the big one first, each kept inside the
+    curved face it lands on: [(V, F)] in the mesh's units."""
     info["curved_dents"] = 0
     if not dents:
         return []
-    regs, ar = flat_regions(V, F, unit, min(FLAT_AREA, BIG_FLAT))
-    fams = facet_family(V, F, regs, ARRIS_GAP * CHISEL * unit, groups=True)
-    if not fams or rng.random() >= CURVED_CHANCE:
+    chance = CURVED_CHANCE + CURVED_CHANCE_THICK * thick_share(info.get("size_depth", 1.0))
+    if rng.random() >= chance:
         return []
-    fam = max(fams, key=lambda g: sum(regs[i][2] for i in g))
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    ar = 0.5 * np.linalg.norm(c, axis=1)
     fn = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
-    faces = curved_surface(F, fn, np.concatenate([regs[i][0] for i in fam]))
-    ec = {}
-    for i in faces:
-        a, b, c_ = F[i]
-        for e in ((a, b), (b, c_), (c_, a)):
-            kk = (min(e), max(e))
-            ec[kk] = ec.get(kk, 0) + 1
-    rim = np.array([k for k, n_ in ec.items() if n_ == 1], np.int64).reshape(-1, 2)
+    lab, adj = smooth_patches(F, fn)
+    cands = []
+    for L in np.unique(lab):
+        fs = np.flatnonzero(lab == L)
+        A = float(ar[fs].sum())
+        if A < CURVED_MIN_AREA * unit * unit:
+            continue
+        m_ = (fn[fs] * ar[fs, None]).sum(0)
+        m_ /= np.linalg.norm(m_) + 1e-12
+        if float(np.degrees(np.arccos(np.clip(fn[fs] @ m_, -1, 1))).max()) < CURVED_MIN_TURN:
+            continue                                 # (flat: the flat faces' own dents)
+        sv = np.linalg.svd(fn[fs] * np.sqrt(ar[fs])[:, None], compute_uv=False)
+        if sv[2] > CURVED_ONE_WAY * sv[0]:
+            continue                                 # (curved both ways: a leaf, carved detail, not a dressed face)
+        cands.append(fs)
+    info["curved_faces"] = len(cands)
+    if not cands:
+        return []
+    faces = np.concatenate(cands)
+    rim = np.array([e for e, fs in adj.items() if len(fs) != 2 or lab[fs[0]] != lab[fs[1]]], np.int64).reshape(-1, 2)
+    infaces = np.zeros(len(F), bool)
+    infaces[faces] = True
+    rim = rim[[any(infaces[f] for f in adj[(int(a), int(b))]) for a, b in rim]] if len(rim) else rim
     pw = ar[faces] / ar[faces].sum()
     out = []
     placed = []

@@ -213,10 +213,11 @@ STROKE_LEN = (5.0 * 0.7, 5.0 * 1.3)   # a stroke's length, x its opening: 5 +- 3
 #                                       of entire strokes")
 STROKE_GAP = (-0.3, 0.3)   # x the opening between one stroke and the next along a run (they run on into each other)
 STROKE_DEPTH = 0.25        # how deep a stroke cuts in from the arris, x its opening (0.016 BU at 0.066) ...
-STROKE_DEPTH_VAR = 0.345   # ... +- this, the whole stroke alike (0.3 + 15 %: Alex 23 Nov "slightly more variation")
+STROKE_DEPTH_VAR = (-0.45, 0.30)  # ... this much shallower / deeper, the whole stroke alike (Alex 23 Nov: "the maximum
+#                                  depth was good at 30% the minimum depth is what should get more variation")
 STROKE_BEND = 0.12         # a stroke is one gentle bend: its middle off the edge's line by up to this x its opening,
 #                            sideways, and up to STROKE_BEND_UP x its depth in and out
-STROKE_BEND_UP = 0.2875    # (0.25 + 15 %, as the depth's variation)
+STROKE_BEND_UP = (-0.40, 0.25)    # (the same way: the deepest swell as before, thinner places thinner)
 RUN_MIN = 4.0          # x the opening: a run shorter than this gets no stroke, nor its corners (the facets of a
 #                        rough, sculpted side: Alex's example leaves those as they are)
 RUN_MIN_FLAT = 1.2     # ... but round a big flat face (a joint face's moulded outline: short steps) down to this, and
@@ -456,7 +457,7 @@ def chamfer_cutter(pts, up, d, turn, rng):
     L = float(s[-1])
     X = d * float(np.clip(1.3 / math.tan(math.radians(max(10.0, min(170.0, turn)) / 2.0)), *CHAMFER_REACH))
     H = CHAMFER_ABOVE * d + 1e-3 * d
-    lift = rng.uniform(-STROKE_BEND_UP, STROKE_BEND_UP)
+    lift = rng.uniform(*STROKE_BEND_UP)
     ease = max(min(CHAMFER_EASE[0] * L, CHAMFER_EASE[1] * d), 1e-9)
     rings = []
     for i, p in enumerate(P):
@@ -491,10 +492,10 @@ def chamfer_cutter(pts, up, d, turn, rng):
 
 
 def stroke_depth(W, rng, cap=None, scale=1.0):
-    """A stroke's depth: STROKE_DEPTH x W x scale, +- STROKE_DEPTH_VAR for the whole stroke, held by cap."""
-    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
+    """A stroke's depth: STROKE_DEPTH x W x scale, varied by STROKE_DEPTH_VAR for the whole stroke, held by cap."""
+    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(*STROKE_DEPTH_VAR))
     if cap is not None and np.isfinite(cap):
-        d = min(d, float(cap) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, 0.0)))
+        d = min(d, float(cap) * (1.0 + rng.uniform(STROKE_DEPTH_VAR[0], 0.0)))
     return d
 
 
@@ -589,9 +590,9 @@ def bent(pts, up, W, rng, cap=None, scale=1.0):
     """A stroke's line, set so it cuts STROKE_DEPTH x W in (+- STROKE_DEPTH_VAR, the whole stroke alike) and bent once,
     gently (one arc, its middle up to STROKE_BEND x W sideways and STROKE_BEND_UP x its depth in or out)."""
     P = np.asarray(pts, np.float64)
-    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
+    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(*STROKE_DEPTH_VAR))
     if cap is not None and np.isfinite(cap):                 # (held by the detail there, still varied +-30 %)
-        d = min(d, float(cap) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, 0.0)))
+        d = min(d, float(cap) * (1.0 + rng.uniform(STROKE_DEPTH_VAR[0], 0.0)))
     t = P[-1] - P[0]
     t = t / (np.linalg.norm(t) + 1e-12)
     x = np.cross(t, up)
@@ -600,7 +601,7 @@ def bent(pts, up, W, rng, cap=None, scale=1.0):
     u = s / max(s[-1], 1e-12)
     arc = np.sin(np.pi * u)[:, None]
     side = rng.uniform(-STROKE_BEND, STROKE_BEND) * W
-    lift = rng.uniform(-STROKE_BEND_UP, STROKE_BEND_UP) * d
+    lift = rng.uniform(*STROKE_BEND_UP) * d
     return P + up * (depth_of(W) - d) + arc * (x * side + up * lift)
 
 
@@ -898,12 +899,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     _mm, _mn = _ml()
     VV = np.asarray(_mn.getNumpyVerts(m), np.float64)
     FF = np.asarray(_mn.getNumpyFaces(m.topology), np.int64)
-    _fa0 = FLAT_AREA
-    try:
-        globals()["FLAT_AREA"] = min(FLAT_AREA, BIG_FLAT)      # (the regions down to BIG_FLAT)
-        regs, _ar = flat_regions(VV, FF, unit)
-    finally:
-        globals()["FLAT_AREA"] = _fa0
+    regs, _ar = flat_regions(VV, FF, unit, min(FLAT_AREA, BIG_FLAT))     # (the regions down to BIG_FLAT)
     bigf = np.zeros(len(FF), bool)
     big = []
     curved = facet_family(VV, FF, regs, ARRIS_GAP * CHISEL * float(size) * unit)
@@ -1185,9 +1181,11 @@ DENT_BITE = (0.1, 0.2)     # x its width: how deep a dent bites into the flat fa
 #                            0.03 BU under their origin: laid on the face as they are, most only scraped it)
 
 
-def flat_regions(V, F, unit=1.0):
-    """The flat faces (coplanar edge-connected regions) of at least FLAT_AREA: ([(face indices, normal, area)],
-    face areas)."""
+def flat_regions(V, F, unit=1.0, min_area=None):
+    """The flat faces (coplanar edge-connected regions) of at least min_area (FLAT_AREA), BU^2: ([(face indices,
+    normal, area)], face areas). (Passed in, never set on the module: the operator chips stones on several threads at
+    once, and a module setting changed by one changed the other's dents: Chip gave a different result run to run.)"""
+    min_area = FLAT_AREA if min_area is None else min_area
     c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
     ar = 0.5 * np.linalg.norm(c, axis=1)
     nr = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
@@ -1222,7 +1220,7 @@ def flat_regions(V, F, unit=1.0):
                     q.append(h)
                     acc = acc + nr[h] * ar[h]
         A = float(ar[reg].sum())
-        if A >= FLAT_AREA * unit * unit:
+        if A >= min_area * unit * unit:
             out.append((np.array(reg), acc / (np.linalg.norm(acc) + 1e-30), A))
     return out, ar
 
@@ -1327,12 +1325,7 @@ def curved_dents(V, F, dents, size, unit, rng, info):
     info["curved_dents"] = 0
     if not dents:
         return []
-    fa0 = FLAT_AREA
-    try:
-        globals()["FLAT_AREA"] = min(FLAT_AREA, BIG_FLAT)
-        regs, ar = flat_regions(V, F, unit)
-    finally:
-        globals()["FLAT_AREA"] = fa0
+    regs, ar = flat_regions(V, F, unit, min(FLAT_AREA, BIG_FLAT))
     fams = facet_family(V, F, regs, ARRIS_GAP * CHISEL * unit, groups=True)
     if not fams or rng.random() >= CURVED_CHANCE:
         return []

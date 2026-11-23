@@ -219,6 +219,8 @@ STROKE_BEND = 0.12         # a stroke is one gentle bend: its middle off the edg
 STROKE_BEND_UP = 0.25
 RUN_MIN = 4.0          # x the opening: a run shorter than this gets no stroke, nor its corners (the facets of a
 #                        rough, sculpted side: Alex's example leaves those as they are)
+RUN_MIN_FLAT = 1.2     # ... but round a big flat face (a joint face's moulded outline: short steps) down to this, and
+#                        its corners always get a stroke or a chip (Alex 23 Nov: "more damage on these corners")
 EASE = 0.8             # its ends lift out of the stone over this much, x the opening (Carve's ends)
 RUN_TURN = 35.0        # deg: a run of sharp edges is split where it turns more than this (a corner)
 STROKE_SINK = (-0.2, 0.05)    # x the depth: a stroke sits this much deeper (-) or shallower along its axis
@@ -234,6 +236,7 @@ JIT_WAVE = (1.2, 4.0)  # over waves this long (x the opening), two of them added
 RAISED_EDGES = 3       # a corner where this many sharp convex edges meet stands out: a raised corner ...
 RAISED_DEPTH = (4.0, 7.0)   # ... knocked off with one flat chip this many times a stroke's depth deep (Alex's example:
 #                             0.086 and 0.136 against 0.011 - 0.021 on the edge) ...
+RAISED_DEPTH_FLAT = (2.0, 3.5)  # ... a joint face's corner with one long edge only (a moulded profile's steps): half that
 RAISED_TILT = 15.0     # ... its face tipped at random by up to this much
 # sizes from the part's own detail (Alex: "automatically work out how much material to remove based on the level of
 # detail of each part, replacing the resolution tagging"): meshlib's ray thickness (how much stone stands behind each
@@ -258,15 +261,44 @@ DEPTH_THICK = 0.1      # ... and at most this share of the stone's thickness beh
 #                        gets touched: no hole, no sliver)
 SPACING_SHARE = 0.6    # (no longer sets the width) the distance to the next sharp edge (a moulding's fillets lie a
 #                        fraction of a mm apart: a chisel sized from the stone behind them cut through the whole profile)
+RES_PCT = 50          # (the median thickness: the 10th percentile read the rays from edge vertices, near 0, and sent a
+#                       plain 0.09 BU base plate to MINI; thin detail is kept by the deviation test anyway)
 RES_SHARE = 0.25       # Trim Thin's voxel at most this share of the part's thin features (10th percentile thickness):
 #                        it takes off what is thinner than two voxels
 REMESH_TOL = 0.004     # BU (0.04 mm): Auto Detail's remesh keeps 99 % of the part's surface this close (the remesh
 #                        alone: the decimation after it has its own bound, DEC_TOL; 0.02 mm sent plain stones to Fine /
 #                        Mini and 8x their faces, measured on the Live Pillar row 2026-11-23)
-DEC_TOL = 0.005        # BU (0.05 mm, the finest detail Alex works at): Auto Detail decimates each island as far as this error allows, no face target:
+DEC_TOL = 0.01         # BU (0.1 mm; was 0.005, Alex 23 Nov "not decimated enough"): Auto Detail decimates each island as far as this error allows, no face target:
 #                        flat faces go down to a few triangles, carved detail keeps what its shape needs (Alex 2026-11-23:
 #                        "replace quick infill's resolution and auto-decimation so it knows automatically how much each
 #                        part needs"; the presets' face ratios took a leafy abacus's leaves)
+DEC_VOX = 2.0          # ... or 2 x the island's own remesh voxel if more (STONE 0.015 BU, FINE 0.006: Alex 23 Nov "not
+#                        decimated enough" at 0.005 everywhere; the error goes with the detail the island was found to need)
+DEC_ASPECT = 20.0      # the longest / shortest side a decimated triangle may have (meshlib's default 20 keeps big flat
+#                        faces in many small triangles: Alex 23 Nov "not decimated enough")
+
+
+def decimate_flat(m, err):
+    """meshlib decimation as far as err (the mesh's units) allows, no face target; long thin triangles allowed up to
+    DEC_ASPECT so flat faces go down to a few. Above the parallel size, done in parts and again on one thread if
+    the parts' seams fold (as offset_utils.decimate_mesh)."""
+    mm, _mn = _ml()
+    from .offset_utils import face_count as _fc, PARALLEL_DECIMATE_FACES
+    s = mm.DecimateSettings()
+    s.maxDeletedFaces = max(0, _fc(m) - 1)
+    s.maxError = float(err)
+    s.maxTriangleAspectRatio = float(DEC_ASPECT)
+    s.packMesh = True
+    par = _fc(m) > PARALLEL_DECIMATE_FACES
+    backup = mm.Mesh(m) if par else None
+    if par:
+        s.subdivideParts = 16
+    mm.decimateMesh(m, s)
+    if par and len(mm.findSelfCollidingTriangles(mm.MeshPart(m))) > 0:
+        s.subdivideParts = 1
+        mm.decimateMesh(backup, s)
+        return backup
+    return m
 DETAIL_TOL = 0.005      # BU (0.05 mm, the finest detail Alex works at): a resolution keeps a part's detail when,
 #                        remeshed and decimated at it, its surface stays this close (99 % of its points). (Every part
 #                        is 0.03 - 0.07 mm off at Stone from the voxels alone; 0.02 mm sent plain stones to Mini.)
@@ -426,7 +458,19 @@ def thickness_in(m, p, inward, unit=1.0):
     d = d / (np.linalg.norm(d) + 1e-12)
     o = np.asarray(p, np.float64) + d * (1e-3 * unit)
     hit = mm.rayMeshIntersect(mm.MeshPart(m), mm.Line3f(mm.Vector3f(*map(float, o)), mm.Vector3f(*map(float, d))))
-    return float(hit.distanceAlongLine) + 1e-3 * unit if hit else np.inf
+    if not hit:
+        return np.inf
+    t = float(hit.distanceAlongLine)
+    try:                                     # (p out past a rounded arris: the first hit is going in; measure from there)
+        fn = m.normal(hit.proj.face)
+        if float(fn.x * d[0] + fn.y * d[1] + fn.z * d[2]) < 0.0:
+            o2 = o + d * (t + 1e-3 * unit)
+            h2 = mm.rayMeshIntersect(mm.MeshPart(m), mm.Line3f(mm.Vector3f(*map(float, o2)),
+                                                                 mm.Vector3f(*map(float, d))))
+            return float(h2.distanceAlongLine) + 1e-3 * unit if h2 else np.inf
+    except Exception:
+        pass
+    return t + 1e-3 * unit
 
 
 def auto_width(th, unit, size):
@@ -480,11 +524,11 @@ def run_spacing(pieces, cap):
     return out
 
 
-def bent(pts, up, W, rng, cap=None):
+def bent(pts, up, W, rng, cap=None, scale=1.0):
     """A stroke's line, set so it cuts STROKE_DEPTH x W in (+- STROKE_DEPTH_VAR, the whole stroke alike) and bent once,
     gently (one arc, its middle up to STROKE_BEND x W sideways and STROKE_BEND_UP x its depth in or out)."""
     P = np.asarray(pts, np.float64)
-    d = STROKE_DEPTH * W * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
+    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
     if cap is not None and np.isfinite(cap):                 # (held by the detail there, still varied +-30 %)
         d = min(d, float(cap) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, 0.0)))
     t = P[-1] - P[0]
@@ -554,6 +598,223 @@ def chip_too_big(m, chip, depth):
         return True
 
 
+FAMILY_DEG = 20.0      # deg: a flat face beside another flat face this close in direction is a facet of a curved side
+#                        (an arch stone's faceted soffit), not a big flat face ...
+FAMILY_MIN = 3.0       # ... turned more than this (parallel ones are a step, not a curve) ...
+FAMILY_SIZE = 3        # ... in a chain of at least this many (a joint face in two planes is still a joint face)
+ARRIS_GAP = 1.5        # x the chisel: two big flat faces whose outlines come this close meet in an arris (round a
+#                        rounded or bevelled block edge: no sharp edge there at all, the fillet's steps are under 25 deg)
+ARRIS_ANGLE = (45.0, 135.0)  # deg between their directions
+ARRIS_STEP = 1.0       # x the gap: an outline point at least this often along the line, on both faces (rim vertices of
+#                        a straight edge can be far apart: the line is sampled, the outline's own points are not)
+
+
+def _rim_verts(F):
+    e = np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1)
+    u, c = np.unique(e, axis=0, return_counts=True)
+    return np.unique(u[c == 1])
+
+
+def facet_family(V, F, regs, gap):
+    """Per flat region: True if it lies beside (outlines within `gap`) another flat region turned under FAMILY_DEG
+    from it: one facet of a faceted curved side."""
+    rv = [V[_rim_verts(F[reg])] for reg, _n, _A in regs]
+    par = list(range(len(regs)))
+
+    def find(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    for a in range(len(regs)):
+        for b in range(a + 1, len(regs)):
+            if not (FAMILY_MIN < _angle(np.asarray(regs[a][1]), np.asarray(regs[b][1])) < FAMILY_DEG):
+                continue
+            A_, B_ = rv[a], rv[b]
+            if np.any(A_.min(0) - gap > B_.max(0)) or np.any(B_.min(0) - gap > A_.max(0)):
+                continue
+            if np.sqrt(((A_[:, None, :] - B_[None, :, :]) ** 2).sum(-1)).min() < gap:   # (side by side)
+                par[find(a)] = find(b)
+    size = {}
+    for i in range(len(regs)):
+        size[find(i)] = size.get(find(i), 0) + 1
+    return [size[find(i)] >= FAMILY_SIZE for i in range(len(regs))]
+
+
+def arrises(V, F, regs, gap, nv):
+    """The arrises where two big flat faces meet (their planes' line, over the stretch where both outlines run within
+    `gap` of it), as runs [(points, normals left, right, ids)]: a block's edge whether modelled sharp, bevelled or
+    rounded. ids are made-up vertex numbers past the mesh's own (nv), two per arris (-1 between)."""
+    rims, pl = [], []
+    for reg, n, _A in regs:
+        Fr = F[reg]
+        e = np.sort(np.concatenate([Fr[:, [0, 1]], Fr[:, [1, 2]], Fr[:, [2, 0]]]), axis=1)
+        u, c = np.unique(e, axis=0, return_counts=True)
+        rim = u[c == 1]                              # (the outline's edges, sampled: a straight one has two ends only)
+        pts = [_sample(V[[a, b]], 0.5 * gap) for a, b in rim]
+        n = np.asarray(n, np.float64)
+        n = n / (np.linalg.norm(n) + 1e-12)
+        rims.append(np.concatenate(pts) if pts else np.zeros((0, 3)))
+        pl.append((n, float(np.mean(V[F[reg]].reshape(-1, 3) @ n))))
+    out = []
+    lo, hi = ARRIS_ANGLE
+    for i in range(len(regs)):
+        for j in range(i + 1, len(regs)):
+            ni, di = pl[i]
+            nj, dj = pl[j]
+            if not (lo <= _angle(ni, nj) <= hi):
+                continue
+            Ri, Rj = rims[i], rims[j]
+            if not len(Ri) or not len(Rj):
+                continue
+            if np.any(Ri.min(0) - gap > Rj.max(0)) or np.any(Rj.min(0) - gap > Ri.max(0)):
+                continue
+            d = np.cross(ni, nj)
+            d /= np.linalg.norm(d) + 1e-12
+            p0 = np.linalg.solve(np.array([ni, nj, d]), np.array([di, dj, 0.0]))   # (on both planes)
+            near = []
+            for R in (Ri, Rj):
+                q = R - p0
+                off = q - np.outer(q @ d, d)          # (from the line, across it)
+                near.append(np.sort((q @ d)[np.linalg.norm(off, axis=1) < gap]))
+            if not len(near[0]) or not len(near[1]):
+                continue
+            t0 = max(float(near[0][0]), float(near[1][0]))
+            t1 = min(float(near[0][-1]), float(near[1][-1]))
+            if t1 - t0 < gap:
+                continue
+            # (only where both outlines follow the line: over a moulding's notch the line runs through air, and a stroke
+            # along it would cut into the moulding)
+            step = 0.5 * gap
+            ts = np.arange(t0, t1 + 1e-9, step)
+            cov = np.ones(len(ts), bool)
+            for nr_ in near:
+                k_ = np.clip(np.searchsorted(nr_, ts), 1, len(nr_) - 1)
+                dist = np.minimum(np.abs(nr_[k_] - ts), np.abs(nr_[k_ - 1] - ts))
+                cov &= dist <= ARRIS_STEP * gap
+            runs_ = []
+            a_ = None
+            for i_, c_ in enumerate(list(cov) + [False]):
+                if c_ and a_ is None:
+                    a_ = i_
+                elif not c_ and a_ is not None:
+                    runs_.append((ts[a_], ts[i_ - 1]))
+                    a_ = None
+            for s0, s1 in runs_:
+                if s1 - s0 < gap:
+                    continue
+                k = max(2, int(math.ceil((s1 - s0) / step)) + 1)
+                P = p0 + np.outer(np.linspace(s0, s1, k), d)
+                ids = np.array([nv + 2 * len(out)] + [-1] * (k - 2) + [nv + 2 * len(out) + 1])
+                out.append((P, np.tile(ni, (k - 1, 1)), np.tile(nj, (k - 1, 1)), ids))
+    return out
+BAND_GAP = 1.0         # x the chisel: parallel sharp edges this close (over half their length) are one bevelled arris
+#                        (a block's 90-degree edge modelled as three 30-degree ones 0.03 - 0.1 BU apart), cut as one
+BAND_PAR = 0.9         # (parallel: directions this close, |cos|)
+BAND_MAX = 135.0       # deg: not if together they turn more than this (the two edges of a thin fin's top)
+HARD_ANGLE = (30.0, 90.0)  # deg an edge turns (bevels joined): from the first to the second it is hit harder ...
+HARD_DEPTH = (0.6, 1.5)    # ... its strokes this x deeper (Alex 23 Nov: "edges around 90 degree should be hit the hardest")
+HARD_KEEP = (0.5, 1.0)     # ... and this x more often
+CORNER_JOIN = 1.0      # x the chisel: run ends this close together are one corner (a bevelled block's corner: three
+#                        bands ending round a little rounded patch, no vertex where they meet)
+
+
+def _sample(P, step):
+    """Points along P at most `step` apart (a straight edge has only its two ends)."""
+    out = [P[0]]
+    for a, b in zip(P[:-1], P[1:]):
+        k = max(1, int(math.ceil(float(np.linalg.norm(b - a)) / step)))
+        out += [a + (b - a) * (i / k) for i in range(1, k + 1)]
+    return np.array(out)
+
+
+def _angle(a, b):
+    return math.degrees(math.acos(max(-1.0, min(1.0, float(a @ b)))))
+
+
+def bands(pieces, on_flat, gap, nv=None):
+    """Bevelled arrises joined: runs that lie parallel within `gap` of each other over at least half the shorter one,
+    and turn no more than BAND_MAX together, are one band, cut once along its longest run with the band's outer face
+    normals. Returns (pieces, on_flat, angle per piece in degrees, how many runs were joined, per piece: a bevelled or
+    rounded arris (joined, or an arris between flat faces: made-up vertex ids from nv on))."""
+    n = len(pieces)
+    if n == 0:
+        return pieces, on_flat, [], 0, []
+    S = [_sample(np.asarray(P, np.float64), 0.5 * gap) for P, _l, _r, _i in pieces]
+    D = []
+    for P, _l, _r, _i in pieces:
+        d = np.asarray(P[-1], np.float64) - np.asarray(P[0], np.float64)
+        D.append(d / (np.linalg.norm(d) + 1e-12))
+    nrm = []
+    for _P, L, R, _i in pieces:
+        a = np.asarray(L, np.float64).mean(0)
+        b = np.asarray(R, np.float64).mean(0)
+        nrm.append((a / (np.linalg.norm(a) + 1e-12), b / (np.linalg.norm(b) + 1e-12)))
+    allp = np.concatenate(S)
+    lab = np.concatenate([np.full(len(s), r) for r, s in enumerate(S)])
+    key = np.floor(allp / gap).astype(np.int64)
+    cells = {}
+    for i, k in enumerate(map(tuple, key)):
+        cells.setdefault(k, []).append(i)
+    par = list(range(n))
+
+    def find(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    offs = [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)]
+    start = 0
+    for r in range(n):
+        ks = {tuple(k) for k in key[start:start + len(S[r])]}
+        start += len(S[r])
+        cand = set()
+        for k in ks:
+            for a, b, c in offs:
+                cand.update(lab[cells.get((k[0] + a, k[1] + b, k[2] + c), [])].tolist())
+        for q in cand:
+            if q <= r or find(q) == find(r) or abs(float(D[r] @ D[q])) < BAND_PAR:
+                continue
+            A, B = (S[r], S[q]) if len(S[r]) <= len(S[q]) else (S[q], S[r])
+            dd = np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(-1)).min(1)
+            if float(np.mean(dd < gap)) < 0.5:
+                continue
+            ns = list(nrm[r]) + list(nrm[q])
+            if max(_angle(x, y) for x in ns for y in ns) > BAND_MAX:
+                continue
+            par[find(q)] = find(r)
+    groups = {}
+    for r in range(n):
+        groups.setdefault(find(r), []).append(r)
+    out, flat, ang, bev = [], [], [], []
+    joined = 0
+    for g in groups.values():
+        ns = [x for r in g for x in nrm[r]]
+        best = (0.0, ns[0], ns[-1])
+        for i in range(len(ns)):
+            for j in range(i + 1, len(ns)):
+                a = _angle(ns[i], ns[j])
+                if a > best[0]:
+                    best = (a, ns[i], ns[j])
+        rep = max(g, key=lambda r: float(_along(pieces[r][0])[-1]))
+        P, L, R, I = pieces[rep]
+        if len(g) > 1:
+            joined += len(g) - 1
+            L = np.tile(best[1], (len(L), 1))
+            R = np.tile(best[2], (len(R), 1))
+        out.append((P, L, R, I))
+        flat.append(any(on_flat[r] for r in g))
+        ang.append(best[0])
+        bev.append(len(g) > 1 or (nv is not None and any(int(pieces[r][3][0]) >= nv for r in g)))
+    return out, flat, ang, joined, bev
+
+
+def _hard(angle, rng_):
+    """HARD_DEPTH / HARD_KEEP at an edge turning `angle` degrees."""
+    h = float(np.clip((angle - HARD_ANGLE[0]) / (HARD_ANGLE[1] - HARD_ANGLE[0]), 0.0, 1.0))
+    return rng_[0] + (rng_[1] - rng_[0]) * h
+
+
 def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None, auto=False):
     """The chisel strokes for mesh m's sharp edges and corners: [(V, F)] in the mesh's units. Each run of sharp edges
     is walked from end to end in strokes of STROKE_LEN with STROKE_GAP between, each one kept coverage(amount) of the
@@ -564,9 +825,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     rng = np.random.default_rng(seed)
     p0, p1, nl, nr, v0, v1, V, vn, fa, fb = sharp_edges(m, unit, cut_faces, faces=True)
     info["sharp_edges"] = int(len(p0))
-    if not len(p0):
-        return []
-    pieces = runs(p0, p1, v0, v1, nl, nr)
+    pieces = runs(p0, p1, v0, v1, nl, nr) if len(p0) else []
     # (which runs lie along a big flat face: its sharp edges have one)
     _mm, _mn = _ml()
     VV = np.asarray(_mn.getNumpyVerts(m), np.float64)
@@ -578,10 +837,16 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     finally:
         globals()["FLAT_AREA"] = _fa0
     bigf = np.zeros(len(FF), bool)
-    for reg, _n, A in regs:
+    big = []
+    curved = facet_family(VV, FF, regs, ARRIS_GAP * CHISEL * float(size) * unit)
+    for i, (reg, _n, A) in enumerate(regs):
         ext = float(np.ptp(VV[np.unique(FF[reg])], axis=0).max())
-        if A >= BIG_FLAT * unit * unit and A >= BIG_FLAT_SHAPE * ext * ext:
+        if A >= BIG_FLAT * unit * unit and A >= BIG_FLAT_SHAPE * ext * ext and not curved[i]:
             bigf[reg] = True
+            big.append(i)
+    W0_ = CHISEL * float(size) * unit
+    ar_pieces = arrises(VV, FF, [regs[i] for i in big], ARRIS_GAP * W0_, len(VV))
+    info["arrises"] = len(ar_pieces)
     eflat = {}
     for k in range(len(v0)):
         eflat[(min(int(v0[k]), int(v1[k])), max(int(v0[k]), int(v1[k])))] = bool(
@@ -590,7 +855,12 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     for _P, _l, _r, I in pieces:
         fl = [eflat.get((min(int(a), int(b)), max(int(a), int(b))), False) for a, b in zip(I[:-1], I[1:])]
         on_flat.append(bool(fl) and float(np.mean(fl)) >= 0.5)
+    pieces = list(pieces) + ar_pieces          # (the arrises between big flat faces: the band their bevel's runs join)
+    on_flat += [True] * len(ar_pieces)
     info["runs_on_big_flat"] = int(sum(on_flat))
+    vflat = set(np.unique(FF[bigf]).tolist()) if bigf.any() else set()
+    pieces, on_flat, angs, nj, bevel = bands(pieces, on_flat, BAND_GAP * CHISEL * float(size) * unit, len(VV))
+    info["bevel_runs_joined"] = nj
     lens = np.array([float(_along(P)[-1]) for P, _l, _r, _i in pieces])
     TH = edge_thickness(m) if auto else None
     SP = run_spacing(pieces, AUTO_RANGE[1] * unit / SPACING_SHARE) if auto else None
@@ -619,13 +889,15 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         return min(DEPTH_SPACING * float(SP_[r_]), DEPTH_THICK * float(th))
     widths = []
     long_ends = []                           # (the ends of the runs long enough: the corners that get a stroke)
+    end_run = []                             # (which run each of those ends is)
     for r, (P, Ln, Rn, I) in enumerate(pieces):
         L = lens[r]
         caps.append(depth_cap(TH, SP, r, I))
-        if L < RUN_MIN * W0:
+        if L < (RUN_MIN_FLAT if on_flat[r] else RUN_MIN) * W0:
             continue
         widths.append(W0 / unit)
         long_ends += [P[0], P[-1]]
+        end_run += [r, r]
         t = -rng.uniform(0.0, 0.5) * W0      # (a stroke may start just past the run's end: over the corner)
         while t < L:
             W = W0 * rng.uniform(*WIDTH_RANGE)
@@ -633,6 +905,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             # (in the detail, fewer strokes: kept as often as the detail lets a stroke go deep)
             k_keep = keep if on_flat[r] else keep * DETAIL_KEEP * (float(np.clip(
                 (caps[r] / (STROKE_DEPTH * W)) ** 2, DETAIL_KEEP_MIN, 1.0)) if np.isfinite(caps[r]) else 1.0)
+            k_keep = min(1.0, k_keep * _hard(angs[r], HARD_KEEP))     # (a 90-degree arris: every stroke)
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
@@ -648,8 +921,11 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         w = rng.uniform(*LEAN)
         up = _tilt(Ln[km] * w + Rn[km] * (1 - w), rng, STROKE_TILT)
         up /= np.linalg.norm(up) + 1e-12
-        out.append(stroke_cutter(bent(pts, up, W, rng, caps[r]), up, W))
+        out.append(stroke_cutter(bent(pts, up, W, rng, caps[r], _hard(angs[r], HARD_DEPTH)), up, W))
     info["strokes"] = len(out)
+    info["runs_dbg"] = [(round(float(lens[r]) / unit, 3), round(float(angs[r])), bool(on_flat[r]),
+                         round(float(caps[r]) / unit, 4) if np.isfinite(caps[r]) else None,
+                         sum(1 for j in jobs if j[0] == r)) for r in range(len(pieces))]
     info["chisel_bu"] = (round(float(np.min(widths)), 4), round(float(np.median(widths)), 4),
                          round(float(np.max(widths)), 4)) if widths else None
     cf = [c_ / unit for c_ in caps if np.isfinite(c_)]
@@ -662,18 +938,20 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         at.setdefault(int(v0[k]), []).append((p1[k] - p0[k], nl[k], nr[k]))
         at.setdefault(int(v1[k]), []).append((p0[k] - p1[k], nl[k], nr[k]))
     cos_turn = math.cos(math.radians(180.0 - CORNER_TURN))
+    chipped_at = []
     for vi, ds in at.items():
         c, n = V[vi], vn[vi]
         un = [d / (np.linalg.norm(d) + 1e-12) for d, _a, _b in ds]
         # (a raised corner: three edges or more, meeting sharply, at least two of them long main edges ending here: a
         # block's corner, not a facet's edge meeting a long edge part way along it)
         n_long = int((np.linalg.norm(E - c, axis=1) < 1e-6 * max(unit, 1.0)).sum()) if len(E) else 0
-        raised = len(ds) >= RAISED_EDGES and standing(un) and n_long >= 2
+        fv = vi in vflat                     # (a corner of a big flat face: a joint face's corner, hit harder)
+        raised = len(ds) >= RAISED_EDGES and standing(un) and n_long >= (1 if fv else 2)
         if not raised and not (len(ds) == 2 and float(un[0] @ un[1]) > cos_turn):
             continue
         if keep <= 0.0 or not len(E) or float(np.linalg.norm(E - c, axis=1).min()) > 1e-6 * max(unit, 1.0):
             continue
-        if not raised and rng.random() >= CORNER_CHANCE:
+        if not raised and not fv and rng.random() >= CORNER_CHANCE:
             continue
         Wc = CHISEL * float(size) * unit
         cap = np.inf
@@ -682,12 +960,14 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         if SP is not None and vi in vrun:
             cap = min(cap, DEPTH_SPACING * min(float(SP[r]) for r in vrun[vi]))
         if raised:                           # (one flat chip off the corner, 4 - 7 x a stroke's depth deep)
-            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc,
-                     rng.uniform(*RAISED_DEPTH) * cap if np.isfinite(cap) else np.inf)
+            rd = RAISED_DEPTH if n_long >= 2 else RAISED_DEPTH_FLAT
+            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc,
+                     rng.uniform(*rd) * cap if np.isfinite(cap) else np.inf)
             chip = corner_chip(c, n, dc, rng)
             if chip_too_big(m, chip, dc):    # (the corner is not a clean, standing corner: no chip)
                 continue
             out.append(chip)
+            chipped_at.append(c)
             nc += 1
             nr_ += 1
             continue
@@ -704,8 +984,66 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             up /= np.linalg.norm(up) + 1e-12
             out.append(stroke_cutter(bent(pts, up, W, rng, cap), up, W))
             nc += 1
+    # (bevelled corners: three bands or more ending close together round a little rounded patch, no vertex they share)
+    nb = 0
+    if keep > 0.0 and len(E) >= 3:
+        Wc = CHISEL * float(size) * unit
+        jn = CORNER_JOIN * Wc
+        par = list(range(len(E)))
+
+        def find(a):
+            while par[a] != a:
+                par[a] = par[par[a]]
+                a = par[a]
+            return a
+        dd = np.sqrt(((E[:, None, :] - E[None, :, :]) ** 2).sum(-1))
+        for i, j in zip(*np.nonzero(np.triu(dd < jn, 1))):
+            par[find(int(i))] = find(int(j))
+        grp = {}
+        for i in range(len(E)):
+            grp.setdefault(find(i), []).append(i)
+        for g in grp.values():
+            rs = sorted({end_run[i] for i in g})
+            if len(rs) < RAISED_EDGES or sum(bevel[r] for r in rs) < 2:   # (a bevelled block's corner, not
+                continue                                                  # a moulding's steps)
+            c = E[g].mean(0)
+            if any(float(np.linalg.norm(c - q)) < 1.5 * Wc for q in chipped_at):
+                continue
+            try:                             # (the ends meet out on the stone, not over a notch in it)
+                pr = _mm.findProjection(_mm.Vector3f(*map(float, c)), _mm.MeshPart(m))
+                if math.sqrt(float(pr.distSq)) > jn:
+                    continue
+            except Exception:
+                pass
+            # (the edges' directions away from the corner: they must stand out as a corner does)
+            un = []
+            for r in rs:
+                P = pieces[r][0]
+                a_, b_ = (P[0], P[-1]) if np.linalg.norm(P[0] - c) < np.linalg.norm(P[-1] - c) else (P[-1], P[0])
+                d = np.asarray(b_ - a_, np.float64)
+                un.append(d / (np.linalg.norm(d) + 1e-12))
+            if not standing(un):
+                continue
+            n = np.zeros(3)
+            for r in rs:
+                Lr, Rr = pieces[r][1], pieces[r][2]
+                q = np.asarray(Lr[0] + Rr[0], np.float64)
+                n += q / (np.linalg.norm(q) + 1e-12)
+            n /= np.linalg.norm(n) + 1e-12
+            cap = DEPTH_THICK * thickness_in(m, c, -n, unit) if TH is not None else np.inf
+            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc,
+                     rng.uniform(*RAISED_DEPTH) * cap if np.isfinite(cap) else np.inf)
+            # (the corner itself lies out past the bevels: the chip's base set from there)
+            corner = c + n * float(np.mean([np.linalg.norm(E[i] - c) for i in g]))
+            chip = corner_chip(corner, n, dc, rng)
+            if chip_too_big(m, chip, dc):
+                continue
+            out.append(chip)
+            chipped_at.append(c)
+            nb += 1
     info["corner_strokes"] = nc
-    info["raised_corners"] = nr_
+    info["raised_corners"] = nr_ + nb
+    info["bevelled_corners"] = nb
     return out
 
 
@@ -736,7 +1074,7 @@ def detail_tag(m, unit=1.0, info=None):
     info = {} if info is None else info
     th = edge_thickness(m)
     th = th[np.isfinite(th)]
-    need = RES_SHARE * float(np.percentile(th, 10)) if len(th) else RESOLUTION_PRESETS['STONE'][0]
+    need = RES_SHARE * float(np.percentile(th, RES_PCT)) if len(th) else RESOLUTION_PRESETS['STONE'][0]
     order = sorted(((v[0], v[1], k) for k, v in RESOLUTION_PRESETS.items() if k in ('STONE', 'DETAIL', 'FINE', 'MINI')),
                    reverse=True)
     f0 = face_count(m)
@@ -1013,9 +1351,9 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
         try:
             got = trim_thin(chipped, r)[0]
             if auto:                         # (as far as DEC_TOL allows: no face target)
-                from .offset_utils import decimate_mesh, face_count as _fc
+                from .offset_utils import face_count as _fc
                 f_before = _fc(got)
-                got = decimate_mesh(got, target_face_count=1, max_error=DEC_TOL * unit)
+                got = decimate_flat(got, max(DEC_TOL * unit, DEC_VOX * r))
                 ii["faces"] = (f_before, _fc(got))
             parts.append(got)
             if tag is not None:

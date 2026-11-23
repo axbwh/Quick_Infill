@@ -782,7 +782,9 @@ def arrises(V, F, regs, gap, nv):
 BAND_GAP = 1.0         # x the chisel: parallel sharp edges this close (over half their length) are one bevelled arris
 #                        (a block's 90-degree edge modelled as three 30-degree ones 0.03 - 0.1 BU apart), cut as one
 BAND_PAR = 0.9         # (parallel: directions this close, |cos|)
-BAND_MAX = 135.0       # deg: not if together they turn more than this (the two edges of a thin fin's top)
+BAND_MAX = 110.0       # deg: not if the band would turn more than this (a bevelled block edge turns about 90; a rounded
+#                        bead on a moulding chained its facets round past 160 and was cut as a knife edge, leaving a step
+#                        and a sliver: Alex 23 Nov)
 HARD_ANGLE = (30.0, 90.0)  # deg an edge turns (bevels joined): from the first to the second it is hit harder ...
 HARD_DEPTH = (0.6, 1.0)    # ... its strokes this x deeper (Alex 23 Nov: "edges around 90 degree should be hit the hardest")
 HARD_KEEP = (0.5, 1.0)     # ... and this x more often
@@ -828,6 +830,7 @@ def bands(pieces, on_flat, gap, nv=None):
     for i, k in enumerate(map(tuple, key)):
         cells.setdefault(k, []).append(i)
     par = list(range(n))
+    gnorm = [list(nrm[r]) for r in range(n)]  # (each band's face normals so far)
 
     def find(a):
         while par[a] != a:
@@ -850,10 +853,12 @@ def bands(pieces, on_flat, gap, nv=None):
             dd = np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(-1)).min(1)
             if float(np.mean(dd < gap)) < 0.5:
                 continue
-            ns = list(nrm[r]) + list(nrm[q])
-            if max(_angle(x, y) for x in ns for y in ns) > BAND_MAX:
+            ra, rq = find(r), find(q)
+            ns = gnorm[ra] + gnorm[rq]               # (the whole band as it would be: a rounded bead's facets, each
+            if max(_angle(x, y) for x in ns for y in ns) > BAND_MAX:   # step small, chain round to a knife's turn)
                 continue
-            par[find(q)] = find(r)
+            par[rq] = ra
+            gnorm[ra] = ns
     groups = {}
     for r in range(n):
         groups.setdefault(find(r), []).append(r)

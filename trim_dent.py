@@ -894,7 +894,10 @@ def size_depth(th):
 
 SQUARE_SPAN = 30.0     # deg: an arris within this of 90 deg keeps its strokes in the detail too, fully at 90 (Alex 23 Nov:
 #                        "more chipping on the thin arch's 90 degree edges": they border its curved sides, not a big flat
-#                        face, and kept 15 %); knife edges (over 120 deg) stay light
+#                        face, and kept 15 %)
+KNIFE_DEG = 120.0      # deg: an arris turning this much or more is a knife edge: every stroke, at the normal depth, the
+#                        thickness behind it not holding it back (Alex 23 Nov: "knife thin edges should likely get trimmed
+#                        off at normal depth")
 
 
 def square(angle):
@@ -984,7 +987,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     end_run = []                             # (which run each of those ends is)
     for r, (P, Ln, Rn, I) in enumerate(pieces):
         L = lens[r]
-        caps.append(depth_cap(TH, SP, r, I))
+        caps.append(np.inf if angs[r] >= KNIFE_DEG else depth_cap(TH, SP, r, I))   # (a knife edge: cut off at the
+        #                                       normal depth, not held by the little stone behind it)
         if L < (RUN_MIN_FLAT if on_flat[r] else RUN_MIN) * W0:
             continue
         widths.append(W0 / unit)
@@ -999,6 +1003,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 (caps[r] / (STROKE_DEPTH * W)) ** 2, DETAIL_KEEP_MIN, 1.0)) if np.isfinite(caps[r]) else 1.0)
             k_keep = min(1.0, k_keep * _hard(angs[r], HARD_KEEP))     # (a 90-degree arris: every stroke)
             k_keep = max(k_keep, keep * square(angs[r]))   # (a square arris in the detail too: the thin arch's long edges)
+            if angs[r] >= KNIFE_DEG:
+                k_keep = keep                              # (a knife edge: trimmed all along)
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W

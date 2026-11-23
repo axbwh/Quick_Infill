@@ -1,4 +1,4 @@
-"""Trim Edges test: Chip (stone damage meshes + Trim Thin), Only Cut Edges, Round, through the real
+"""Trim Edges test: Chip (chisel strokes on the sharp edges, dents on the flat faces, Trim Thin), Only Cut Edges, Round, through the real
 operator. Background Blender only, on copies; nothing is saved.
 
     blender -b <file with sp_cut stones>.blend --python tests/trim_edges_chip.py -- <stone> [<stone> ...]
@@ -114,16 +114,31 @@ for n, a in zip(names, lean):
     print("ROUND %s: volume lost %.2f %%" % (n, a))
 check([e.identifier for e in s.bl_rna.properties["trim_edges_method"].enum_items] == ["ROUND", "CHIP"],
       "Trim Edges has Round and Chip only (Round (old) taken out)")
-check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 0.8) < 1e-6
-      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 2.5) < 1e-6, "Chip Size 0.8 and Amount 2.5 by default")
+check(abs(s.bl_rna.properties["trim_edges_chip_size"].default - 1.0) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_amount"].default - 2.5) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_dent_size"].default - 0.5) < 1e-6
+      and abs(s.bl_rna.properties["trim_edges_chip_dents"].default - 16.0) < 1e-6,
+      "Chip Size 1 (Carve's Standard chisel), Amount 2.5, Dent Size 0.5, Dents 16 by default")
 tops = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".tools_operators")
-check(len(tops.chip_meshes(bpy.context)) > 0, "Chip Meshes found (%d damage meshes)" % len(tops.chip_meshes(bpy.context)))
+check(len(tops.chip_meshes(bpy.context)) > 0, "Dent Meshes found (%d damage meshes, Dent_L)" % len(tops.chip_meshes(bpy.context)))
+# Alex 2026-11-23: chisel strokes on the long sharp edges and the corners, dents on the flat faces
+td = importlib.import_module(type(s).__module__.rsplit(".", 1)[0] + ".trim_dent")
+info = {}
+td.dent_chip(ml_of(bpy.data.objects[names[0]]), [], 1.0, 2.5, 1.0, info=info, face_dents=tops.chip_meshes(bpy.context),
+             dent_size=0.5, dent_amount=16.0)
+check(info.get("strokes", 0) > 0 and info.get("corner_strokes", 0) > 0 and info.get("dents", 0) > 0,
+      "Chip on %s: %d chisel strokes on the edges, %d on corners, %d dents on %d flat faces"
+      % (names[0], info.get("strokes", 0), info.get("corner_strokes", 0), info.get("dents", 0), info.get("flat_faces", 0)))
+s.trim_edges_chip_dents = 0.0
+nodent = run("CHIP")
+check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))
+s.trim_edges_chip_dents = 16.0
 # the same stones get the same chips each time (the seed comes from the stone's shape)
 again = run("CHIP")
 check(all(abs(x - y) < 1e-6 for x, y in zip(chip, again)), "Chip gives the same result twice")
 s.trim_edges_chip_amount = 0.0
 none = run("CHIP")
-check(sum(none) < sum(chip), "Amount 0 (corners only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
+check(sum(none) < sum(chip), "Amount 0 (no strokes, the dents only) takes less than the default (%.2f vs %.2f %%)" % (sum(none), sum(chip)))
 s.trim_edges_chip_amount = 2.5
 s["trim_edges_method"] = 2                      # a file saved with Round (old)
 settings_mod = sys.modules[type(s).__module__]

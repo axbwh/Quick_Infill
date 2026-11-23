@@ -237,6 +237,8 @@ RAISED_EDGES = 3       # a corner where this many sharp convex edges meet stands
 RAISED_DEPTH = (4.0, 7.0)   # ... knocked off with one flat chip this many times a stroke's depth deep (Alex's example:
 #                             0.086 and 0.136 against 0.011 - 0.021 on the edge) ...
 RAISED_DEPTH_FLAT = (2.0, 3.5)  # ... a joint face's corner with one long edge only (a moulded profile's steps): half that
+RAISED_CAP = 1.5       # ... at most this x the depth the stone there allows (was x 4 - 7 too: Alex 23 Nov "cut is too deep"
+#                        on a small arch stone's end)
 RAISED_TILT = 15.0     # ... its face tipped at random by up to this much
 # sizes from the part's own detail (Alex: "automatically work out how much material to remove based on the level of
 # detail of each part, replacing the resolution tagging"): meshlib's ray thickness (how much stone stands behind each
@@ -435,6 +437,63 @@ def stroke_cutter(pts, up, W, rng=None):
     if vol < 0:
         F = F[:, ::-1]
     return V.astype(np.float32), F.astype(np.int32)
+
+
+CHAMFER_REACH = (1.5, 6.0)  # x the depth: how far across the chamfer plane reaches either side (from the arris' angle)
+CHAMFER_ABOVE = 2.0    # x the depth: how far out past the arris the cutter stands
+
+
+def chamfer_cutter(pts, up, d, turn, rng):
+    """One stroke as Carve's Ctrl (Flatten) cut across an arris (Alex 2026-11-23: "I created my cuts holding ctrl":
+    a flat chamfer, never a groove with a floor that leaves a ledge): everything past a plane `d` in from the arris,
+    square to `up` (out of the stone, between its two faces), over the stroke; the depth eases in and out over its
+    ends (EASE x its length share) and swells or thins once along it (STROKE_BEND_UP); turn: the arris' angle in deg,
+    how far across the plane must reach. A closed (V, F) solid."""
+    P = np.asarray(pts, np.float64)
+    s = _along(P)
+    L = float(s[-1])
+    X = d * float(np.clip(1.3 / math.tan(math.radians(max(10.0, min(170.0, turn)) / 2.0)), *CHAMFER_REACH))
+    H = CHAMFER_ABOVE * d + 1e-3 * d
+    lift = rng.uniform(-STROKE_BEND_UP, STROKE_BEND_UP)
+    ease = max(min(0.25 * L, 3.0 * d), 1e-9)
+    rings = []
+    for i, p in enumerate(P):
+        e = min(s[i], L - s[i]) / ease
+        k = min(1.0, max(0.05, e))
+        k = k * k * (3 - 2 * k)
+        dk = d * k * (1.0 + lift * math.sin(math.pi * s[i] / max(L, 1e-12)))
+        t = P[min(i + 1, len(P) - 1)] - P[max(i - 1, 0)]
+        t = t / (np.linalg.norm(t) + 1e-12)
+        u = up - t * float(up @ t)
+        u = u / (np.linalg.norm(u) + 1e-12)
+        x = np.cross(t, u)
+        xs = [(-X, -dk), (X, -dk), (X, H), (-X, H)]
+        rings.append([p + x * cx + u * cy for cx, cy in xs])
+    R = np.array(rings)
+    n = len(R)
+    V = R.reshape(-1, 3)
+    F = []
+    for i in range(n - 1):
+        for j in range(4):
+            a0, a1 = i * 4 + j, i * 4 + (j + 1) % 4
+            b0, b1 = a0 + 4, a1 + 4
+            F += [(a0, b0, b1), (a0, b1, a1)]
+    F += [(0, 1, 2), (0, 2, 3)]
+    e0 = (n - 1) * 4
+    F += [(e0, e0 + 2, e0 + 1), (e0, e0 + 3, e0 + 2)]
+    F = np.array(F, np.int64)
+    vol = float(np.einsum('ij,ij->i', V[F[:, 0]], np.cross(V[F[:, 1]], V[F[:, 2]])).sum())
+    if vol < 0:
+        F = F[:, ::-1]
+    return V.astype(np.float32), F.astype(np.int32)
+
+
+def stroke_depth(W, rng, cap=None, scale=1.0):
+    """A stroke's depth: STROKE_DEPTH x W x scale, +- STROKE_DEPTH_VAR for the whole stroke, held by cap."""
+    d = STROKE_DEPTH * W * float(scale) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, STROKE_DEPTH_VAR))
+    if cap is not None and np.isfinite(cap):
+        d = min(d, float(cap) * (1.0 + rng.uniform(-STROKE_DEPTH_VAR, 0.0)))
+    return d
 
 
 def coverage(amount):
@@ -713,7 +772,7 @@ BAND_GAP = 1.0         # x the chisel: parallel sharp edges this close (over hal
 BAND_PAR = 0.9         # (parallel: directions this close, |cos|)
 BAND_MAX = 135.0       # deg: not if together they turn more than this (the two edges of a thin fin's top)
 HARD_ANGLE = (30.0, 90.0)  # deg an edge turns (bevels joined): from the first to the second it is hit harder ...
-HARD_DEPTH = (0.6, 1.5)    # ... its strokes this x deeper (Alex 23 Nov: "edges around 90 degree should be hit the hardest")
+HARD_DEPTH = (0.6, 1.0)    # ... its strokes this x deeper (Alex 23 Nov: "edges around 90 degree should be hit the hardest")
 HARD_KEEP = (0.5, 1.0)     # ... and this x more often
 CORNER_JOIN = 1.0      # x the chisel: run ends this close together are one corner (a bevelled block's corner: three
 #                        bands ending round a little rounded patch, no vertex where they meet)
@@ -921,7 +980,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         w = rng.uniform(*LEAN)
         up = _tilt(Ln[km] * w + Rn[km] * (1 - w), rng, STROKE_TILT)
         up /= np.linalg.norm(up) + 1e-12
-        out.append(stroke_cutter(bent(pts, up, W, rng, caps[r], _hard(angs[r], HARD_DEPTH)), up, W))
+        out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, caps[r], _hard(angs[r], HARD_DEPTH)), angs[r], rng))
     info["strokes"] = len(out)
     info["runs_dbg"] = [(round(float(lens[r]) / unit, 3), round(float(angs[r])), bool(on_flat[r]),
                          round(float(caps[r]) / unit, 4) if np.isfinite(caps[r]) else None,
@@ -961,8 +1020,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             cap = min(cap, DEPTH_SPACING * min(float(SP[r]) for r in vrun[vi]))
         if raised:                           # (one flat chip off the corner, 4 - 7 x a stroke's depth deep)
             rd = RAISED_DEPTH if n_long >= 2 else RAISED_DEPTH_FLAT
-            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc,
-                     rng.uniform(*rd) * cap if np.isfinite(cap) else np.inf)
+            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc, RAISED_CAP * cap)
             chip = corner_chip(c, n, dc, rng)
             if chip_too_big(m, chip, dc):    # (the corner is not a clean, standing corner: no chip)
                 continue
@@ -982,7 +1040,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             w = rng.uniform(*LEAN)
             up = _tilt(0.5 * (a_ * w + b_ * (1 - w)) + 0.5 * n, rng, STROKE_TILT)
             up /= np.linalg.norm(up) + 1e-12
-            out.append(stroke_cutter(bent(pts, up, W, rng, cap), up, W))
+            out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, cap), _angle(a_, b_), rng))
             nc += 1
     # (bevelled corners: three bands or more ending close together round a little rounded patch, no vertex they share)
     nb = 0
@@ -1031,8 +1089,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 n += q / (np.linalg.norm(q) + 1e-12)
             n /= np.linalg.norm(n) + 1e-12
             cap = DEPTH_THICK * thickness_in(m, c, -n, unit) if TH is not None else np.inf
-            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc,
-                     rng.uniform(*RAISED_DEPTH) * cap if np.isfinite(cap) else np.inf)
+            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc, RAISED_CAP * cap)
             # (the corner itself lies out past the bevels: the chip's base set from there)
             corner = c + n * float(np.mean([np.linalg.norm(E[i] - c) for i in g]))
             chip = corner_chip(corner, n, dc, rng)

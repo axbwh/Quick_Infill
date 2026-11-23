@@ -194,6 +194,31 @@ finally:
     td.detail_tag = _dt
 check(len(calls) == len(names), "Auto Detail: each stone's resolution worked out once (%d times for %d stones)"
       % (len(calls), len(names)))
+# One click (Ashlarize's Chip button, Alex 2026-11-24: "a single button ... on all selected objects and their islands"):
+# Chip with Auto Detail whatever Method, Only Cut Edges and Islands say, and none of those settings changed
+_auto_was = bool(s.trim_edges_chip_auto)
+s.trim_edges_method, s.trim_edges_only_cut, s.process_islands, s.trim_edges_chip_auto = 'ROUND', True, True, False
+one = []
+for n in names:
+    src = bpy.data.objects[n]
+    cp = src.copy(); cp.data = src.data.copy(); sc.collection.objects.link(cp); one.append((src, cp))
+for o in bpy.context.selected_objects:
+    o.select_set(False)
+for _src, cp in one:
+    cp.select_set(True)
+bpy.context.view_layer.objects.active = one[0][1]
+calls = []
+td.detail_tag = lambda *a_, **k_: (calls.append(1), _dt(*a_, **k_))[1]
+try:
+    r1 = bpy.ops.quick_infill.trim_edges('EXEC_DEFAULT', one_click=True)
+finally:
+    td.detail_tag = _dt
+lost1 = [100 * (abs(ml_of(a_).volume()) - abs(ml_of(b_).volume())) / abs(ml_of(a_).volume()) for a_, b_ in one]
+check('FINISHED' in r1 and all(x > 0.5 for x in lost1) and len(calls) == len(names)
+      and (s.trim_edges_method, s.trim_edges_only_cut, s.process_islands, s.trim_edges_chip_auto) == ('ROUND', True, True, False),
+      "one click: Chip with Auto Detail on %d stones (%s %% taken, resolution worked out %d times), with Method on Round, "
+      "Only Cut Edges and Islands on: all three left as they were" % (len(names), ", ".join("%.2f" % x for x in lost1), len(calls)))
+s.trim_edges_only_cut, s.process_islands, s.trim_edges_chip_auto = False, False, _auto_was
 s.trim_edges_chip_dents = 0.0
 nodent = run("CHIP")
 check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))

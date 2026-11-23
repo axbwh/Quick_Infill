@@ -72,10 +72,11 @@ Sidebar > Quick Infill > Print Check. Select everything that prints as one piece
   `PC_NoContact` blue).
 - **Seal Cavities** adds a `<active>_Plugs` object that fills every sealed cavity. Sealed cavities cannot be seen from
   outside, so nothing visible changes.
-- **Make Manifold** unites the selection into one watertight `<active>_Solid` object (Blender's Manifold solver on
-  clean copies), repairs self-intersections and zero-size faces with meshlib, and makes the flat cuts LAST
-  (*Intersect With* a blank, *Cut at Plate*), so a repair can never pull the bottom out of flat. It reports how much
-  of the bottom lies on the plate.
+- **Make Manifold** unites the selection into one watertight `<active>_Solid` object in the `STLs` collection
+  (Blender's Manifold solver) and intersects it with the *Intersect With* object, if one is set. Unconnected islands
+  are deleted. *Regrow* grows the pieces that reach the blank's surface a hair first, so they are cut once, fresh.
+  Self-intersections and zero-size faces are reported, not repaired. Ashlarize shows the same button under
+  Make Print Ready.
 - *Min Drain Gap*: openings narrower than this count as closed. 0 is what a slicer reports.
 - Sealed space that reaches the first layer is listed apart as *plate pockets* (`PC_PlatePockets`, pink): it is closed
   only by the build plate and opens when the print comes off. The method follows UVtools' resin trap / suction cup

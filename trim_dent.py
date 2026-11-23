@@ -274,7 +274,7 @@ DEC_TOL = 0.01         # BU (0.1 mm; was 0.005, Alex 23 Nov "not decimated enoug
 #                        flat faces go down to a few triangles, carved detail keeps what its shape needs (Alex 2026-11-23:
 #                        "replace quick infill's resolution and auto-decimation so it knows automatically how much each
 #                        part needs"; the presets' face ratios took a leafy abacus's leaves)
-DEC_VOX = 2.0          # ... or 2 x the island's own remesh voxel if more (STONE 0.015 BU, FINE 0.006: Alex 23 Nov "not
+DEC_VOX = 1.5          # ... or 1.5 x (was 2: Alex 23 Nov "slightly too much decimation" on a curved arch soffit) the island's own remesh voxel if more (STONE 0.015 BU, FINE 0.006: Alex 23 Nov "not
 #                        decimated enough" at 0.005 everywhere; the error goes with the detail the island was found to need)
 DEC_ASPECT = 20.0      # the longest / shortest side a decimated triangle may have (meshlib's default 20 keeps big flat
 #                        faces in many small triangles: Alex 23 Nov "not decimated enough")
@@ -674,7 +674,7 @@ def _rim_verts(F):
     return np.unique(u[c == 1])
 
 
-def facet_family(V, F, regs, gap):
+def facet_family(V, F, regs, gap, groups=False):
     """Per flat region: True if it lies beside (outlines within `gap`) another flat region turned under FAMILY_DEG
     from it: one facet of a faceted curved side."""
     rv = [V[_rim_verts(F[reg])] for reg, _n, _A in regs]
@@ -697,7 +697,14 @@ def facet_family(V, F, regs, gap):
     size = {}
     for i in range(len(regs)):
         size[find(i)] = size.get(find(i), 0) + 1
-    return [size[find(i)] >= FAMILY_SIZE for i in range(len(regs))]
+    flags = [size[find(i)] >= FAMILY_SIZE for i in range(len(regs))]
+    if groups:
+        g = {}
+        for i in range(len(regs)):
+            if flags[i]:
+                g.setdefault(find(i), []).append(i)
+        return list(g.values())
+    return flags
 
 
 def arrises(V, F, regs, gap, nv):
@@ -1277,7 +1284,104 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
             bite = rng.uniform(*DENT_BITE) * 2.0 * half
             Vd = ((dv * s3) @ B.T) * unit + p - n * max(bite - own, 0.0)
             out.append((Vd.astype(np.float32), np.asarray(dt, np.int32)))
+    out += curved_dents(V, F, dents, size, unit, rng, info)
     info["dents"] = len(out)
+    return out
+
+
+CURVED_CHANCE = 1.0 / 3.0  # (Alex 2026-11-23, an arch stone's curved soffit: "about a third of such arc stones should get
+CURVED_COUNT = (1, 3)      # one to three stone damage on the flat surface ... large damage first, then small")
+CURVED_SIZES = (1.3, 0.8, 0.5)  # x the Dent Size, the first, second and third (each +- 15 %)
+CURVED_DEG = 20.0          # deg: the curved side grown from its facets over edges turning less than this
+
+
+def curved_surface(F, fn, seeds):
+    """The faces of the smooth (curved) side the seed faces lie on: grown over edges turning under CURVED_DEG."""
+    adj = {}
+    for i, (a, b, c) in enumerate(F):
+        for e in ((a, b), (b, c), (c, a)):
+            adj.setdefault((min(e), max(e)), []).append(i)
+    nb = [[] for _ in range(len(F))]
+    for fs in adj.values():
+        if len(fs) == 2:
+            nb[fs[0]].append(fs[1])
+            nb[fs[1]].append(fs[0])
+    cmin = math.cos(math.radians(CURVED_DEG))
+    seen = np.zeros(len(F), bool)
+    seen[seeds] = True
+    q = list(seeds)
+    while q:
+        i = q.pop()
+        for j in nb[i]:
+            if not seen[j] and float(fn[i] @ fn[j]) > cmin:
+                seen[j] = True
+                q.append(j)
+    return np.flatnonzero(seen)
+
+
+def curved_dents(V, F, dents, size, unit, rng, info):
+    """On a third of the stones with a faceted curved side (an arch stone's soffit), one to three dents on it, the big
+    one first: [(V, F)] in the mesh's units."""
+    info["curved_dents"] = 0
+    if not dents:
+        return []
+    fa0 = FLAT_AREA
+    try:
+        globals()["FLAT_AREA"] = min(FLAT_AREA, BIG_FLAT)
+        regs, ar = flat_regions(V, F, unit)
+    finally:
+        globals()["FLAT_AREA"] = fa0
+    fams = facet_family(V, F, regs, ARRIS_GAP * CHISEL * unit, groups=True)
+    if not fams or rng.random() >= CURVED_CHANCE:
+        return []
+    fam = max(fams, key=lambda g: sum(regs[i][2] for i in g))
+    c = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+    fn = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
+    faces = curved_surface(F, fn, np.concatenate([regs[i][0] for i in fam]))
+    ec = {}
+    for i in faces:
+        a, b, c_ = F[i]
+        for e in ((a, b), (b, c_), (c_, a)):
+            kk = (min(e), max(e))
+            ec[kk] = ec.get(kk, 0) + 1
+    rim = np.array([k for k, n_ in ec.items() if n_ == 1], np.int64).reshape(-1, 2)
+    pw = ar[faces] / ar[faces].sum()
+    out = []
+    placed = []
+    for k in range(int(rng.integers(CURVED_COUNT[0], CURVED_COUNT[1] + 1))):
+        dv, dt = dents[int(rng.integers(0, len(dents)))]
+        dv = np.asarray(dv, np.float64)
+        sc = float(size) * CURVED_SIZES[k] * rng.uniform(0.85, 1.15)
+        half = 0.5 * max(np.ptp(dv[:, 0]), np.ptp(dv[:, 1])) * sc * unit
+        for _try in range(32):
+            if _try and _try % 8 == 0:
+                sc *= 0.75
+                half *= 0.75
+            f = int(faces[rng.choice(len(faces), p=pw)])
+            r1, r2 = rng.random(), rng.random()
+            if r1 + r2 > 1:
+                r1, r2 = 1 - r1, 1 - r2
+            p = V[F[f, 0]] + r1 * (V[F[f, 1]] - V[F[f, 0]]) + r2 * (V[F[f, 2]] - V[F[f, 0]])
+            if any(float(np.linalg.norm(p - q)) < (h + half) * 0.8 for q, h in placed):
+                continue                             # (not on top of the one before)
+            if len(rim):
+                A_, B_ = V[rim[:, 0]], V[rim[:, 1]]
+                d = B_ - A_
+                t = np.clip(((p - A_) * d).sum(1) / np.maximum((d * d).sum(1), 1e-24), 0, 1)
+                if float(np.linalg.norm(A_ + d * t[:, None] - p, axis=1).min()) < DENT_EDGE * half:
+                    continue
+            break
+        else:
+            continue
+        n = fn[f]
+        B = _frame(n, rng)
+        s3 = sc * (1.0 + rng.uniform(-AXIS_JITTER, AXIS_JITTER, 3))
+        own = max(-float(dv[:, 2].min()) * s3[2] * unit, 0.0)
+        bite = rng.uniform(*DENT_BITE) * 2.0 * half
+        Vd = ((dv * s3) @ B.T) * unit + p - n * max(bite - own, 0.0)
+        out.append((Vd.astype(np.float32), np.asarray(dt, np.int32)))
+        placed.append((p, half))
+    info["curved_dents"] = len(out)
     return out
 
 

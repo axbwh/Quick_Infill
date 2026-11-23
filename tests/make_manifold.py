@@ -7,7 +7,8 @@ Without arguments it builds overlapping spheres and cubes sunk below Z = 0, one 
 flat open speck (two triangles, no volume), and a blank box to intersect with. With a collection it
 uses those objects instead (and the blank, if named).
 
-Runs twice: with the blank (its bottom is the bottom, no plate cut) and without (Cut at Plate, Z = 0).
+Runs with the blank (its bottom is the bottom), with the blank and Regrow, and without a blank
+(a plain union: nothing is cut, there is no cut at the plate any more).
 Checks: one closed object comes out (no open or non-manifold edges), the bottom is ONE flat plane at
 the blank's bottom / the plate, nothing pokes out of the blank, the originals are unchanged, and the
 meshlib repair is gone.
@@ -75,6 +76,14 @@ else:
     bm.faces.new((a, c, d))
     bm.to_mesh(me)
     bm.free()
+    # a CLOSED flat speck as one more object: two triangles back to back, 0.3 mm long (over the tiny-piece
+    # size). Blender's Manifold solver refuses it, and used to skip the whole union with it: only the
+    # biggest shell came out (Alex 2026-11-23, a Print Ready support carrying such specks)
+    sme = bpy.data.meshes.new("Speck")
+    sme.from_pydata([(0, 0, 0.2), (0.03, 0, 0.2), (0.03, 0.005, 0.21)], [], [(0, 1, 2), (0, 2, 1)])
+    speck = bpy.data.objects.new("Speck", sme)
+    sc.collection.objects.link(speck)
+    objs.append(speck)
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.9, 0, 0.4), scale=(1.6, 0.55, 1.2))
     blank = bpy.context.object
     blank.name = "Blank"
@@ -92,13 +101,13 @@ if args:
     bpy.context.view_layer.update()
 before = {o.name: snapshot(o) for o in objs}
 in_min = min(v.z for o in objs for v in world_co(o))
+check(not hasattr(s, "manifold_cut_plate") and not hasattr(s, "manifold_delete_islands"),
+      "Cut at Plate and Delete Islands are gone from the settings")
 check(not hasattr(MF, "repair") and not hasattr(MF, "tidy_after_cut"), "the meshlib repair is gone from make_manifold")
 
 def run(blank, regrow=False):
-    print(("== with the blank" + (", Regrow" if regrow else "")) if blank is not None else "== no blank: Cut at Plate")
+    print(("== with the blank" + (", Regrow" if regrow else "")) if blank is not None else "== no blank: plain union")
     s.manifold_regrow = regrow
-    s.manifold_cut_plate = True
-    s.check_plate = 'Z0'
     s.manifold_blank = blank
     bpy.ops.object.select_all(action='DESELECT')
     for o in objs:
@@ -108,6 +117,10 @@ def run(blank, regrow=False):
     res = bpy.ops.quick_infill.make_manifold()
     dt = time.time() - t0
     check(res == {'FINISHED'}, f"the operator finished ({res})")
+    if not args:
+        ob_ = bpy.context.active_object
+        xs = [p.x for p in world_co(ob_)] if ob_ is not None and ob_.name.endswith(tuple("_Solid.0123456789")) else [0.0]
+        check(max(xs) - min(xs) > 1.45, f"every object is in the result, not just the biggest ({max(xs) - min(xs):.2f} BU wide)")
     out = bpy.context.view_layer.objects.active
     check(out is not None and "_Solid" in out.name, f"result object {out.name if out else None}")
     if out is not None and "_Solid" in out.name:
@@ -117,8 +130,8 @@ def run(blank, regrow=False):
         check(nb == 0, f"closed: {nb} open / non-manifold edges")
         co = world_co(out)
         zmin = min(v.z for v in co)
-        # with a blank its bottom is the bottom (no plate cut); without one, Z = 0 if the model reaches below it
-        bottom = min(v.z for v in world_co(blank)) if blank is not None else (0.0 if in_min < 0.0 else None)
+        # with a blank its bottom is the bottom; without one nothing is cut
+        bottom = min(v.z for v in world_co(blank)) if blank is not None else None
         cut = bottom is not None and in_min < bottom
         if cut:
             check(abs(zmin - bottom) < 1e-6 and all(abs(v.z - bottom) < 1e-6 or v.z > bottom for v in co),
@@ -172,5 +185,31 @@ if not os.environ.get("MM_SKIP_REGROW"):
     run(blank, regrow=True)
 run(None)
 check(all(snapshot(o) == before[o.name] for o in objs), "the originals are unchanged")
+
+if not args:
+    # a piece the Manifold solver refuses: the run fails, names its object and selects it, and makes
+    # nothing (Alex 2026-11-23). The flat speck stands in for it, with the no-volume filter switched off.
+    print("== a refused piece")
+    keep_nv = MF.no_volume
+    MF.no_volume = lambda m: False
+    try:
+        s.manifold_blank = blank
+        bpy.ops.object.select_all(action='DESELECT')
+        for o in objs:
+            o.select_set(True)
+        bpy.context.view_layer.objects.active = objs[0]
+        n_before = len(bpy.data.objects)
+        try:
+            res = bpy.ops.quick_infill.make_manifold()
+        except RuntimeError as ex:      # an ERROR report raises in background Blender
+            print("INFO", ex)
+            res = {'CANCELLED'}
+    finally:
+        MF.no_volume = keep_nv
+    check(res == {'CANCELLED'}, f"a refused piece makes it fail ({res})")
+    check(len(bpy.data.objects) == n_before, "nothing is made when it fails")
+    sel = [o.name for o in bpy.context.selected_objects]
+    check(sel == ["Speck"] and bpy.context.view_layer.objects.active.name == "Speck",
+          f"only the invalid object is selected and active ({sel})")
 
 print("RESULT", "FAIL %d" % len(fails) if fails else "ALL PASS")

@@ -397,19 +397,9 @@ class QuickInfillSettings(PropertyGroup):
     )
     check_plate: EnumProperty(
         name="Build Plate",
-        items=[("Z0", "Plate at Z = 0", "The model is cut at world Z = 0 and printed on that face"),
+        items=[("Z0", "Plate at Z = 0", "Print Check reads the model as printed on world Z = 0"),
                ("LOWEST", "Lowest Point", "The plate touches the lowest point of the selection")],
         default="Z0",
-    )
-    manifold_cut_plate: BoolProperty(
-        name="Cut at Plate", description="Make Manifold also cuts the result flat at the build plate (world Z = 0)",
-        default=True,
-    )
-    manifold_delete_islands: BoolProperty(
-        name="Delete Islands",
-        description="Make Manifold keeps only the main body: floating pieces and sealed pockets inside the solid "
-                    "are deleted (like the Merge_Manifold geometry nodes)",
-        default=True,
     )
     manifold_regrow: BoolProperty(
         name="Regrow",

@@ -3,8 +3,13 @@ Make Manifold: turn a pile of overlapping closed meshes (stones, blank, infill,
 plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
 
     1. every loose shell of the selection is taken apart; pieces under 0.2 mm
-       are left out, open ones are rebuilt through voxels (the Manifold solver
-       refuses open meshes);
+       and flat specks with no volume (two triangles back to back: closed, but
+       not a solid) are left out, open ones are rebuilt through voxels (the
+       Manifold solver refuses open meshes, and ONE refused piece makes it skip
+       the whole union: only the biggest shell came out then). Should the
+       solver still refuse the union, every piece is tried on its own and
+       InvalidParts names the objects the refused ones came from: nothing is
+       made (Alex 2026-11-23: "It shouldn't just give me something incomplete");
     2. on ONE temporary Blender object, Blender's Manifold boolean unites them
        all, intersects with the blank and cuts at the plate. The mesh never goes
        through meshlib between these booleans: that trip opened holes in the
@@ -249,6 +254,74 @@ def _plate_cutter(tmp, base, z):
     return tmp.add(cme, "QI_tmp_cutter", in_collection=False)
 
 
+class UnionRefused(Exception):
+    """Blender's Manifold solver skipped the union: one of the pieces is not a solid to it."""
+
+
+class InvalidParts(ValueError):
+    """The union cannot run: `objects` holds the indices (into make_manifold's meshes) of the
+    objects whose pieces Blender's Manifold solver refuses. Nothing was made."""
+
+    def __init__(self, objects, message):
+        super().__init__(message)
+        self.objects = objects
+
+
+def no_volume(mesh):
+    """A shell that encloses nothing: fewer than four faces, or flat (two triangles back to back
+    are "closed" for meshlib, but Blender's Manifold solver refuses them, and with them the whole union)."""
+    if mesh.topology.numValidFaces() < 4:
+        return True
+    bb = mesh.computeBoundingBox()
+    diag = float(np.linalg.norm([bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z]))
+    return abs(float(mesh.volume())) <= 1e-6 * diag ** 3
+
+
+def refused_by_manifold(shells):
+    """Indices of the shells Blender's Manifold solver refuses, each tried on its own: united
+    with a small cube far away, in a scene of its own (two objects, so each try is quick).
+    Only called after a union that did not run. Nothing is left in the file."""
+    import bpy
+    import bmesh
+    from .blender_meshlib_utils import meshlib_to_blender_mesh
+    scene = bpy.data.scenes.new("QI_Manifold_Test")
+    cube = bpy.data.meshes.new("QI_tmp_test_cube")
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=0.01)
+    bm.to_mesh(cube)
+    bm.free()
+    base = bpy.data.objects.new("QI_tmp_test_cube", cube)
+    scene.collection.objects.link(base)
+    n_cube = len(cube.vertices)
+    layer = scene.view_layers[0]
+    bad = []
+    try:
+        for i, sh in enumerate(shells):
+            check_cancelled()
+            me = meshlib_to_blender_mesh(sh, "QI_tmp_test")
+            ob = bpy.data.objects.new("QI_tmp_test", me)
+            scene.collection.objects.link(ob)
+            co = np.empty(len(me.vertices) * 3, dtype=np.float32)
+            me.vertices.foreach_get("co", co)
+            base.location = (float(co[0::3].max()) + 10.0, 0.0, 0.0)        # clear of the piece
+            mod = base.modifiers.new("QI", 'BOOLEAN')
+            mod.solver = 'MANIFOLD'
+            mod.operation = 'UNION'
+            mod.operand_type = 'OBJECT'
+            mod.object = ob
+            layer.update()
+            if len(base.evaluated_get(layer.depsgraph).data.vertices) == n_cube:
+                bad.append(i)
+            base.modifiers.remove(mod)
+            bpy.data.objects.remove(ob, do_unlink=True)
+            bpy.data.meshes.remove(me)
+    finally:
+        bpy.data.objects.remove(base, do_unlink=True)
+        bpy.data.meshes.remove(cube)
+        bpy.data.scenes.remove(scene)
+    return bad
+
+
 SHIFT = 0.0005   # Blender units: objects sitting exactly on the bottom are moved down this much (see make_manifold)
 
 
@@ -258,7 +331,8 @@ def booleans_in_blender(shells, plate_z=None, blank=None, log=None):
     object, the way Alex's "Merge_Manifold" geometry nodes do it. The mesh never
     leaves Blender between the booleans: a trip through meshlib in between opened
     holes in the union, and the Manifold solver then silently skipped the cut.
-    Returns a meshlib mesh. Nothing is left in the file."""
+    Returns a meshlib mesh. Nothing is left in the file. Raises UnionRefused when the solver
+    skips the union (a piece is not a solid to it): going on would cut the biggest shell alone."""
     from .blender_meshlib_utils import blender_to_meshlib, STL_EXPORT_SCALE
     say = log or (lambda msg: None)
     with _Scratch() as tmp:
@@ -274,7 +348,7 @@ def booleans_in_blender(shells, plate_z=None, blank=None, log=None):
                 mod.collection = tmp.coll
             tmp.boolean(base, setup)
             if _counts(base) == before:
-                say("WARNING: Blender's Manifold union did not run (an input is not a closed solid)")
+                raise UnionRefused()
         check_cancelled()
         if blank is not None:
             other = tmp.add(blank, "QI_tmp_blank", in_collection=False)
@@ -411,8 +485,8 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
     from .offset_utils import RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, AUTO_DETAIL, auto_resolution
     gs = grow_settings or [None] * len(meshes)
     ft = face_tags or [None] * len(meshes)
-    shells = []          # (island, (voxel, ratio, mode) for its grow)
-    for m, g, tags in zip(meshes, gs, ft):
+    shells = []          # (island, (voxel, ratio, mode) for its grow, index of the object it came from)
+    for oi, (m, g, tags) in enumerate(zip(meshes, gs, ft)):
         for part, faces in split_shells_with_faces(m):
             if face_count(part) == 0:
                 continue
@@ -425,7 +499,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
                     tag = RESOLUTION_TAG_ORDER[int(np.bincount(t).argmax())]
                     voxel, ratio = RESOLUTION_PRESETS[tag]
                     gi = (voxel, ratio, "VOXEL_RATIO")
-            shells.append((part, gi))
+            shells.append((part, gi, oi))
     if bottom_z is not None:
         # Stones often end at the bottom already (cut there against the blank or at the plate
         # before), or a hair above or below it. Cutting again in exactly the same spot leaves
@@ -435,7 +509,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         mm, _ = get_meshlib()
         d = SHIFT * STL_EXPORT_SCALE
         moved = 0
-        for part, _g in shells:
+        for part, _g, _o in shells:
             gap = float(part.computeBoundingBox().min.z) - bottom_z
             if -d <= gap <= 2.0 * d:
                 part.transform(mm.AffineXf3f.translation(mm.Vector3f(0.0, 0.0, -(gap + d))))
@@ -454,34 +528,40 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         d = SHIFT * STL_EXPORT_SCALE
         grown = []
         n_grown = 0
-        kept_tiny, _ = drop_small_shells([sh for sh, _ in shells])
+        kept_tiny, _ = drop_small_shells([sh for sh, _g, _o in shells])
         keep = {id(x) for x in kept_tiny}
-        for sh, g in shells:
+        for sh, g, oi in shells:
             check_cancelled()
             if id(sh) not in keep:
-                grown.append((sh, g))        # left out as a tiny piece just below: not worth growing
+                grown.append((sh, g, oi))    # left out as a tiny piece just below: not worth growing
                 continue
             reach = float(np.max(np.asarray(mm.findSignedDistances(blank, sh).vec)))
             if reach <= -d:
-                grown.append((sh, g))        # fully inside the blank: nothing to cut fresh
+                grown.append((sh, g, oi))    # fully inside the blank: nothing to cut fresh
                 continue
             voxel, ratio, mode = g if g is not None else (open_shell_voxel * 2.0, None, "VOXEL_RATIO")
             if mode == AUTO_DETAIL:              # (Auto Detail: this island's own voxel, from its shape)
                 voxel = auto_resolution(sh, voxel)
-            grown.append((grow_like_quick_infill(sh, d, voxel, ratio, mode), g))
+            grown.append((grow_like_quick_infill(sh, d, voxel, ratio, mode), g, oi))
             n_grown += 1
         shells = grown
         say(f"{n_grown} island(s) reaching the blank's surface grown by {SHIFT:g} with Quick Infill's Grow "
             f"(each at its resolution tag); {len(grown) - n_grown} left as they were")
-    shells = [s for s, _ in shells]
+    owner = {id(s): oi for s, _g, oi in shells}
+    shells = [s for s, _g, _o in shells]
     shells, tiny = drop_small_shells(shells)
     if tiny:
         say(f"{tiny} tiny piece(s) under {TINY_SHELL:g} mm were left out")
-    reopened = vanished = 0
+    reopened = vanished = flat_specks = 0
     kept = []
     for s in shells:
+        if s.topology.isClosed() and no_volume(s):
+            flat_specks += 1             # closed but flat: the Manifold solver refuses it, and the whole union with it
+            continue
         if not s.topology.isClosed():
+            oi = owner[id(s)]
             s = close_open_shell(s, open_shell_voxel)
+            owner[id(s)] = oi
             if face_count(s) == 0:
                 vanished += 1            # a flat speck with no volume: nothing to unite
                 continue
@@ -492,11 +572,24 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         say(f"{reopened} open shell(s) were rebuilt through voxels ({open_shell_voxel:g} mm) so they could be united")
     if vanished:
         say(f"{vanished} open speck(s) with no volume were left out")
+    if flat_specks:
+        say(f"{flat_specks} flat speck(s) with no volume were left out")
     if not shells:
         raise ValueError("nothing to unite")
     # the biggest shell is the base of the union
     shells.sort(key=lambda s: -abs(float(s.volume())))
-    out = booleans_in_blender(shells, plate_z, blank, log=say)
+    try:
+        out = booleans_in_blender(shells, plate_z, blank, log=say)
+    except UnionRefused:
+        # One piece the Manifold solver does not take makes it skip the whole union. Find which
+        # (each tried on its own) and name the objects they came from: nothing is made.
+        bad = refused_by_manifold(shells)
+        if not bad:
+            raise ValueError("Blender's Manifold solver did not run the union, and no single piece explains why. "
+                             "Nothing was made")
+        objs = sorted({owner[id(shells[i])] for i in bad})
+        raise InvalidParts(objs, f"{len(bad)} piece(s) of {len(objs)} object(s) are not solids Blender's Manifold "
+                                 "solver accepts. Nothing was made")
     check_cancelled()
     if delete_islands:
         n = keep_main_body(out)

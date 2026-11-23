@@ -600,7 +600,8 @@ class PipelineRun:
         mn = get_mrmeshnumpy()
         fn = getattr(process_pool.worker_module(), self.process_job[0])
         futures = {}
-        for job in self.jobs:
+        # Biggest first: the wait is as long as the last job to finish, and a big one started last sets it.
+        for job in sorted(self.jobs, key=lambda j: -j.src.topology.numValidFaces()):
             src = job.src
             if src.topology.numValidFaces() != src.topology.faceSize():
                 src = type(src)(src)

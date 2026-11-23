@@ -1346,24 +1346,37 @@ def flat_regions(V, F, unit=1.0, min_area=None):
     ar = 0.5 * np.linalg.norm(c, axis=1)
     nr = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-30)
     nb = [[] for _ in range(len(F))]
-    for f0, f1 in edge_pairs(F)[2].tolist():
+    pairs = edge_pairs(F)[2]
+    for f0, f1 in pairs.tolist():
         nb[f0].append(f1)
         nb[f1].append(f0)
     cosa = math.cos(math.radians(FLAT_DEG))
     tol = FLAT_TOL * unit
     lab = [-1] * len(F)
-    nrl, arl, FV = nr.tolist(), ar.tolist(), V[F].tolist()
+    # (a face none of whose neighbours is turned within FLAT_DEG of it can only ever seed a region of itself: most of a
+    # carved or curved part's faces. Found at once here, with a hair of slack, they skip the growing below; it was two
+    # thirds of what was left of this function's time)
+    can = np.zeros(len(F), bool)
+    if len(pairs):
+        near_ = (nr[pairs[:, 0]] * nr[pairs[:, 1]]).sum(1) >= cosa - 1e-9
+        can[pairs[near_, 0]] = True
+        can[pairs[near_, 1]] = True
+    can = can.tolist()
+    small = (ar < min_area * unit * unit).tolist()
+    nrl, arl, FV = nr.tolist(), ar.tolist(), V[F]     # (FV read face by face, only where a face is tried)
     sqrt = math.sqrt
     out = []
     for seed in np.argsort(-ar).tolist():
         if lab[seed] >= 0:
             continue
         lab[seed] = seed
+        if not can[seed] and small[seed]:        # (on its own, and too small to count)
+            continue
         reg = [seed]
-        q = [seed]
+        q = [seed] if can[seed] else []
         n0, a0 = nrl[seed], arl[seed]
         ax, ay, az = n0[0] * a0, n0[1] * a0, n0[2] * a0
-        (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = FV[seed]
+        (x0, y0, z0), (x1, y1, z1), (x2, y2, z2) = FV[seed].tolist()
         px, py, pz = (x0 + x1 + x2) / 3.0, (y0 + y1 + y2) / 3.0, (z0 + z1 + z2) / 3.0
         while q:
             f = q.pop()
@@ -1376,7 +1389,7 @@ def flat_regions(V, F, unit=1.0, min_area=None):
                 if nh[0] * mx + nh[1] * my + nh[2] * mz < cosa:
                     continue
                 far = False
-                for vx, vy, vz in FV[h]:
+                for vx, vy, vz in FV[h].tolist():
                     if abs((vx - px) * mx + (vy - py) * my + (vz - pz) * mz) > tol:
                         far = True
                         break
@@ -1423,10 +1436,10 @@ def crop_near(V, F, lo, hi):
     if not keep.any():
         return None
     f = F[keep]
-    used = np.unique(f)
-    remap = np.full(len(V), -1, np.int64)
-    remap[used] = np.arange(len(used))
-    return np.ascontiguousarray(V[used], np.float32), np.ascontiguousarray(remap[f], np.int32)
+    mask = np.zeros(len(V), bool)                # (the vertices those faces use, in order: as np.unique gave them)
+    mask[f.ravel()] = True
+    remap = np.cumsum(mask) - 1
+    return np.ascontiguousarray(V[mask], np.float32), np.ascontiguousarray(remap[f], np.int32)
 
 
 def cover_of(m, others, unit=1.0):
@@ -1468,9 +1481,16 @@ def covered_fn(cover, unit=1.0, ground=None):
     if not cover:
         return lambda p, half, n=None: grounded(p, n)
     mm, mn = _ml()
-    # (the meshes are held by the test itself: a MeshPart only points at its mesh, and one freed under it crashed Blender)
-    meshes = [mn.meshFromFacesVerts(np.ascontiguousarray(F_, np.int32), np.ascontiguousarray(V_, np.float32))
-              for V_, F_ in cover]
+    # (all the pieces as one mesh: one nearest-point query a spot, not one a piece; a leafy abacus had twenty pieces
+    # round each of its eighteen islands. The mesh is held by the test itself: a MeshPart only points at its mesh, and
+    # one freed under it crashed Blender)
+    Vs, Fs, n_ = [], [], 0
+    for V_, F_ in cover:
+        Vs.append(np.asarray(V_, np.float32))
+        Fs.append(np.asarray(F_, np.int32) + n_)
+        n_ += len(V_)
+    meshes = [mn.meshFromFacesVerts(np.ascontiguousarray(np.concatenate(Fs), np.int32),
+                                    np.ascontiguousarray(np.concatenate(Vs), np.float32))]
 
     def covered(p, half, n=None, meshes=meshes):
         if grounded(p, n):

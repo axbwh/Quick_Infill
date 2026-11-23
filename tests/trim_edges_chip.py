@@ -172,6 +172,28 @@ check(under["alone"][1] > 0 and under["under a block"][1] == 0 and under["under 
       "hidden faces: a slab's top alone takes %d dents (%d where the block would stand); with the block on it %d, "
       "none under the block (%d spots skipped)" % (under["alone"][0], under["alone"][1], under["under a block"][0],
                                                    under["under a block"][2]))
+# Alex 2026-11-23 "bottom faces should count as obscured": the slab's underside, on the ground, takes no dents
+bot = {}
+for label, gz in (("off the ground", None), ("on the ground", 0.0)):
+    got = td.place_dents(slab, fd, 0.5, 16.0, 10.0, seed=3, info={}, ground=gz)
+    cen = np.array([np.asarray(v_).mean(0) / 10.0 for v_, _f in got]).reshape(-1, 3)
+    # (on the underside: low, and in from the slab's four sides, whose own dents also sit low)
+    under_ = (cen[:, 2] < 0.1) & (cen[:, 0] > 0.15) & (cen[:, 0] < 1.85) & (cen[:, 1] > 0.15) & (cen[:, 1] < 1.85)
+    bot[label] = (int(under_.sum()) if len(cen) else 0, len(cen))
+check(bot["off the ground"][0] > 0 and bot["on the ground"][0] == 0 and bot["on the ground"][1] > 0,
+      "bottom faces: the slab's underside takes %d dents with no ground given, %d on the ground (%d dents elsewhere)"
+      % (bot["off the ground"][0], bot["on the ground"][0], bot["on the ground"][1]))
+# Auto Detail is worked out once per stone: by Chip itself, island by island, not by the pipeline as well
+calls = []
+_dt = td.detail_tag
+td.detail_tag = lambda *a_, **k_: (calls.append(1), _dt(*a_, **k_))[1]
+try:
+    s.smart_resolution, s.auto_detail, s.trim_edges_chip_auto = True, True, True
+    run("CHIP")
+finally:
+    td.detail_tag = _dt
+check(len(calls) == len(names), "Auto Detail: each stone's resolution worked out once (%d times for %d stones)"
+      % (len(calls), len(names)))
 s.trim_edges_chip_dents = 0.0
 nodent = run("CHIP")
 check(sum(nodent) < sum(chip), "Dents 0: the edges only, less taken (%.2f vs %.2f %%)" % (sum(nodent), sum(chip)))

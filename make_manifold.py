@@ -408,7 +408,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         bottom_z = float(plate_z)
     # Everything below works island by island (each loose part of each object on its own).
     from .blender_meshlib_utils import STL_EXPORT_SCALE
-    from .offset_utils import RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER
+    from .offset_utils import RESOLUTION_PRESETS, RESOLUTION_TAG_ORDER, AUTO_DETAIL, auto_resolution
     gs = grow_settings or [None] * len(meshes)
     ft = face_tags or [None] * len(meshes)
     shells = []          # (island, (voxel, ratio, mode) for its grow)
@@ -417,7 +417,7 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
             if face_count(part) == 0:
                 continue
             gi = g
-            if tags is not None and len(faces):
+            if tags is not None and len(faces) and not (g is not None and g[2] == AUTO_DETAIL):
                 # the island's own resolution tag: the most common tag of its faces (Smart + Islands)
                 t = np.asarray(tags)[faces[faces < len(tags)]]
                 t = t[(t >= 0) & (t < len(RESOLUTION_TAG_ORDER))]
@@ -466,6 +466,8 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
                 grown.append((sh, g))        # fully inside the blank: nothing to cut fresh
                 continue
             voxel, ratio, mode = g if g is not None else (open_shell_voxel * 2.0, None, "VOXEL_RATIO")
+            if mode == AUTO_DETAIL:              # (Auto Detail: this island's own voxel, from its shape)
+                voxel = auto_resolution(sh, voxel)
             grown.append((grow_like_quick_infill(sh, d, voxel, ratio, mode), g))
             n_grown += 1
         shells = grown

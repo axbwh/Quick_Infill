@@ -309,10 +309,13 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         only_cut = bool(s.trim_edges_only_cut)
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
         near = {}    # id(meshlib mesh) -> the other stones' faces near it: no dent where one lies over it
+        low = {}     # "z": the lowest point of the stones worked together (the ground: bottom faces get no dents)
 
         def on_prepared(run):
             from .trim_dent import cover_of
             srcs = [job.src for job in run.jobs]
+            zs = [float(m_.computeBoundingBox().min.z) for m_ in srcs if m_.topology.numValidFaces()]
+            low["z"] = min(zs) if zs else None
             for job in run.jobs:
                 near[id(job.src)] = cover_of(job.src, [o for o in srcs if o is not job.src], STL_EXPORT_SCALE)
             if not only_cut:
@@ -335,19 +338,21 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
                     return trim_thin(mesh, res)[0]          # no cut faces: no chips, Trim Thin only
             ii = {}
             out, tag = dent_trim(mesh, res, [], size, amount, STL_EXPORT_SCALE, cut_faces=cut, face_dents=dents,
-                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii, cover=near.get(id(mesh)))
+                                 dent_size=dsize, dent_amount=damount, auto=auto, info=ii, cover=near.get(id(mesh)),
+                                 ground=low.get("z"))
             if not tag:
                 return out
             # (Auto Detail: each island tagged with what it worked out, decimated already)
             return Retagged(out, tag, decimated=bool(ii.get("decimated")), face_tags=ii.get("face_tags"))
 
+        chip.own_resolution = auto     # (its own Auto: each island's resolution worked out inside, once)
         # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
         # whose marks are per object
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
                              on_prepared=on_prepared,
                              process_job=None if only_cut else
                              ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
-                                                 damount, auto), lambda job: (near.get(id(job.src)),)))
+                                                 damount, auto), lambda job: (near.get(id(job.src)), low.get("z"))))
 
     def _lean_round_setup(self, context, s):
         """Round: today's Round with fewer steps (trim_chip.lean_round): offsets, one decimate, an

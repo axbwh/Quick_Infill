@@ -280,13 +280,20 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
     delete_collapsed = True
     collapse_hint = "mesh collapsed during trim"
 
+    # One click (Ashlarize's Chip button, Alex 2026-11-24: "a single button ... that will run this on all selected
+    # objects and their islands"): Chip with its Auto Detail on every edge, whatever Method, Only Cut Edges and the
+    # Islands toggle say; none of those settings is changed.
+    one_click: bpy.props.BoolProperty(name="Chip, One Click", default=False, options={'SKIP_SAVE', 'HIDDEN'})
+
     def job_setup(self, context):
         s = context.scene.quick_infill_settings
+        if self.one_click:
+            return self._chip_setup(context, s, one_click=True)
         if getattr(s, "trim_edges_method", "ROUND") != "CHIP":
             return self._lean_round_setup(context, s)
         return self._chip_setup(context, s)
 
-    def _chip_setup(self, context, s):
+    def _chip_setup(self, context, s, one_click=False):
         """Chip (Alex 2026-11-18, in place of the old Flat Chip): stone damage meshes knocked off the
         sharp edges and corners (trim_dent), then Trim Thin. Trim Thin works through voxels, so the
         result is decimated the usual way afterwards."""
@@ -304,9 +311,9 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         from .blender_meshlib_utils import STL_EXPORT_SCALE
         size, amount = float(s.trim_edges_chip_size), float(s.trim_edges_chip_amount)
         dsize, damount = float(s.trim_edges_chip_dent_size), float(s.trim_edges_chip_dents)
-        auto = bool(getattr(s, "trim_edges_chip_auto", False))
+        auto = one_click or bool(getattr(s, "trim_edges_chip_auto", False))
         from .blender_meshlib_utils import Retagged
-        only_cut = bool(s.trim_edges_only_cut)
+        only_cut = bool(s.trim_edges_only_cut) and not one_click
         marks = {}   # id(meshlib mesh) -> cut flag per meshlib face, from Ashlarize's sp_cut face marks
         near = {}    # id(meshlib mesh) -> the other stones' faces near it: no dent where one lies over it
         low = {}     # "z": the lowest point of the stones worked together (the ground: bottom faces get no dents)
@@ -348,8 +355,11 @@ class QUICKINFILL_OT_trim_edges(_OffsetToolBase, Operator):
         chip.own_resolution = auto     # (its own Auto: each island's resolution worked out inside, once)
         # Many stones run in worker processes (the same trim_dent there); not with Only Cut Edges,
         # whose marks are per object
+        # islands=False: Chip takes each object whole and works its islands itself (each with the others as cover,
+        # decimated once, a tag per island). With the Islands toggle on the pipeline split them first: Chip then saw no
+        # neighbours, and each island was decimated again by ratio.
         return pipeline_spec(objs, chip, self.suffix, s, lambda pr: self.job_finish(bpy.context, pr),
-                             on_prepared=on_prepared,
+                             on_prepared=on_prepared, islands=False,
                              process_job=None if only_cut else
                              ("trim_edges_job", ("chip", [], size, amount, STL_EXPORT_SCALE, dents, dsize,
                                                  damount, auto), lambda job: (near.get(id(job.src)), low.get("z"))))

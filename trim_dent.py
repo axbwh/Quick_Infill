@@ -119,6 +119,43 @@ def sharp_edges(m, unit=1.0, cut_faces=None, faces=False):
     return out + ((R[:, 2], R[:, 3]) if faces else ())
 
 
+CONCAVE_CLEAR = 1.0    # x the chisel: no stroke or corner chip this close to a concave sharp edge (an inside corner, where
+#                        two mouldings meet: Alex 2026-11-23 "avoid chipping concave corners / edges")
+
+
+def concave_points(m, unit=1.0, step=None):
+    """Points along the stone's concave sharp edges (inside corners), at most `step` apart: (k, 3)."""
+    mm, mn = _ml()
+    V = np.asarray(mn.getNumpyVerts(m), np.float64)
+    cr = m.findCreaseEdges(math.radians(CREASE_DEG))
+    bits = np.asarray(mn.getNumpyBitSet(cr), bool)
+    topo = m.topology
+    out = []
+    step = step or 0.25 * CHISEL * unit
+    for i in np.flatnonzero(bits):
+        e = mm.EdgeId(2 * int(i))
+        if not topo.left(e).valid() or not topo.right(e).valid():
+            continue
+        if m.dihedralAngle(mm.UndirectedEdgeId(int(i))) > 0:      # convex: an edge to chip, not a corner to keep
+            continue
+        a, b = V[int(topo.org(e).get())], V[int(topo.dest(e).get())]
+        k = max(1, int(math.ceil(float(np.linalg.norm(b - a)) / step)))
+        out += [a + (b - a) * (j / k) for j in range(k + 1)]
+    return np.array(out).reshape(-1, 3)
+
+
+def _clear_of(pts, C, lim):
+    """Per point of pts: farther than lim from every point of C."""
+    if not len(C):
+        return np.ones(len(pts), bool)
+    P = np.asarray(pts, np.float64)
+    ok = np.ones(len(P), bool)
+    for a in range(0, len(P), 64):
+        q = P[a:a + 64]
+        ok[a:a + 64] = ((q[:, None, :] - C[None, :, :]) ** 2).sum(-1).min(1) > lim * lim
+    return ok
+
+
 def corners(V, vn, p0, p1, v0, v1):
     """Corner vertices of the sharp edges: [(point, outward direction)]."""
     at = {}
@@ -1033,6 +1070,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
+    CC = concave_points(m, unit)                 # (the inside corners: kept clear)
+    n_conc = 0
     for r, t0, t1, W in jobs:
         P, Ln, Rn, _I = pieces[r]
         s = _along(P)
@@ -1041,12 +1080,29 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         k = max(2, int(math.ceil((t1 - t0) / (STEP_SHARE * W))) + 1)
         got = [_at(P, s, t) for t in np.linspace(t0, t1, k)]
         pts = np.array([g[0] for g in got])
+        if len(CC):                                # (not into an inside corner: the longest stretch clear of them)
+            ok_ = _clear_of(pts, CC, CONCAVE_CLEAR * W)
+            if not ok_.all():
+                best, a_ = (0, 0), None
+                for i_, o_ in enumerate(list(ok_) + [False]):
+                    if o_ and a_ is None:
+                        a_ = i_
+                    elif not o_ and a_ is not None:
+                        if i_ - a_ > best[1] - best[0]:
+                            best = (a_, i_)
+                        a_ = None
+                if best[1] - best[0] < 2 or float(np.linalg.norm(pts[best[1] - 1] - pts[best[0]])) < 1.0 * W:
+                    n_conc += 1
+                    continue
+                got, pts = got[best[0]:best[1]], pts[best[0]:best[1]]
+                n_conc += 1
         km = got[len(got) // 2][1]
         w = rng.uniform(*LEAN)
         up = _tilt(Ln[km] * w + Rn[km] * (1 - w), rng, STROKE_TILT)
         up /= np.linalg.norm(up) + 1e-12
         out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, caps[r], _hard(angs[r], HARD_DEPTH) * k_size), angs[r], rng))
     info["strokes"] = len(out)
+    info["concave_trims"] = n_conc
     info["runs_dbg"] = [(round(float(lens[r]) / unit, 3), round(float(angs[r])), bool(on_flat[r]),
                          round(float(caps[r]) / unit, 4) if np.isfinite(caps[r]) else None,
                          sum(1 for j in jobs if j[0] == r)) for r in range(len(pieces))]
@@ -1077,6 +1133,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             continue
         if not raised and not fv and rng.random() >= CORNER_CHANCE:
             continue
+        if len(CC) and not _clear_of(c[None], CC, CONCAVE_CLEAR * CHISEL * float(size) * unit)[0]:
+            continue                             # (an inside corner meets this one: left alone)
         Wc = CHISEL * float(size) * unit
         cap = np.inf
         if TH is not None:
@@ -1131,6 +1189,8 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 continue                                                  # a moulding's steps)
             c = E[g].mean(0)
             if any(float(np.linalg.norm(c - q)) < 1.5 * Wc for q in chipped_at):
+                continue
+            if len(CC) and not _clear_of(c[None], CC, CONCAVE_CLEAR * Wc)[0]:
                 continue
             try:                             # (the ends meet out on the stone, not over a notch in it)
                 pr = _mm.findProjection(_mm.Vector3f(*map(float, c)), _mm.MeshPart(m))

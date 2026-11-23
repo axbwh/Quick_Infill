@@ -878,6 +878,20 @@ def bands(pieces, on_flat, gap, nv=None):
     return out, flat, ang, joined, bev
 
 
+SIZE_DEPTH = ((0.2, 1.0), (0.4, 1.25))  # (BU median thickness, x depth): a stone this thick or less keeps the depth, one
+#                                         this thick or more cuts 25 % deeper, between in proportion (Alex 23 Nov: the
+#                                         thin arch profiles "are good but the XL profile needs ... 25% (relative) more
+#                                         depth"; thin ones 0.17 - 0.19 BU, the XL 0.41)
+
+
+def size_depth(th):
+    """The depth factor for a stone of median thickness th (BU; None: 1)."""
+    if th is None or not np.isfinite(th):
+        return 1.0
+    (t0, k0), (t1, k1) = SIZE_DEPTH
+    return float(k0 + (k1 - k0) * np.clip((th - t0) / (t1 - t0), 0.0, 1.0))
+
+
 def _hard(angle, rng_):
     """HARD_DEPTH / HARD_KEEP at an edge turning `angle` degrees."""
     h = float(np.clip((angle - HARD_ANGLE[0]) / (HARD_ANGLE[1] - HARD_ANGLE[0]), 0.0, 1.0))
@@ -927,6 +941,10 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
     info["bevel_runs_joined"] = nj
     lens = np.array([float(_along(P)[-1]) for P, _l, _r, _i in pieces])
     TH = edge_thickness(m) if auto else None
+    # (a thick stone's cuts a little deeper: the stone's median thickness, from SIZE_DEPTH)
+    th_med = float(np.nanmedian(TH)) / unit if TH is not None and np.isfinite(TH).any() else None
+    k_size = size_depth(th_med)
+    info["size_depth"] = round(k_size, 3)
     SP = run_spacing(pieces, AUTO_RANGE[1] * unit / SPACING_SHARE) if auto else None
     vrun = {}                                # vertex -> the runs that end there (the corners' chisel)
     for r, (_P, _l, _r, I) in enumerate(pieces):
@@ -985,7 +1003,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
         w = rng.uniform(*LEAN)
         up = _tilt(Ln[km] * w + Rn[km] * (1 - w), rng, STROKE_TILT)
         up /= np.linalg.norm(up) + 1e-12
-        out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, caps[r], _hard(angs[r], HARD_DEPTH)), angs[r], rng))
+        out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, caps[r], _hard(angs[r], HARD_DEPTH) * k_size), angs[r], rng))
     info["strokes"] = len(out)
     info["runs_dbg"] = [(round(float(lens[r]) / unit, 3), round(float(angs[r])), bool(on_flat[r]),
                          round(float(caps[r]) / unit, 4) if np.isfinite(caps[r]) else None,
@@ -1025,7 +1043,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             cap = min(cap, DEPTH_SPACING * min(float(SP[r]) for r in vrun[vi]))
         if raised:                           # (one flat chip off the corner, 4 - 7 x a stroke's depth deep)
             rd = RAISED_DEPTH if n_long >= 2 else RAISED_DEPTH_FLAT
-            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc, RAISED_CAP * cap)
+            dc = min(rng.uniform(*rd) * STROKE_DEPTH * Wc * k_size, RAISED_CAP * cap)
             chip = corner_chip(c, n, dc, rng)
             if chip_too_big(m, chip, dc):    # (the corner is not a clean, standing corner: no chip)
                 continue
@@ -1045,7 +1063,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
             w = rng.uniform(*LEAN)
             up = _tilt(0.5 * (a_ * w + b_ * (1 - w)) + 0.5 * n, rng, STROKE_TILT)
             up /= np.linalg.norm(up) + 1e-12
-            out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, cap), _angle(a_, b_), rng))
+            out.append(chamfer_cutter(pts, up, stroke_depth(W, rng, cap, k_size), _angle(a_, b_), rng))
             nc += 1
     # (bevelled corners: three bands or more ending close together round a little rounded patch, no vertex they share)
     nb = 0
@@ -1094,7 +1112,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 n += q / (np.linalg.norm(q) + 1e-12)
             n /= np.linalg.norm(n) + 1e-12
             cap = DEPTH_THICK * thickness_in(m, c, -n, unit) if TH is not None else np.inf
-            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc, RAISED_CAP * cap)
+            dc = min(rng.uniform(*RAISED_DEPTH) * STROKE_DEPTH * Wc * k_size, RAISED_CAP * cap)
             # (the corner itself lies out past the bevels: the chip's base set from there)
             corner = c + n * float(np.mean([np.linalg.norm(E[i] - c) for i in g]))
             chip = corner_chip(corner, n, dc, rng)

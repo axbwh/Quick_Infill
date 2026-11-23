@@ -439,7 +439,9 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
     components = mm.MeshComponents.getAllComponents(mm.MeshPart(src)) if islands else []
     auto = job.mode == AUTO_DETAIL
     if len(components) <= 1:
-        res0 = auto_resolution(src, job.res) if auto else job.res
+        # (a tool that works its resolution out itself, island by island: Chip with its own Auto on: not twice)
+        own = bool(getattr(operation_fn, "own_resolution", False))
+        res0 = auto_resolution(src, job.res) if auto and not own else job.res
         got = operation_fn(src, res0)
         out, res, ratio = _unwrap(got, res0, job.ratio)
         if face_count(out) == 0:
@@ -463,7 +465,7 @@ def _compute(job, operation_fn, auto_decimate, islands, smart):
         island = mm.Mesh()
         island.addMeshPart(mm.MeshPart(src, bitset))
         res, ratio, mode = job.res, job.ratio, job.mode
-        if auto:
+        if auto and not getattr(operation_fn, "own_resolution", False):
             res = auto_resolution(island, res)
         elif smart and job.face_tags is not None:
             mask = mn.getNumpyBitSet(bitset)

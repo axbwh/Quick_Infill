@@ -9,7 +9,7 @@ from bpy.types import Operator
 
 from .meshlib_utils import get_meshlib
 from .offset_utils import (
-    cuda_offset, carve_weighted, compute_voxel_size, decimate_mesh, auto_decimate, face_count,
+    cuda_offset, carve_weighted, compute_voxel_size, decimate_mesh, auto_decimate, face_count, AUTO_DETAIL,
 )
 from .blender_meshlib_utils import (
     blender_to_meshlib, meshlib_to_blender_mesh, link_new_object, select_results, estimate_seconds, ToolCost,
@@ -18,8 +18,9 @@ from .meshlib_utils import JobCancelled
 from .job_runner import ModalJobMixin, JobSpec
 
 
-def build_infill(src_mesh, s, report=None):
-    """meshlib mesh in -> infill meshlib mesh out, using the Infill settings `s`."""
+def build_infill(src_mesh, s, report=None, auto=False):
+    """meshlib mesh in -> infill meshlib mesh out, using the Infill settings `s`. auto: the result decimated by Auto
+    Detail's error (offset_utils.AUTO_DETAIL), not back to the source's face count."""
     mm, _ = get_meshlib()
     working_res = int(float(s.target_res) * 1_000_000)
     resolution = float(s.resolution)
@@ -50,7 +51,8 @@ def build_infill(src_mesh, s, report=None):
 
     # Cavity Infill's rule is the shared Auto Decimation's Original mode: back to the source's face
     # count if it grew (always, whatever the Auto Decimation setting says)
-    return auto_decimate(out, initial_faces, vox, "ORIGINAL", None)
+    # (always, whatever the Auto Decimation setting says); with Auto Detail on, as far as its error allows instead
+    return auto_decimate(out, initial_faces, vox, AUTO_DETAIL if auto else "ORIGINAL", None)
 
 
 class _InfillSettingsSnapshot:
@@ -99,6 +101,7 @@ class QUICKINFILL_OT_heal_cavity(ModalJobMixin, Operator):
             return None
         snap = _InfillSettingsSnapshot(s)
         apply_mods = s.apply_modifiers_on_export
+        auto = bool(s.smart_resolution and getattr(s, "auto_detail", False))
         state = {"inputs": [], "outputs": [], "failed": [], "notes": []}
 
         def prepare():
@@ -113,7 +116,7 @@ class QUICKINFILL_OT_heal_cavity(ModalJobMixin, Operator):
                 try:
                     if control is not None:
                         control.check()
-                    out = build_infill(src, snap, lambda lvl, msg: state["notes"].append(msg))
+                    out = build_infill(src, snap, lambda lvl, msg: state["notes"].append(msg), auto=auto)
                     if face_count(out) == 0:
                         raise RuntimeError("the infill came out empty")
                     state["outputs"].append((obj, name, out))

@@ -98,7 +98,7 @@ def trim_thin(mesh, res):
 
 
 def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=None, dent_amount=None, auto=False,
-              cover=None):
+              cover=None, ground=None):
     """Trim Edges, Chip: chisel strokes on the sharp edges, dents on the flat faces (trim_dent), then Trim Thin.
     (mesh, None)."""
     from . import trim_dent as td
@@ -106,7 +106,7 @@ def chip_trim(mesh, res, dents, size, amount, unit, face_dents=None, dent_size=N
     out, tag = td.dent_trim(mesh, res, dents, size, amount, unit, face_dents=face_dents,
                             dent_size=td.DENT_SIZE if dent_size is None else dent_size,
                             dent_amount=td.DENT_AMOUNT if dent_amount is None else dent_amount, auto=auto, info=info,
-                            cover=cover)
+                            cover=cover, ground=ground)
     if auto and info.get("decimated"):
         return out, {"tag": tag, "decimated": True, "face_tags": info.get("face_tags")}
     return out, tag
@@ -121,7 +121,8 @@ def job(verts, faces, res, ratio, mode, auto_decimate, kind, *params):
     try:
         mn = get_mrmeshnumpy()
         src = mn.meshFromFacesVerts(faces, verts)
-        if mode == AUTO_DETAIL:               # (Auto Detail: the voxel from the mesh's own shape)
+        own = kind == "chip" and len(params) > 7 and bool(params[7])   # (Chip, its Auto on: it works it out itself)
+        if mode == AUTO_DETAIL and not own:   # (Auto Detail: the voxel from the mesh's own shape)
             res = auto_resolution(src, res)
         out, tag = KINDS[kind](src, res, *params)
         face_tags, done = None, False

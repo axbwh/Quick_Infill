@@ -270,6 +270,12 @@ def clean_from_settings(s):
     mode = s.decimate_mode
     if mode == 'OFF':
         return d, 0.5 * d, 'off', 0.0, 0.0
+    if getattr(s, "smart_resolution", False) and getattr(s, "auto_detail", False):
+        # Auto Detail (as the voxel tools: by error, no point count): Douglas-Peucker at its 0.1 mm, straight runs
+        # down to their two ends, curves keeping what their shape needs
+        from .trim_dent import DEC_TOL
+        from .offset_utils import AUTO_UNIT
+        return d, 0.5 * d, 'error', DEC_TOL * AUTO_UNIT, 0.0
     if mode == 'ORIGINAL':
         return d, 0.5 * d, 'original', vox, 0.0
     ratio = max(1e-4, min(1.0, float(s.decimation_ratio)))
@@ -367,6 +373,8 @@ def cleanup(rings, clean=None, n_points=None):
             out = [resample_ring(r, corner_dev, count=max(3, int(c))) for r, c in zip(rings, counts)]
         elif mode == 'step' and step > 0:
             out = [resample_ring(r, corner_dev, step=step) for r in rings]
+        elif mode == 'error':
+            out = [simplify_ring(r, corner_dev) if corner_dev > 0 else r for r in rings]
         else:
             out = list(rings)
     return [r for r in out if len(r) >= 3 and abs(area(r)) > MIN_AREA]

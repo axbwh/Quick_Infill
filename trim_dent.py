@@ -892,6 +892,8 @@ SIZE_DEPTH = ((0.2, 1.0), (0.4, 1.25))  # (BU median thickness, x depth): a ston
 #                                         depth"; thin ones 0.17 - 0.19 BU, the XL 0.41)
 
 
+THIN_KEEP = 0.75           # x: every stroke of a thin stone kept this often, a thick one's always (Alex 23 Nov: the S arch
+#                            ring, seven stones each chipped at both ends, looked busy: "lower it by 25% (relative)")
 THIN_DETAIL_KEEP = 0.3     # x: a thin stone's edges in its detail (not along a flat or joint face) keep this share of
 #                            their strokes, a thick one all (Alex 23 Nov: "reduce the frequency of cuts on the detailed
 #                            parts of the thin profile 70% (relative)")
@@ -1027,6 +1029,7 @@ def place_strokes(m, size=1.0, amount=AMOUNT, unit=1.0, seed=0, cut_faces=None, 
                 k_keep = keep                              # (a knife edge: trimmed all along)
             if not on_flat[r]:                             # (the detail of a thin stone: fewer cuts)
                 k_keep *= THIN_DETAIL_KEEP + (1.0 - THIN_DETAIL_KEEP) * thick_share(k_size)
+            k_keep *= THIN_KEEP + (1.0 - THIN_KEEP) * thick_share(k_size)     # (and a thin stone's strokes overall)
             if rng.random() < k_keep:
                 jobs.append((r, t, min(t + ln, L + 0.4 * W), W))
             t += ln + rng.uniform(*STROKE_GAP) * W
@@ -1377,17 +1380,28 @@ def cover_of(m, others, unit=1.0):
     return out
 
 
-def covered_fn(cover, unit=1.0):
-    """covered(p, half) -> True where another stone lies over the point p: its surface within COVER_GAP, or
-    within COVER_SHARE of the dent's half width more. cover: [(V, F)] (cover_of); none: never covered."""
+GROUND_DOWN = 0.5      # a face turned down this much (its normal's z under minus this) ...
+GROUND_REACH = 0.3     # BU: ... within this of the ground (the lowest point of the stones worked together) rests on it
+
+
+def covered_fn(cover, unit=1.0, ground=None):
+    """covered(p, half, n) -> True where the point p (face normal n) cannot be seen: another stone lies over it (its
+    surface within COVER_GAP, or within COVER_SHARE of the dent's half width more), or it is a bottom face resting on the
+    ground (Alex 2026-11-23: "bottom faces should count as obscured": turned down, within GROUND_REACH of `ground`,
+    the lowest z of the stones worked together). cover: [(V, F)] (cover_of)."""
+    def grounded(p, n):
+        return (ground is not None and n is not None and float(n[2]) < -GROUND_DOWN
+                and float(p[2]) <= float(ground) + GROUND_REACH * unit)
     if not cover:
-        return lambda p, half: False
+        return lambda p, half, n=None: grounded(p, n)
     mm, mn = _ml()
     # (the meshes are held by the test itself: a MeshPart only points at its mesh, and one freed under it crashed Blender)
     meshes = [mn.meshFromFacesVerts(np.ascontiguousarray(F_, np.int32), np.ascontiguousarray(V_, np.float32))
               for V_, F_ in cover]
 
-    def covered(p, half, meshes=meshes):
+    def covered(p, half, n=None, meshes=meshes):
+        if grounded(p, n):
+            return True
         lim = COVER_GAP * unit + COVER_SHARE * half
         v = mm.Vector3f(float(p[0]), float(p[1]), float(p[2]))
         for m_ in meshes:
@@ -1397,7 +1411,8 @@ def covered_fn(cover, unit=1.0):
     return covered
 
 
-def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None, cover=None):
+def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, cut_faces=None, info=None, cover=None,
+                ground=None):
     """Stone Damage's dents on the flat faces of m: [(V, F)] in the mesh's units. dents: [(V, F)] in Blender units,
     Z out of the stone. cut_faces: only the flat faces marked cut (Only Cut Edges)."""
     info = {} if info is None else info
@@ -1410,7 +1425,8 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
     regs, ar = flat_all(V, F, unit, info)
     regs = [r for r in regs if r[2] >= FLAT_AREA * unit * unit]
     info["flat_faces"] = len(regs)
-    covered = covered_fn(cover, unit)
+    covered = covered_fn(cover, unit, ground)
+    under = covered_fn(cover, unit)              # (under another stone only: what sends the damage to the sides)
     info["covered_skips"] = 0
     out = []
     for reg, n, A in regs:
@@ -1450,8 +1466,8 @@ def place_dents(m, dents, size=DENT_SIZE, amount=DENT_AMOUNT, unit=1.0, seed=0, 
                 d = B_ - A_
                 t = np.clip(((p - A_) * d).sum(1) / np.maximum((d * d).sum(1), 1e-24), 0, 1)
                 if float(np.linalg.norm(A_ + d * t[:, None] - p, axis=1).min()) >= DENT_EDGE * half:
-                    if covered(p, half):             # (under the next stone: not here)
-                        info["covered_skips"] += 1
+                    if covered(p, half, n):          # (under the next stone, or on the ground: not here)
+                        info["covered_skips"] += 1 if under(p, half) else 0
                         continue
                     break
             else:
@@ -1605,7 +1621,7 @@ def curved_dents(V, F, dents, size, unit, rng, info, flat=None, covered=None, al
                 sv = np.linalg.svd(fn[probe] * np.sqrt(ar[probe])[:, None], compute_uv=False)
                 if sv[2] > CURVED_ONE_WAY * sv[0]:
                     continue                         # (curved both ways there: a leaf, carving, a rounded corner)
-            if covered is not None and covered(p, half):
+            if covered is not None and covered(p, half, fn[f]):
                 info["covered_skips"] = info.get("covered_skips", 0) + 1
                 continue                             # (under the next stone)
             break
@@ -1633,7 +1649,7 @@ def _holes(m):
 
 
 def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_faces=None, info=None,
-              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False, cover=None):
+              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False, cover=None, ground=None):
     """mesh worked over (a new mesh; the input is kept): Carve's chisel strokes on its sharp edges and corners
     (size: x Carve's Standard chisel, amount: strokes per BU of edge), Stone Damage's dents on its flat faces
     (face_dents: [(V, F)] in Blender units, Z out of the stone; dent_size: x their own size; dent_amount: per
@@ -1646,7 +1662,7 @@ def dent_chip(mesh, dents, size=1.0, amount=AMOUNT, unit=1.0, seed=None, cut_fac
     if seed is None:
         seed = _seed_of(mn.getNumpyVerts(m))
     cuts = place_strokes(m, size, amount, unit, seed, cut_faces, info, auto)
-    cuts += place_dents(m, face_dents or [], dent_size, dent_amount, unit, seed, cut_faces, info, cover)
+    cuts += place_dents(m, face_dents or [], dent_size, dent_amount, unit, seed, cut_faces, info, cover, ground)
     info.pop("_flat", None)
     info["place_s"] = time.perf_counter() - t0
     if not cuts:
@@ -1725,7 +1741,7 @@ def _joined(meshes):
 
 
 def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=None, info=None,
-              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False, cover=None):
+              face_dents=None, dent_size=DENT_SIZE, dent_amount=DENT_AMOUNT, auto=False, cover=None, ground=None):
     """The Chip method of Trim Edges, the way the operator runs it, island by island (cover: the other stones of the
     run near this one, [(V, F)] or meshes: no dent where one of them, or another island of this mesh, lies over it): each loose part gets its own
     strokes and dents, its own detail (auto: detail_tag) and its own Trim Thin, then they are put back together side by
@@ -1737,6 +1753,10 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
     parts, tags, ftags = [], [], []
     isl = islands_of(mesh)
     info["islands"] = len(isl)
+    if ground is None:                       # (worked alone: its own lowest point is what it stands on)
+        _mm, _mn = _ml()
+        _v = _mn.getNumpyVerts(mesh)
+        ground = float(_v[:, 2].min()) if len(_v) else None
     for k, (m, idx) in enumerate(isl):
         ii = {}
         r = res
@@ -1749,7 +1769,7 @@ def dent_trim(mesh, res, dents, size=1.0, amount=AMOUNT, unit=1.0, cut_faces=Non
             cf = cf[idx[idx < len(cf)]] if len(cf) else None
         cov = cover_of(m, list(cover or []) + [o for j, (o, _i) in enumerate(isl) if j != k], unit)
         chipped = dent_chip(m, dents, size, amount, unit, cut_faces=cf, info=ii, face_dents=face_dents,
-                            dent_size=dent_size, dent_amount=dent_amount, auto=auto, cover=cov)
+                            dent_size=dent_size, dent_amount=dent_amount, auto=auto, cover=cov, ground=ground)
         try:
             got = trim_thin(chipped, r)[0]
             if auto:                         # (as far as DEC_TOL allows: no face target)

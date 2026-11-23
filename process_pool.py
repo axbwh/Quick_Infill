@@ -19,6 +19,10 @@ import threading
 ADDON_DIR = os.path.dirname(os.path.abspath(__file__))
 # Below this many objects the start-up and the copying are not worth it.
 MIN_JOBS = int(os.environ.get("QI_WORKER_MIN_JOBS", "12"))   # env: for tests
+# Chip is mostly Python (finding edges and faces, placing strokes), which threads in Blender run one at a time: from
+# four stones the workers win (8 stones 1.56 -> 0.57 s, 4 big pillar parts 2.46 -> 1.6 s, the same results; two
+# stones are no faster). The pool's start, half a second, is paid once a session.
+CHIP_MIN_JOBS = int(os.environ.get("QI_WORKER_MIN_JOBS", "4"))
 WORKERS = max(2, min(8, (os.cpu_count() or 4) // 4))
 
 _pool = None

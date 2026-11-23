@@ -510,7 +510,7 @@ class PipelineRun:
 
     def __init__(self, objects, operation_fn, output_suffix, *, resolution, auto_decimate=True,
                  replace_original=True, settings=None, islands=None, smart=None, apply_modifiers=None,
-                 parallel=True, strip_flat=(), process_job=None):
+                 parallel=True, strip_flat=(), process_job=None, process_min_jobs=None):
         s = settings or bpy.context.scene.quick_infill_settings
         self.objects = list(objects)
         self.operation_fn = operation_fn
@@ -527,6 +527,7 @@ class PipelineRun:
         # (worker function name in qi_worker, extra args[, job -> more args of its own]): run the objects in worker processes
         # (process_pool.py) when there are enough of them; see _compute_in_processes.
         self.process_job = process_job
+        self.process_min_jobs = process_min_jobs   # (None: process_pool.MIN_JOBS)
         self.jobs = []
         self.pr = ProcessResult()
         self.cancelled = False
@@ -591,7 +592,8 @@ class PipelineRun:
         """Run every job in the worker processes. False if that isn't possible here (too few jobs,
         islands, no workers); a job a worker couldn't finish is then done in Blender."""
         from . import process_pool
-        if self.process_job is None or self.islands or len(self.jobs) < process_pool.MIN_JOBS:
+        least = process_pool.MIN_JOBS if self.process_min_jobs is None else self.process_min_jobs
+        if self.process_job is None or self.islands or len(self.jobs) < least:
             return False
         pool = process_pool.get_pool()
         if pool is None:
@@ -600,7 +602,8 @@ class PipelineRun:
         mn = get_mrmeshnumpy()
         fn = getattr(process_pool.worker_module(), self.process_job[0])
         futures = {}
-        for job in self.jobs:
+        # Biggest first: the wait is as long as the last job to finish, and a big one started last sets it.
+        for job in sorted(self.jobs, key=lambda j: -j.src.topology.numValidFaces()):
             src = job.src
             if src.topology.numValidFaces() != src.topology.faceSize():
                 src = type(src)(src)

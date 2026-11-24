@@ -452,14 +452,52 @@ def grow_like_quick_infill(mesh, dist, voxel, ratio, mode):
     return out
 
 
+MAX_FACES = 1_000_000        # Alex 2026-11-24: Merge and Finalize's result stays under 1 million triangles
+FLAT_TOL = 1e-3              # a face is "on the bottom" when all three corners are within this of it (mm)
+
+
+def cap_faces(mesh, max_faces=MAX_FACES, bottom_z=None):
+    """Bring a mesh over max_faces down to just under it with meshlib's decimateMesh (error-driven
+    edge collapse: flat areas lose the most, detail the least, and the triangles stay well shaped).
+    The faces lying on the bottom plane are left out of it, and so are their corner points, so the
+    flat bottom stays exactly flat (decimating it too let the bottom drift a few microns).
+    A bottom that alone holds more faces than the limit keeps them: the result is then over it.
+    Returns the number of faces removed (0: the mesh was already under the limit)."""
+    n = face_count(mesh)
+    if not max_faces or n < max_faces:
+        return 0
+    mm, mn = get_meshlib()[0], get_mrmeshnumpy()
+    verts = mn.getNumpyVerts(mesh)
+    faces = mn.getNumpyFaces(mesh.topology)
+    z = float(verts[:, 2].min()) if bottom_z is None else float(bottom_z)
+    on = (np.abs(verts[faces][:, :, 2] - z) < FLAT_TOL).all(axis=1)
+    s = mm.DecimateSettings()
+    if on.any():
+        region = mm.FaceBitSet()
+        region.resize(mesh.topology.faceSize(), True)
+        for i in np.nonzero(on)[0]:
+            region.set(mm.FaceId(int(i)), False)
+        s.region = region
+        s.touchBdVerts = False
+    target = int(max_faces * 0.99)                   # a margin: "under", not "at"
+    s.maxDeletedFaces = n - target
+    s.maxError = 1e9                                 # the count is the limit, not the error
+    s.packMesh = True
+    check_cancelled()
+    mm.decimateMesh(mesh, s)
+    check_cancelled()
+    return n - face_count(mesh)
+
+
 def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=None, delete_islands=True,
-                  grow_settings=None, face_tags=None, regrow=False):
+                  grow_settings=None, face_tags=None, regrow=False, max_faces=MAX_FACES):
     """meshes (meshlib, world space) -> (one watertight meshlib mesh, Health, Flatness or None).
 
     blank: closed meshlib mesh the union is intersected with (the tower blank). Its
            lowest point is the bottom; plate_z is then ignored.
     plate_z: without a blank, everything below is cut away, leaving a flat face on the plate.
     delete_islands: keep only the main body (no floating or inside shells).
+    max_faces: a result with more triangles is decimated to just under it (cap_faces); 0 = no limit.
     grow_settings: per mesh (voxel mm, ratio, decimate mode) for the SHIFT grow with a blank:
                    each object's resolution tag (as Quick Infill's Grow with Smart), else the panel's.
     regrow: grow the islands that reach the blank's surface by SHIFT before the blank cut. Off: nothing is grown.
@@ -600,6 +638,15 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         say(f"{n} small hole(s) left by splitting Blender's n-gons into triangles were closed")
     if out.topology.numValidFaces() != out.topology.faceSize():
         out.pack()
+    before = face_count(out)
+    cut = cap_faces(out, max_faces, bottom_z)
+    if cut:
+        after = face_count(out)
+        if after < max_faces:
+            say(f"reduced from {before:,} to {after:,} triangles to stay under {max_faces:,} (bottom face left as it was)")
+        else:
+            say(f"reduced from {before:,} to {after:,} triangles: still over {max_faces:,}, because the flat bottom, "
+                f"which is left as it is, holds most of them")
     health = Health(out)
     flat = Flatness(out, bottom_z) if bottom_z is not None else None
     return out, health, flat

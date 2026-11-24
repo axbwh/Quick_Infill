@@ -212,4 +212,37 @@ if not args:
     check(sel == ["Speck"] and bpy.context.view_layer.objects.active.name == "Speck",
           f"only the invalid object is selected and active ({sel})")
 
+# --- the result stays under the triangle limit, and the flat bottom is left exactly as it was ---
+if True:
+    import numpy as np
+    import meshlib.mrmeshpy as mm
+    import meshlib.mrmeshnumpy as mn
+    check(MF.MAX_FACES == 1_000_000, "Merge and Finalize's limit is 1 million triangles")
+    sph = mm.makeUVSphere(10.0, 200, 200)                    # ~80 k faces, pressed flat 4 below the centre
+    sv = mn.getNumpyVerts(sph).copy(); sv[:, 2] = np.maximum(sv[:, 2], -4.0)
+    m = mn.meshFromFacesVerts(mn.getNumpyFaces(sph.topology), sv)
+
+    def bottom(mesh):
+        v = mn.getNumpyVerts(mesh); f = mn.getNumpyFaces(mesh.topology); t = v[f]
+        on = (np.abs(t[:, :, 2] + 4.0) < 1e-4).all(axis=1)
+        ar = 0.5 * np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1)
+        return int(on.sum()), float(ar[on].sum()), float(v[:, 2].min())
+
+    n0 = m.topology.numValidFaces(); b0 = bottom(m); vol0 = m.volume()
+    same = mm.Mesh(m)
+    check(MF.cap_faces(same, n0 + 1, -4.0) == 0 and same.topology.numValidFaces() == n0, "a mesh under the limit is left alone")
+    cut = MF.cap_faces(m, 45_000, -4.0)
+    n1 = m.topology.numValidFaces(); b1 = bottom(m)
+    check(cut == n0 - n1 and n1 < 45_000, f"a mesh over the limit comes out under it ({n0} -> {n1})")
+    check(b1[0] == b0[0] and abs(b1[1] - b0[1]) < 1e-3 and abs(b1[2] + 4.0) < 1e-6,
+          f"the flat bottom is untouched ({b0} -> {b1})")
+    check(m.topology.isClosed() and abs(m.volume() - vol0) / vol0 < 0.01, "still closed, volume within 1 %")
+    free = mm.Mesh(same)
+    MF.cap_faces(free, 45_000, None)
+    check(bottom(free)[0] == b0[0], "without a known bottom height the lowest flat face is kept too")
+    dense = mm.Mesh(same)                                    # the bottom alone holds more faces than the limit
+    MF.cap_faces(dense, 20_000, -4.0)
+    bd = bottom(dense)
+    check(bd[0] == b0[0] and abs(bd[2] + 4.0) < 1e-6 and dense.topology.isClosed(),
+          f"a bottom with more faces than the limit is still left alone ({dense.topology.numValidFaces()} faces in all)")
 print("RESULT", "FAIL %d" % len(fails) if fails else "ALL PASS")

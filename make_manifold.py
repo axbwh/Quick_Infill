@@ -456,6 +456,80 @@ MAX_FACES = 1_000_000        # Alex 2026-11-24: Merge and Finalize's result stay
 FLAT_TOL = 1e-3              # a face is "on the bottom" when all three corners are within this of it (mm)
 
 
+UNCROSS_TOL = 0.02           # mm: the most the surface may differ after uncross (well under print resolution)
+
+
+def crossing_faces(mesh):
+    mm, _ = get_meshlib()
+    # (not SelfIntersections.getFaces: that one misses crossings between separate shells)
+    return int(mm.findSelfCollidingTrianglesBS(mm.MeshPart(mesh)).count())
+
+
+def _bottom_area(mesh, z):
+    mn = get_mrmeshnumpy()
+    v = mn.getNumpyVerts(mesh)
+    t = v[mn.getNumpyFaces(mesh.topology)]
+    on = (np.abs(t[:, :, 2] - z) < FLAT_TOL).all(axis=1)
+    area = 0.5 * np.linalg.norm(np.cross(t[on][:, 1] - t[on][:, 0], t[on][:, 2] - t[on][:, 0]), axis=1)
+    return float(area.sum()), float(v[:, 2].min())
+
+
+def uncross(mesh, bottom_z=None, tol=UNCROSS_TOL):
+    """Take out faces that cut through each other, keeping every other triangle as it is:
+    meshlib's selfBoolean cuts the mesh along the lines where it crosses itself and swaps the
+    sheets over, which frees the hidden overlap as loose scraps; the main body is kept.
+    (One pass only: a second pass on its own result made things worse.)
+
+    The result is CHECKED against the mesh it came from and only used when all of this holds:
+      - fewer crossing faces than before, still closed;
+      - no point of the new surface is more than tol off the old surface;
+      - no point of the old surface sticks out of the new one by more than tol
+        (points now inside it are the hidden overlap, which is what was removed);
+      - the bottom is where it was, with the same flat area.
+    Otherwise the mesh is returned untouched. Returns (mesh to use, note for the report or None)."""
+    mm, mn = get_meshlib()[0], get_mrmeshnumpy()
+    before = crossing_faces(mesh)
+    if before == 0:
+        return mesh, None
+    try:
+        cut = mm.selfBoolean(mesh)
+    except Exception as e:                       # (experimental in meshlib: never let it stop the run)
+        return mesh, f"{before} faces cut through each other; the fix could not run ({e}), mesh left as it was"
+    check_cancelled()
+    comps = mm.MeshComponents.getAllComponents(mm.MeshPart(cut))
+    if not len(comps):
+        return mesh, f"{before} faces cut through each other; the fix gave nothing back, mesh left as it was"
+    main = max(comps, key=lambda c: c.count())
+    out = mm.Mesh()
+    out.addMeshPart(mm.MeshPart(cut, main))
+    why = None
+    after = crossing_faces(out)
+    if after >= before:
+        why = f"it did not lower the count ({before} -> {after})"
+    elif mesh.topology.isClosed() and not out.topology.isClosed():
+        why = "it left the mesh open"
+    if why is None:
+        check_cancelled()
+        new_off = float(np.abs(np.asarray(mm.findSignedDistances(mesh, out).vec)).max())
+        if new_off > tol:
+            why = f"the surface moved {new_off:.3f} mm"
+    if why is None:
+        check_cancelled()
+        sticks_out = float(np.asarray(mm.findSignedDistances(out, mesh).vec).max())
+        if sticks_out > tol:
+            why = f"it removed something that stood {sticks_out:.3f} mm proud of the surface"
+    if why is None:
+        z = float(mn.getNumpyVerts(mesh)[:, 2].min()) if bottom_z is None else float(bottom_z)
+        a0, z0 = _bottom_area(mesh, z)
+        a1, z1 = _bottom_area(out, z)
+        if abs(z1 - z0) > 1e-6 or abs(a1 - a0) > 1e-3 * max(a0, 1.0):
+            why = f"the bottom changed (area {a0:.2f} -> {a1:.2f} mm2, lowest point {z0:.5f} -> {z1:.5f})"
+    if why is not None:
+        return mesh, f"{before} faces cut through each other; the fix was not used because {why}"
+    return out, (f"faces cutting through each other: {before} -> {after} (triangles kept as they were, "
+                 f"nothing moved more than {tol:g} mm, bottom unchanged)")
+
+
 def cap_faces(mesh, max_faces=MAX_FACES, bottom_z=None):
     """Bring a mesh over max_faces down to just under it with meshlib's decimateMesh (error-driven
     edge collapse: flat areas lose the most, detail the least, and the triangles stay well shaped).
@@ -647,6 +721,11 @@ def make_manifold(meshes, plate_z=None, blank=None, open_shell_voxel=0.1, log=No
         else:
             say(f"reduced from {before:,} to {after:,} triangles: still over {max_faces:,}, because the flat bottom, "
                 f"which is left as it is, holds most of them")
+    # After the reduction, not before: on Alex's K tower roof the other order left 625 crossing faces,
+    # this one 4 (reducing makes new crossings, and uncross takes those out too).
+    out, note = uncross(out, bottom_z)
+    if note:
+        say(note)
     health = Health(out)
     flat = Flatness(out, bottom_z) if bottom_z is not None else None
     return out, health, flat

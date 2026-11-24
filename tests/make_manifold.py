@@ -245,4 +245,32 @@ if True:
     bd = bottom(dense)
     check(bd[0] == b0[0] and abs(bd[2] + 4.0) < 1e-6 and dense.topology.isClosed(),
           f"a bottom with more faces than the limit is still left alone ({dense.topology.numValidFaces()} faces in all)")
+# --- faces cutting through each other are taken out, and only when nothing else changes ---
+if True:
+    import numpy as np
+    import meshlib.mrmeshpy as mm
+    import meshlib.mrmeshnumpy as mn
+    a = mm.makeCube(mm.Vector3f(10, 10, 10), mm.Vector3f(0, 0, 0))
+    b = mm.makeCube(mm.Vector3f(10, 10, 10), mm.Vector3f(6, 4, 3))          # overlaps a, 3 higher: a's bottom is the bottom
+    two = mm.Mesh(a); two.addMesh(b)
+    n0 = MF.crossing_faces(two)
+    fixed, note = MF.uncross(two, 0.0)
+    check(n0 > 0 and fixed is not two and MF.crossing_faces(fixed) == 0, f"two overlapping boxes: crossing faces {n0} -> {MF.crossing_faces(fixed)} ({note})")
+    check(fixed.topology.isClosed() and len(mm.MeshComponents.getAllComponents(mm.MeshPart(fixed))) == 1, "the result is one closed shell")
+    check(abs(MF._bottom_area(fixed, 0.0)[0] - 100) < 1e-2 and abs(MF._bottom_area(fixed, 0.0)[1]) < 1e-6,
+          f"its bottom is still the first box's, flat at 0 ({MF._bottom_area(fixed, 0.0)})")
+    clean = mm.makeCube(mm.Vector3f(10, 10, 10), mm.Vector3f(0, 0, 0))
+    same, note = MF.uncross(clean, 0.0)
+    check(same is clean and note is None, "a mesh with no crossing faces is not touched")
+    keep_sb = mm.selfBoolean
+    try:
+        def bad(m):                                   # a 'fix' that moves the surface must be thrown away
+            r = keep_sb(m); r.transform(mm.AffineXf3f.translation(mm.Vector3f(0.0, 0.0, 0.5))); return r
+        mm.selfBoolean = bad
+        two2 = mm.Mesh(a); two2.addMesh(b)
+        back, note = MF.uncross(two2, 0.0)
+        check(back is two2 and "not used" in (note or ""), f"a fix that moves the surface is thrown away ({note})")
+    finally:
+        mm.selfBoolean = keep_sb
+
 print("RESULT", "FAIL %d" % len(fails) if fails else "ALL PASS")

@@ -169,7 +169,7 @@ STL_COLLECTION = "STLs"
 
 
 def stl_collection(scene):
-    """The collection Make Manifold puts its result in: "STLs" (made at the top of the scene if
+    """The collection Merge and Finalize puts its result in: "STLs" (made at the top of the scene if
     there is none, and linked to the scene if it exists but is not in it)."""
     coll = bpy.data.collections.get(STL_COLLECTION)
     if coll is None:
@@ -203,7 +203,7 @@ def _meshlib_face_tags(obj, face_map, apply_modifiers):
 
 class QUICKINFILL_OT_make_manifold(Operator):
     bl_idname = "quick_infill.make_manifold"
-    bl_label = "Make Manifold"
+    bl_label = "Merge and Finalize"
     bl_description = ("Unite the selected objects (stones, infill, plugs) into ONE watertight object with Blender's "
                       "Manifold solver and intersect it with the Intersect With object, like the Merge_Manifold "
                       "geometry nodes. Only the main body is kept: unconnected islands are deleted. "
@@ -247,7 +247,7 @@ class QUICKINFILL_OT_make_manifold(Operator):
                                                             grow_settings=grow_settings, face_tags=face_tags,
                                                             regrow=s.manifold_regrow)
         except JobCancelled:
-            self.report({'WARNING'}, "Make Manifold cancelled. Nothing was changed.")
+            self.report({'WARNING'}, "Merge and Finalize cancelled. Nothing was changed.")
             return {'CANCELLED'}
         except make_manifold.InvalidParts as e:
             # Alex 2026-11-23: say which part made it fail, and select it
@@ -258,11 +258,11 @@ class QUICKINFILL_OT_make_manifold(Operator):
                 o.select_set(True)
             context.view_layer.objects.active = bad[0]
             names = ", ".join(f"'{o.name}'" for o in bad[:5]) + (f" and {len(bad) - 5} more" if len(bad) > 5 else "")
-            self.report({'ERROR'}, f"Make Manifold failed because {names} "
+            self.report({'ERROR'}, f"Merge and Finalize failed because {names} "
                                    f"{'is' if len(bad) == 1 else 'are'} invalid: {e} (now selected)")
             return {'CANCELLED'}
         except Exception as e:
-            self.report({'ERROR'}, f"Make Manifold failed: {e}")
+            self.report({'ERROR'}, f"Merge and Finalize failed: {e}")
             import traceback
             traceback.print_exc()
             return {'CANCELLED'}
@@ -270,24 +270,24 @@ class QUICKINFILL_OT_make_manifold(Operator):
         context.view_layer.update()
         select_results([ob])
         for n in notes:
-            self.report({'INFO'}, "Make Manifold: " + n)
+            self.report({'INFO'}, "Merge and Finalize: " + n)
         if flat is not None:
-            self.report({'INFO'} if flat.flat() else {'WARNING'}, "Make Manifold: " + flat.text())
+            self.report({'INFO'} if flat.flat() else {'WARNING'}, "Merge and Finalize: " + flat.text())
         if health.clean():
-            self.report({'INFO'}, f"Make Manifold: '{ob.name}' is {health.text()}")
+            self.report({'INFO'}, f"Merge and Finalize: '{ob.name}' is {health.text()}")
         else:
-            self.report({'WARNING'}, f"Make Manifold: '{ob.name}' still has {health.text()}")
+            self.report({'WARNING'}, f"Merge and Finalize: '{ob.name}' still has {health.text()}")
         return {'FINISHED'}
 
 
 def draw_make_manifold(layout, context, scale_y=1.0):
-    """Make Manifold as it is drawn everywhere (here and in Ashlarize, under Make Print Ready):
+    """Merge and Finalize as it is drawn everywhere (here and in Ashlarize, under Make Print Ready):
     the button with Regrow beside it, and Intersect With under them. Nothing else."""
     s = context.scene.quick_infill_settings
     col = layout.column(align=True)
     row = col.row(align=True)
     row.scale_y = scale_y
-    row.operator("quick_infill.make_manifold", text="Make Manifold", icon='MESH_CUBE')
+    row.operator("quick_infill.make_manifold", text="Merge and Finalize", icon='MESH_CUBE')
     row.prop(s, "manifold_regrow", text="Regrow", toggle=True)
     col.prop(s, "manifold_blank", text="Intersect With")
 

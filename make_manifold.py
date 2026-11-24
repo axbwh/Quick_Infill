@@ -1,5 +1,5 @@
 """
-Make Manifold: turn a pile of overlapping closed meshes (stones, blank, infill,
+Merge and Finalize (operator quick_infill.make_manifold): turn a pile of overlapping closed meshes (stones, blank, infill,
 plugs) into ONE watertight mesh that a slicer accepts, without leaving Blender.
 
     1. every loose shell of the selection is taken apart; pieces under 0.2 mm

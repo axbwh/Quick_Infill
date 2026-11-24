@@ -62,7 +62,7 @@ ruff check .
 ## License
 GPL-2.0-or-later (see blender_manifest.toml).
 
-## Print Check, Seal Cavities, Make Manifold (1.2.0)
+## Print Check, Seal Cavities, Merge and Finalize (1.2.0)
 
 Sidebar > Quick Infill > Print Check. Select everything that prints as one piece (stones, blank, infill) first.
 
@@ -72,7 +72,7 @@ Sidebar > Quick Infill > Print Check. Select everything that prints as one piece
   `PC_NoContact` blue).
 - **Seal Cavities** adds a `<active>_Plugs` object that fills every sealed cavity. Sealed cavities cannot be seen from
   outside, so nothing visible changes.
-- **Make Manifold** unites the selection into one watertight `<active>_Solid` object in the `STLs` collection
+- **Merge and Finalize** unites the selection into one watertight `<active>_Solid` object in the `STLs` collection
   (Blender's Manifold solver) and intersects it with the *Intersect With* object, if one is set. Unconnected islands
   are deleted. *Regrow* grows the pieces that reach the blank's surface a hair first, so they are cut once, fresh.
   Self-intersections and zero-size faces are reported, not repaired. Ashlarize shows the same button under

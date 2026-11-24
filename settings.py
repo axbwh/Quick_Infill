@@ -384,7 +384,7 @@ class QuickInfillSettings(PropertyGroup):
         default="BUILDING_ACCURATE", options={'HIDDEN'},
     )
 
-    # ----- Print Check / Seal Cavities / Make Manifold -----
+    # ----- Print Check / Seal Cavities / Merge and Finalize -----
     check_voxel: FloatProperty(
         name="Check Voxel", description="Voxel size (and layer height) Print Check and Seal Cavities look at the model with, in mm",
         default=0.2, min=0.05, max=1.0, precision=3,
@@ -403,7 +403,7 @@ class QuickInfillSettings(PropertyGroup):
     )
     manifold_regrow: BoolProperty(
         name="Regrow",
-        description="Make Manifold grows the islands that reach the blank's surface (outside it, or cut flush "
+        description="Merge and Finalize grows the islands that reach the blank's surface (outside it, or cut flush "
                     "against it) by 0.0005 with Quick Infill's Grow (at their resolution tag) before cutting with "
                     "the blank, so they are cut once, fresh. Islands inside the blank are not grown. Off: no mesh "
                     "is grown",
@@ -411,7 +411,7 @@ class QuickInfillSettings(PropertyGroup):
     )
     manifold_blank: PointerProperty(
         name="Intersect With", type=bpy.types.Object,
-        description="Optional blank: Make Manifold intersects the united result with this object (read with its "
+        description="Optional blank: Merge and Finalize intersects the united result with this object (read with its "
                     "modifiers), after the union",
         poll=lambda self, ob: ob.type == 'MESH',
     )
